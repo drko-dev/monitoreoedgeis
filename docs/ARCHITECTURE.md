@@ -5,34 +5,52 @@
 Describes the Go core as it exists today (Hito A) and the target architecture it
 is being built towards. Anything marked **future** does not exist yet.
 
+## Fundamentals
+
+- **Core: Go.** One single codebase.
+- **Targets: Linux amd64 and Linux arm64.**
+- **Hardware agnostic.** Raspberry Pi is an *option*, not a requirement. Orange
+  Pi, mini-PC, industrial appliance, VM and bare-metal Linux server are equally
+  valid targets.
+- **Three processing modes** — `cloud`, `hybrid`, `edge` — served by the same
+  binary, not by three products.
+
 ## Target architecture
 
 ```
-                 SaaS
-                  ^
-                  |
-              HTTPS/WSS
-                  |
-            GEO CAM EDGE
-             CORE — GO
-        _________|_________
-       |         |         |
- discovery   transport   health
-       |
- cameras/RTSP
-       |
- video pipeline
-       |
- processing mode
-     /     |      \
- cloud  hybrid   edge
-                 |
-           Vision Worker
-          Python / YOLO
+                 GEO CAM SaaS
+                       ^
+                       |
+                  HTTPS / WSS
+                       |
+              GEO CAM EDGE CORE
+                     GO
+             _________|_________
+            |         |         |
+        discovery transport telemetry
+            |
+        cameras / RTSP
+            |
+        video pipeline
+            |
+       processing mode
+        /     |      \
+     cloud  hybrid   edge
+                       |
+                Vision Worker
+                Python / YOLO
 ```
 
 > The Vision Worker **does not exist yet**. No Python, no YOLO, no PyTorch is
 > present in this repository or in the container image.
+
+Mode semantics:
+
+| Mode     | Meaning                                                       |
+| -------- | ------------------------------------------------------------- |
+| `cloud`  | Lightweight gateway. No local YOLO.                           |
+| `hybrid` | Local preprocessing + Cloud processing.                       |
+| `edge`   | Full local inference (via the future Vision Worker).          |
 
 ## Design decisions
 

@@ -8,6 +8,18 @@ config, identity, platform detection, health, logging and lifecycle. There is no
 camera, vision, RTSP, ONVIF or YOLO functionality yet (see
 [Not implemented yet](#not-implemented-yet)).
 
+## Project documentation
+
+This README is the entry point only. The project's persistent memory lives in
+these documents — read them in this order:
+
+| Document                                             | Answers                            |
+| ---------------------------------------------------- | ---------------------------------- |
+| [AGENTS.md](AGENTS.md)                               | Working rules and constraints      |
+| [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)     | Where the project stands right now |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)         | Architecture and technical decisions |
+| [docs/ROADMAP.md](docs/ROADMAP.md)                   | Master backlog A–Z and block status |
+
 ## Why Go
 
 - Single compiled binary, no runtime to install on the gateway
