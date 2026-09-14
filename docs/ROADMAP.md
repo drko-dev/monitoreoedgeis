@@ -9,7 +9,7 @@
 | Block | Status                |
 | ----- | --------------------- |
 | A     | DONE / VALIDATED LOCAL |
-| B     | NEXT                  |
+| B     | CODE DONE / NOT YET K3s-VALIDATED |
 | C–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
@@ -46,16 +46,19 @@ After that: **H + I** (Video Pipeline + Cloud Vision). Then **J** (Hybrid). Then
 
 ## B — Agent Core
 
-- B1. Proceso principal del agente.
-- B2. Identidad persistente del dispositivo.
-- B3. edge_id/gateway_id.
-- B4. Lectura y validación de configuración.
-- B5. Estado interno del agente.
-- B6. Gestión de módulos.
-- B7. Graceful shutdown/restart.
-- B8. Información de versión/build.
-- B9. Arquitectura/capacidades del hardware.
-- B10. Health check local.
+- B1. Proceso principal del agente. **DONE** (Hito A, kept as-is).
+- B2. Identidad persistente del dispositivo. **DONE** — `identity.json`, UUID v4, atomic write.
+- B3. edge_id/gateway_id. **DONE** — `edge_id` only; no `gateway_id` concept introduced.
+- B4. Lectura y validación de configuración. **DONE** — `GEOCAM_HEALTH_ADDR` added.
+- B5. Estado interno del agente. **DONE** — `health.Reporter` extended with module state.
+- B6. Gestión de módulos. **DONE** — `internal/agent/modules.go`, ordered start/stop.
+- B7. Graceful shutdown/restart. **DONE** — module `Stop` wired into shutdown; restart not applicable (process-level).
+- B8. Información de versión/build. **DONE** — exposed via CLI and `/status` (was already present in Hito A).
+- B9. Arquitectura/capacidades del hardware. **DONE** — unchanged from Hito A (`internal/platform`), exposed via `/status`.
+- B10. Health check local. **DONE** — `/healthz`, `/readyz`, `/status` over stdlib `net/http`.
+
+Code-level criteria for B1–B10 pass locally (tests, vet, fmt, builds). **NOT
+YET K3s-validated** — see `docs/PROJECT_STATUS.md`.
 
 ## C — Enrollment con SaaS
 

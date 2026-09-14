@@ -10,6 +10,7 @@ func TestLoadDefaults(t *testing.T) {
 	for _, k := range []string{
 		"GEOCAM_EDGE_ID", "GEOCAM_PROCESSING_MODE", "GEOCAM_LOG_LEVEL",
 		"GEOCAM_SAAS_URL", "GEOCAM_HEARTBEAT_INTERVAL", "GEOCAM_DATA_DIR",
+		"GEOCAM_HEALTH_ADDR",
 	} {
 		t.Setenv(k, "")
 	}
@@ -33,6 +34,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.EdgeID != "" {
 		t.Errorf("EdgeID = %q, want empty", cfg.EdgeID)
 	}
+	if cfg.HealthAddr != DefaultHealthAddr {
+		t.Errorf("HealthAddr = %q, want %q", cfg.HealthAddr, DefaultHealthAddr)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -42,6 +46,7 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("GEOCAM_SAAS_URL", "https://saas.example.test")
 	t.Setenv("GEOCAM_HEARTBEAT_INTERVAL", "90s")
 	t.Setenv("GEOCAM_DATA_DIR", "/tmp/geocam")
+	t.Setenv("GEOCAM_HEALTH_ADDR", "127.0.0.1:9091")
 
 	cfg, err := Load()
 	if err != nil {
@@ -62,6 +67,9 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.DataDir != "/tmp/geocam" {
 		t.Errorf("DataDir = %q", cfg.DataDir)
 	}
+	if cfg.HealthAddr != "127.0.0.1:9091" {
+		t.Errorf("HealthAddr = %q", cfg.HealthAddr)
+	}
 }
 
 func TestLoadRejectsInvalidValues(t *testing.T) {
@@ -70,6 +78,7 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{"GEOCAM_LOG_LEVEL", "verbose"},
 		{"GEOCAM_HEARTBEAT_INTERVAL", "soon"},
 		{"GEOCAM_HEARTBEAT_INTERVAL", "-5s"},
+		{"GEOCAM_HEALTH_ADDR", "not-a-valid-addr"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.key+"="+tt.value, func(t *testing.T) {

@@ -20,27 +20,41 @@ import (
 
 // Agent is the edge agent core.
 type Agent struct {
-	cfg      *config.Config
-	log      *slog.Logger
-	identity identity.Identity
-	platform platform.Info
-	health   *health.Reporter
+	cfg         *config.Config
+	log         *slog.Logger
+	identity    identity.Identity
+	identityErr error
+	platform    platform.Info
+	health      *health.Reporter
+	modules     *moduleManager
 }
 
-// New wires the agent from configuration. It performs no network I/O.
+// New wires the agent from configuration. It performs no network I/O beyond
+// resolving/persisting the local identity file.
+//
+// A failed identity resolution (see internal/identity) is not fatal here:
+// the agent still starts so its health surface stays reachable for
+// diagnosis, but Run never reaches READY — see logStartup/Run.
 func New(cfg *config.Config) *Agent {
-	ident := identity.New(cfg.EdgeID)
+	ident, identErr := identity.Load(cfg.DataDir, cfg.EdgeID)
 	host := platform.Detect()
 
 	log := logging.New(cfg.LogLevel, Version, ident.EdgeID, cfg.ProcessingMode.String())
+	componentLog := logging.Component(log, "agent")
+	reporter := health.New(Version, cfg, ident, host)
 
-	return &Agent{
-		cfg:      cfg,
-		log:      logging.Component(log, "agent"),
-		identity: ident,
-		platform: host,
-		health:   health.New(Version, cfg, ident, host),
+	a := &Agent{
+		cfg:         cfg,
+		log:         componentLog,
+		identity:    ident,
+		identityErr: identErr,
+		platform:    host,
+		health:      reporter,
 	}
+	a.modules = newModuleManager(reporter.SetModuleState,
+		newHealthServerModule(cfg.HealthAddr, reporter, logging.Component(log, "health-http")),
+	)
+	return a
 }
 
 // Health exposes the health reporter (used by tests and future endpoints).
@@ -48,11 +62,27 @@ func (a *Agent) Health() *health.Reporter { return a.health }
 
 // Run starts the agent and blocks until ctx is cancelled, then shuts down
 // gracefully. A cancelled context is a clean stop, not an error.
+//
+// The agent only reaches READY when identity resolved cleanly and every
+// module started. Otherwise it stays DEGRADED but keeps running: the health
+// server module still starts so /status and `geocam-edge check` can report
+// the problem instead of the process going dark.
 func (a *Agent) Run(ctx context.Context) error {
 	a.logStartup()
 
-	a.health.Set(health.StateReady)
-	a.log.Info("agent ready", slog.String("status", health.StateReady.String()))
+	moduleErr := a.modules.Start(ctx)
+
+	switch {
+	case a.identityErr != nil:
+		a.log.Error("agent will not become ready: identity error", slog.Any("error", a.identityErr))
+		a.health.Set(health.StateDegraded)
+	case moduleErr != nil:
+		a.log.Error("agent will not become ready: module startup failed", slog.Any("error", moduleErr))
+		a.health.Set(health.StateDegraded)
+	default:
+		a.health.Set(health.StateReady)
+		a.log.Info("agent ready", slog.String("status", health.StateReady.String()))
+	}
 
 	<-ctx.Done()
 
@@ -87,12 +117,14 @@ func (a *Agent) logStartup() {
 		slog.Duration("heartbeat_interval", a.cfg.HeartbeatInterval),
 		slog.String("data_dir", a.cfg.DataDir),
 	)
-	a.log.Info("identity resolved",
-		slog.String("enrollment_status", a.identity.Status.String()),
-		slog.String("edge_id", a.identity.EdgeID),
-	)
-	if !a.identity.IsEnrolled() {
-		a.log.Info("agent is not enrolled; set GEOCAM_EDGE_ID to assign an identity")
+	if a.identityErr != nil {
+		a.log.Error("identity resolution failed", slog.Any("error", a.identityErr))
+	} else {
+		a.log.Info("identity resolved",
+			slog.String("enrollment_status", a.identity.Status.String()),
+			slog.String("edge_id", a.identity.EdgeID),
+			slog.String("source", string(a.identity.Source)),
+		)
 	}
 }
 
@@ -103,8 +135,12 @@ func (a *Agent) shutdown() error {
 		slog.String("uptime", a.health.Uptime().Round(time.Second).String()),
 	)
 
-	// No long-lived subsystems exist yet, so there is nothing to drain.
-	// Discovery/transport/video will need a bounded grace window here.
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := a.modules.Stop(stopCtx); err != nil {
+		a.log.Error("module shutdown reported errors", slog.Any("error", err))
+	}
+
 	a.log.Info("agent stopped cleanly")
 	return nil
 }
