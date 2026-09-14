@@ -167,6 +167,45 @@ The main agent keeps responsibility for architecture, integration, final
 decisions, review and DONE. **Do not let the executor become the implicit owner
 of the architecture.**
 
+### Subagent model selection
+
+Use the **lightest model that can correctly solve the task**. Do not default
+to Opus for every executor.
+
+**Default for executors: Sonnet.** Use it for file inspection, reference
+search, mechanical changes, documentation, tests, small implementations,
+bounded refactors, log analysis, command verification, simple diff review,
+bounded technical research, and any clearly specified task.
+
+**Opus: reserve it for tasks that genuinely require deep reasoning** —
+complex architectural decisions, hard problems with multiple competing
+hypotheses, non-trivial debugging, delicate cross-repo changes,
+security-sensitive changes, protocol design, hard concurrency/distributed
+problems, analysis where Sonnet already failed, or situations where the cost
+of a wrong decision is high.
+
+**Escalation rule:** Sonnet first → try to resolve → escalate to Opus only if
+needed. Not the other way around — do not default to Opus and use it for
+routine work. If a Sonnet executor hits a real blocker: (1) return a short
+summary, (2) state exactly what reasoning is missing, (3) only then evaluate
+escalating that specific part to Opus. Do not re-run the whole task on Opus
+when only one part needs more reasoning.
+
+Model choice also affects context cost. Do not send a subagent the whole
+repo, full conversations, unrelated docs, giant logs, or files "just in
+case" — send only the objective, relevant files, minimal context,
+constraints, and DONE criteria. This matters more, not less, with
+higher-cost models.
+
+**Before launching an executor, ask:** (1) do I actually need a subagent?
+(2) does Sonnet suffice? (3) what is the minimum context it needs? (4) can
+the problem be split? (5) is there a concrete reason to use Opus? Without a
+concrete reason, use Sonnet.
+
+If the platform does not allow picking a model per subagent/executor,
+document the limitation and continue with whatever model is available —
+don't block a task over this alone.
+
 ## Handoff between sessions
 
 When closing each milestone, update `docs/PROJECT_STATUS.md` with: milestone
