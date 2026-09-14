@@ -16,8 +16,12 @@ config:
   saasUrl: ""
   heartbeatInterval: 30s
   dataDir: /var/lib/geocam-edge
-  # Empty edgeId => the agent reports UNENROLLED.
+  # Empty edgeId => the agent reads/creates its persistent identity.json
+  # under dataDir instead. Only set this to force a dev override.
   edgeId: ""
+  # Bind 0.0.0.0 here (not 127.0.0.1) so kubelet can reach the probes
+  # across the pod network namespace.
+  healthAddr: "0.0.0.0:8091"
 
 resources:
   requests:
@@ -26,6 +30,22 @@ resources:
   limits:
     cpu: 250m
     memory: 128Mi
+
+# Persists identity.json (and future local state) across pod recreation.
+persistence:
+  enabled: true
+  size: 128Mi
+  storageClassName: local-path
+
+probes:
+  readiness:
+    initialDelaySeconds: 3
+    periodSeconds: 5
+    failureThreshold: 3
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
 
 nodeSelector: {}
 tolerations: []

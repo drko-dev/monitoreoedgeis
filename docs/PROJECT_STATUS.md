@@ -10,9 +10,9 @@
 | ----------------- | ----------------------------------------------------------- |
 | **PROJECT**       | GEO CAM Edge                                              |
 | **CURRENT HITO**  | B — Agent Core                                            |
-| **STATE**         | IMPLEMENTED, TESTED — **NOT YET K3s-VALIDATED**            |
+| **STATE**         | IMPLEMENTED, TESTED, **VALIDATED LOCAL (binary + K3s)**    |
 | **MERGED**        | **NO** — this branch is not merged to `main`               |
-| **Branch**        | `feature/edge-agent-core` (based on `main`, Hito A merged, HEAD `b33222b`) |
+| **Branch**        | `feature/edge-agent-core` (based on `main`, Hito A merged, HEAD `0eef45a`) |
 | **DEPLOYED PROD** | **NO** — VPS/production untouched                         |
 | **Go version**    | 1.26.2                                                    |
 
@@ -74,6 +74,10 @@ B1–B10 gap analysis against Hito A, and what closed each gap:
 - `internal/agent/agent_test.go` — degraded-state and module-failure coverage
 - `cmd/geocam-edge/main.go` — `identity` and `check` subcommands
 - `cmd/geocam-edge/main_test.go` (new)
+- `deploy/helm/geocam-edge/values.yaml` — `config.healthAddr`, `persistence`, `probes`
+- `deploy/helm/geocam-edge/templates/configmap.yaml` — `GEOCAM_HEALTH_ADDR`
+- `deploy/helm/geocam-edge/templates/deployment.yaml` — probes, container port, PVC volume
+- `deploy/helm/geocam-edge/templates/pvc.yaml` (new)
 - `docs/PROJECT_STATUS.md`, `docs/ROADMAP.md`, `docs/ARCHITECTURE.md`, `README.md`
 
 ## identity.json
@@ -142,16 +146,36 @@ module exists yet — out of scope for B, per the task.
 
 ## Local runtime validation
 
-- Ran the locally built binary directly (not yet through K3s): identity
-  created and reused across restarts, `/healthz`/`/readyz`/`/status`
-  reachable, `identity`/`check` CLI subcommands verified against a live
-  process.
-- **NOT YET K3s-VALIDATED**: image build, Helm chart wiring of the new health
-  endpoints (readiness/liveness probes), and pod-level validation are
-  intentionally left to a separate pass — Helm charts, Dockerfile and CI are
-  explicitly out of scope for this milestone's code changes.
+- Ran the locally built binary directly: identity created and reused across
+  restarts (same `edge_id` in an isolated dev data dir), `/healthz` → 200,
+  `/readyz` → 200 once `READY`, `/status` JSON verified, `identity`/`check`
+  CLI subcommands verified against a live process, `SIGTERM` produced a
+  clean graceful shutdown (log line `shutdown signal received`).
 - Local SaaS: **not modified**.
 - VPS / production: **not touched**.
+
+## K3s local validation
+
+- `kubectl config current-context` confirmed `rancher-desktop` before any
+  cluster action.
+- Image built locally with `nerdctl --namespace k8s.io build` (no Docker
+  Engine) and loaded straight into containerd.
+- Helm chart updated: `readinessProbe` (`GET /readyz`), `livenessProbe`
+  (`GET /healthz`), a `health` container port (`8091`), `GEOCAM_HEALTH_ADDR`
+  set to `0.0.0.0:8091` in the ConfigMap (so kubelet can reach the pod), and
+  a new `geocam-edge-data` PVC (`local-path`, `128Mi`, RWO) replacing the
+  previous `emptyDir`, mounted at `GEOCAM_DATA_DIR`.
+- `helm upgrade geocam-edge` on the existing `geocam-edge-dev` release
+  (revision 1 → 2) — namespace and SaaS resources untouched.
+- Result: pod `1/1 Running`/`Ready`, PVC `Bound`, both probes green.
+- **Critical identity test (PASS)**: captured `edge_id` from the running pod
+  (`f688d30f-4b12-40e1-8409-cfe314ab1755`), ran `kubectl delete pod`, waited
+  for the Deployment to recreate it, confirmed `Running`/`Ready` again, and
+  re-read the identity from the new pod — **exact same `edge_id`**. Identity
+  survives pod recreation because it lives on the PVC, not the container
+  filesystem.
+- Logs on the recreated pod: startup, identity resolved (`source=persisted`),
+  `agent ready` — no secrets logged.
 
 ## Scope cuts (deliberate)
 
@@ -161,8 +185,6 @@ module exists yet — out of scope for B, per the task.
   safely gated) to leave out of this milestone rather than rush it in.
 - No real module beyond the health HTTP server: discovery/transport/
   heartbeat/camera modules are explicitly future work (Hito C onward).
-- Helm/K8s probe wiring for the new `/healthz`/`/readyz` endpoints: left for
-  the separate K3s-deploy pass.
 
 ## Current restrictions
 
@@ -182,11 +204,12 @@ processing.
 
 ## NEXT — Hito C: Enrollment con SaaS
 
-Hito B's code-level criteria pass locally (tests, vet, fmt, builds, manual
-endpoint verification). It is **not** K3s-validated yet — that validation,
-plus Helm probe wiring, is a separate pass. Once that is done and B is
-declared fully closed, the next milestone is **C — Enrollment** (see
-`docs/ROADMAP.md`).
+Hito B is DONE: code-level criteria pass locally (tests, vet, fmt, builds,
+manual endpoint verification) **and** K3s validation passed (probes green,
+PVC bound, `edge_id` identical across pod recreation). A PR is open against
+`main` but **not merged** (explicit user instruction: do not merge). The
+next milestone is **C — Enrollment** (see `docs/ROADMAP.md`) — do not start
+it until the user authorizes it.
 
 ## HOW ANOTHER AI SHOULD CONTINUE
 

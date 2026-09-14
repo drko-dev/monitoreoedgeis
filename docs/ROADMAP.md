@@ -57,8 +57,9 @@ After that: **H + I** (Video Pipeline + Cloud Vision). Then **J** (Hybrid). Then
 - B9. Arquitectura/capacidades del hardware. **DONE** — unchanged from Hito A (`internal/platform`), exposed via `/status`.
 - B10. Health check local. **DONE** — `/healthz`, `/readyz`, `/status` over stdlib `net/http`.
 
-Code-level criteria for B1–B10 pass locally (tests, vet, fmt, builds). **NOT
-YET K3s-validated** — see `docs/PROJECT_STATUS.md`.
+**B — DONE.** Code-level criteria for B1–B10 pass locally (tests, vet, fmt,
+builds) and K3s validation passed: probes green, PVC bound, `edge_id`
+identical across pod recreation. See `docs/PROJECT_STATUS.md`.
 
 ## C — Enrollment con SaaS
 
