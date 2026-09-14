@@ -12,8 +12,12 @@ config:
   # One of: cloud, hybrid, edge.
   processingMode: cloud
   logLevel: info
-  # Not used yet: this milestone performs no SaaS I/O.
+  # Base URL of the SaaS. Leave empty to run the agent fully offline: the
+  # heartbeat module is then not registered at all, rather than started and
+  # left failing.
   saasUrl: ""
+  # Interval between heartbeats. Must be within 5s-5m inclusive; anything
+  # outside that band is a startup error, not a clamped value.
   heartbeatInterval: 30s
   dataDir: /var/lib/geocam-edge
   # Empty edgeId => the agent reads/creates its persistent identity.json

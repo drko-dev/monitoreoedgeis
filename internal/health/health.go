@@ -1,8 +1,13 @@
-// Package health tracks the agent lifecycle state and exposes a snapshot of it.
+// Package health tracks the agent lifecycle state and exposes a snapshot of
+// it over the local HTTP surface (/healthz, /readyz, /status).
 //
-// No HTTP server is started in this milestone: the agent listens on no port.
-// The snapshot is the internal, testable contract a future health endpoint
-// would serialise.
+// Local health is deliberately independent of SaaS reachability: the agent
+// stays READY, and /readyz keeps returning 200, while the SaaS is
+// unreachable, because the Edge's local function is unaffected by an outage
+// in a service it only reports to. The heartbeat module's own DEGRADED state
+// is visible in Snapshot.Heartbeat instead. A rejected credential is the one
+// SaaS-side condition that does mark the whole agent DEGRADED, because an
+// Edge the SaaS refuses to recognise is genuinely not doing its job.
 package health
 
 import (
@@ -10,6 +15,7 @@ import (
 	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
+	"github.com/drko-dev/monitoreoedgeis/internal/heartbeat"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 )
@@ -40,6 +46,11 @@ type Snapshot struct {
 	UptimeSeconds    int64             `json:"uptime_seconds"`
 	Uptime           string            `json:"uptime"`
 	Modules          map[string]string `json:"modules"`
+	// Heartbeat is the SaaS-heartbeat module's own state. It is omitted when
+	// the module is not running (unenrolled Edge, or no SaaS URL set). It
+	// carries timings, counters and an error class only — never the
+	// credential, never an Authorization header, never a hash.
+	Heartbeat *heartbeat.Status `json:"heartbeat,omitempty"`
 }
 
 // Reporter holds the mutable health state of the agent, including per-module
@@ -51,6 +62,7 @@ type Reporter struct {
 	startedAt        time.Time
 	modules          map[string]string
 	credentialStatus string
+	heartbeat        *heartbeat.Status
 
 	version string
 	cfg     *config.Config
@@ -95,6 +107,14 @@ func (r *Reporter) SetCredentialStatus(status string) {
 	r.credentialStatus = status
 }
 
+// SetHeartbeatStatus records the SaaS-heartbeat module's latest status for
+// reporting in Snapshot. The module calls this on every status change.
+func (r *Reporter) SetHeartbeatStatus(s heartbeat.Status) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.heartbeat = &s
+}
+
 // State returns the current state.
 func (r *Reporter) State() State {
 	r.mu.RLock()
@@ -119,6 +139,13 @@ func (r *Reporter) Snapshot() Snapshot {
 	for name, state := range r.modules {
 		modules[name] = state
 	}
+	// Copy rather than alias: the caller must not be able to mutate reporter
+	// state through the returned snapshot.
+	var hb *heartbeat.Status
+	if r.heartbeat != nil {
+		copied := *r.heartbeat
+		hb = &copied
+	}
 
 	return Snapshot{
 		Status:           r.state,
@@ -133,5 +160,6 @@ func (r *Reporter) Snapshot() Snapshot {
 		UptimeSeconds:    int64(uptime.Seconds()),
 		Uptime:           uptime.Round(time.Second).String(),
 		Modules:          modules,
+		Heartbeat:        hb,
 	}
 }

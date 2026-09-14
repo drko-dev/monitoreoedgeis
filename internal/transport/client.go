@@ -145,7 +145,7 @@ type errorBody struct {
 // plaintext credential itself is never part of this request.
 func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse, error) {
 	var resp EnrollResponse
-	status, body, err := c.do(ctx, http.MethodPost, EnrollPath, "", "", req)
+	status, _, body, err := c.do(ctx, http.MethodPost, EnrollPath, "", "", req)
 	if err != nil {
 		return resp, err
 	}
@@ -165,7 +165,7 @@ func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse,
 // stored credential as revoked.
 func (c *Client) Me(ctx context.Context, deviceID, credential string) (MeResponse, error) {
 	var resp MeResponse
-	status, body, err := c.do(ctx, http.MethodGet, MePath, deviceID, credential, nil)
+	status, _, body, err := c.do(ctx, http.MethodGet, MePath, deviceID, credential, nil)
 	if err != nil {
 		return resp, err
 	}
@@ -187,7 +187,7 @@ func (c *Client) Me(ctx context.Context, deviceID, credential string) (MeRespons
 // is generated and held by the caller, never by this method.
 func (c *Client) RotateKey(ctx context.Context, deviceID, credential string, req RotateKeyRequest) (RotateResponse, error) {
 	var resp RotateResponse
-	status, body, err := c.do(ctx, http.MethodPost, RotateKeyPath, deviceID, credential, req)
+	status, _, body, err := c.do(ctx, http.MethodPost, RotateKeyPath, deviceID, credential, req)
 	if err != nil {
 		return resp, err
 	}
@@ -203,24 +203,24 @@ func (c *Client) RotateKey(ctx context.Context, deviceID, credential string, req
 	return resp, nil
 }
 
-// do issues one HTTP request and returns the raw status/body for the caller
-// to interpret. deviceID (X-Device-Id) and credential (Authorization:
-// Bearer) are both sent whenever non-empty — the SaaS requires deviceID as a
-// separate header even though Bearer alone carries the credential. Neither
-// value is ever logged or included in any returned error.
-func (c *Client) do(ctx context.Context, method, path, deviceID, credential string, payload any) (int, []byte, error) {
+// do issues one HTTP request and returns the raw status, response headers and
+// body for the caller to interpret. deviceID (X-Device-Id) and credential
+// (Authorization: Bearer) are both sent whenever non-empty — the SaaS
+// requires deviceID as a separate header even though Bearer alone carries the
+// credential. Neither value is ever logged or included in any returned error.
+func (c *Client) do(ctx context.Context, method, path, deviceID, credential string, payload any) (int, http.Header, []byte, error) {
 	var bodyReader io.Reader
 	if payload != nil {
 		data, err := json.Marshal(payload)
 		if err != nil {
-			return 0, nil, fmt.Errorf("transport: encode request: %w", err)
+			return 0, nil, nil, fmt.Errorf("transport: encode request: %w", err)
 		}
 		bodyReader = bytes.NewReader(data)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
 	if err != nil {
-		return 0, nil, fmt.Errorf("transport: build request: %w", err)
+		return 0, nil, nil, fmt.Errorf("transport: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -235,21 +235,21 @@ func (c *Client) do(ctx context.Context, method, path, deviceID, credential stri
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			return 0, nil, fmt.Errorf("%w: %s %s", ErrTimeout, method, path)
+			return 0, nil, nil, fmt.Errorf("%w: %s %s", ErrTimeout, method, path)
 		}
 		var netErr interface{ Timeout() bool }
 		if errors.As(err, &netErr) && netErr.Timeout() {
-			return 0, nil, fmt.Errorf("%w: %s %s", ErrTimeout, method, path)
+			return 0, nil, nil, fmt.Errorf("%w: %s %s", ErrTimeout, method, path)
 		}
-		return 0, nil, fmt.Errorf("%w: %s %s: %v", ErrSaaSUnavailable, method, path, err)
+		return 0, nil, nil, fmt.Errorf("%w: %s %s: %v", ErrSaaSUnavailable, method, path, err)
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return resp.StatusCode, nil, fmt.Errorf("transport: read response body: %w", err)
+		return resp.StatusCode, resp.Header, nil, fmt.Errorf("transport: read response body: %w", err)
 	}
-	return resp.StatusCode, data, nil
+	return resp.StatusCode, resp.Header, data, nil
 }
 
 // mapEnrollError classifies an enroll failure by HTTP status alone — the

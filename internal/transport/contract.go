@@ -25,4 +25,10 @@ const (
 	// client-generated rotation_id (idempotency key), and only persists the
 	// new credential locally after the SaaS ACKs the rotation.
 	RotateKeyPath = "/api/v1/edge/me/rotate-key"
+	// HeartbeatPath is the periodic liveness + telemetry endpoint. It is the
+	// pre-existing SaaS heartbeat endpoint (shared with the legacy Python
+	// gateway agent), extended backward-compatibly with the Go agent's
+	// fields — not a parallel v2 endpoint. The SaaS stamps last_seen from its
+	// own clock on arrival; nothing in the body claims connectivity.
+	HeartbeatPath = "/api/v1/edge/heartbeat"
 )

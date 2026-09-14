@@ -32,7 +32,14 @@ const (
 	DefaultProcessingMode    = ModeCloud
 	DefaultLogLevel          = "info"
 	DefaultHeartbeatInterval = 30 * time.Second
-	DefaultDataDir           = "/var/lib/geocam-edge"
+	// MinHeartbeatInterval and MaxHeartbeatInterval bound
+	// GEOCAM_HEARTBEAT_INTERVAL. Below the minimum a fleet becomes a load
+	// source rather than a liveness signal; above the maximum the SaaS would
+	// declare the Edge offline between two healthy beats, because the
+	// server-side offline threshold is a multiple of the nominal interval.
+	MinHeartbeatInterval = 5 * time.Second
+	MaxHeartbeatInterval = 5 * time.Minute
+	DefaultDataDir       = "/var/lib/geocam-edge"
 	// DefaultHealthAddr binds the local health HTTP surface to localhost
 	// only: it is not meant to be exposed to the LAN.
 	DefaultHealthAddr = "127.0.0.1:8091"
@@ -78,8 +85,9 @@ func Load() (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid heartbeat interval %q: %w", raw, err)
 		}
-		if d <= 0 {
-			return nil, fmt.Errorf("invalid heartbeat interval %q: must be positive", raw)
+		if d < MinHeartbeatInterval || d > MaxHeartbeatInterval {
+			return nil, fmt.Errorf("invalid heartbeat interval %q: must be between %s and %s",
+				raw, MinHeartbeatInterval, MaxHeartbeatInterval)
 		}
 		cfg.HeartbeatInterval = d
 	}

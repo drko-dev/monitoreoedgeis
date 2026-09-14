@@ -29,6 +29,7 @@ type Agent struct {
 	credentialsErr error
 	platform       platform.Info
 	health         *health.Reporter
+	heartbeatErr   error
 	modules        *moduleManager
 }
 
@@ -58,9 +59,21 @@ func New(cfg *config.Config) *Agent {
 		platform:       host,
 		health:         reporter,
 	}
-	a.modules = newModuleManager(reporter.SetModuleState,
+	mods := []Module{
 		newHealthServerModule(cfg.HealthAddr, reporter, logging.Component(log, "health-http")),
-	)
+	}
+
+	// The heartbeat module is skipped for an unenrolled Edge and its
+	// construction errors are non-fatal: a misconfigured SaaS URL must not
+	// take down the local health surface that would let an operator diagnose
+	// it. Either way the agent does not reach READY (see Run).
+	hb, hbErr := newHeartbeatModule(cfg, ident, creds, reporter, logging.Component(log, "heartbeat"))
+	if hb != nil {
+		mods = append(mods, hb)
+	}
+
+	a.heartbeatErr = hbErr
+	a.modules = newModuleManager(reporter.SetModuleState, mods...)
 	return a
 }
 
@@ -88,6 +101,10 @@ func (a *Agent) Run(ctx context.Context) error {
 		a.health.Set(health.StateDegraded)
 	case moduleErr != nil:
 		a.log.Error("agent will not become ready: module startup failed", slog.Any("error", moduleErr))
+		a.health.Set(health.StateDegraded)
+	case a.heartbeatErr != nil:
+		a.log.Error("agent will not become ready: heartbeat module could not be built",
+			slog.Any("error", a.heartbeatErr))
 		a.health.Set(health.StateDegraded)
 	default:
 		a.health.Set(health.StateReady)

@@ -6,8 +6,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
+	"github.com/drko-dev/monitoreoedgeis/internal/heartbeat"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 )
@@ -85,6 +87,84 @@ func TestHandlerStatus(t *testing.T) {
 	}
 	if snap.Modules["health-http"] != "running" {
 		t.Errorf("Modules[health-http] = %q, want %q", snap.Modules["health-http"], "running")
+	}
+}
+
+// TestHandlerStatusOmitsHeartbeatWhenTheModuleIsNotRunning guards the
+// omitempty on Snapshot.Heartbeat: an unenrolled Edge, or one with no SaaS
+// URL, must not report a fabricated all-zero heartbeat state that reads as
+// "never succeeded" rather than "not applicable".
+func TestHandlerStatusOmitsHeartbeatWhenTheModuleIsNotRunning(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	rec := httptest.NewRecorder()
+	Handler(newTestReporter()).ServeHTTP(rec, req)
+
+	if body := rec.Body.String(); strings.Contains(body, `"heartbeat"`) {
+		t.Errorf("/status carries a heartbeat object with no module running:\n%s", body)
+	}
+}
+
+func TestHandlerStatusReportsHeartbeatState(t *testing.T) {
+	success := time.Now().Add(-90 * time.Second).UTC().Truncate(time.Second)
+	attempt := time.Now().Add(-30 * time.Second).UTC().Truncate(time.Second)
+
+	r := newTestReporter()
+	r.Set(StateReady)
+	r.SetHeartbeatStatus(heartbeat.Status{
+		State:               "degraded",
+		LastSuccessAt:       success,
+		LastAttemptAt:       attempt,
+		ConsecutiveFailures: 3,
+		LastError:           "saas_unavailable",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	rec := httptest.NewRecorder()
+	Handler(r).ServeHTTP(rec, req)
+
+	var snap Snapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
+		t.Fatalf("invalid JSON body: %v", err)
+	}
+	if snap.Heartbeat == nil {
+		t.Fatal("Snapshot.Heartbeat = nil, want the module status")
+	}
+	got := *snap.Heartbeat
+	if got.State != "degraded" {
+		t.Errorf("Heartbeat.State = %q, want %q", got.State, "degraded")
+	}
+	if !got.LastSuccessAt.Equal(success) {
+		t.Errorf("Heartbeat.LastSuccessAt = %v, want %v", got.LastSuccessAt, success)
+	}
+	if !got.LastAttemptAt.Equal(attempt) {
+		t.Errorf("Heartbeat.LastAttemptAt = %v, want %v", got.LastAttemptAt, attempt)
+	}
+	if got.ConsecutiveFailures != 3 {
+		t.Errorf("Heartbeat.ConsecutiveFailures = %d, want 3", got.ConsecutiveFailures)
+	}
+	if got.LastError != "saas_unavailable" {
+		t.Errorf("Heartbeat.LastError = %q, want %q", got.LastError, "saas_unavailable")
+	}
+}
+
+// A SaaS outage must not take the Edge down: /healthz stays 200 and the agent
+// stays READY (so /readyz stays 200) while only the heartbeat module is
+// degraded. This is the documented /readyz semantics for Hito D.
+func TestSaaSOutageLeavesTheEdgeHealthyAndReady(t *testing.T) {
+	r := newTestReporter()
+	r.Set(StateReady)
+	r.SetHeartbeatStatus(heartbeat.Status{
+		State:               "degraded",
+		ConsecutiveFailures: 12,
+		LastError:           "saas_unavailable",
+	})
+
+	for path, want := range map[string]int{"/healthz": http.StatusOK, "/readyz": http.StatusOK} {
+		rec := httptest.NewRecorder()
+		Handler(r).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != want {
+			t.Errorf("%s status = %d, want %d during a SaaS outage", path, rec.Code, want)
+		}
 	}
 }
 

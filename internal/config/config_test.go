@@ -84,6 +84,11 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{"GEOCAM_LOG_LEVEL", "verbose"},
 		{"GEOCAM_HEARTBEAT_INTERVAL", "soon"},
 		{"GEOCAM_HEARTBEAT_INTERVAL", "-5s"},
+		{"GEOCAM_HEARTBEAT_INTERVAL", "0s"},
+		// Out of the documented 5s..5m band: too chatty for the SaaS below,
+		// too slow to distinguish from an outage above.
+		{"GEOCAM_HEARTBEAT_INTERVAL", "4s"},
+		{"GEOCAM_HEARTBEAT_INTERVAL", "5m1s"},
 		{"GEOCAM_HEALTH_ADDR", "not-a-valid-addr"},
 		{"GEOCAM_SAAS_TIMEOUT", "soon"},
 		{"GEOCAM_SAAS_TIMEOUT", "-5s"},
@@ -93,6 +98,23 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 			t.Setenv(tt.key, tt.value)
 			if _, err := Load(); err == nil {
 				t.Fatalf("Load() succeeded with %s=%q, want error", tt.key, tt.value)
+			}
+		})
+	}
+}
+
+// The bounds are inclusive: an operator who sets exactly the documented
+// minimum or maximum must not be rejected by an off-by-one comparison.
+func TestLoadAcceptsTheHeartbeatIntervalBounds(t *testing.T) {
+	for _, want := range []time.Duration{MinHeartbeatInterval, MaxHeartbeatInterval} {
+		t.Run(want.String(), func(t *testing.T) {
+			t.Setenv("GEOCAM_HEARTBEAT_INTERVAL", want.String())
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v, want the boundary value accepted", err)
+			}
+			if cfg.HeartbeatInterval != want {
+				t.Errorf("HeartbeatInterval = %v, want %v", cfg.HeartbeatInterval, want)
 			}
 		})
 	}

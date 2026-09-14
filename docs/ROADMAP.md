@@ -8,10 +8,12 @@
 
 | Block | Status                |
 | ----- | --------------------- |
-| A     | DONE / VALIDATED LOCAL |
-| B     | CODE DONE / NOT YET K3s-VALIDATED |
-| C     | CODE DONE / NOT RECONCILED WITH REAL SaaS CONTRACT — see docs/PROJECT_STATUS.md |
-| D–Z   | PLANNED               |
+| A     | DONE / MERGED         |
+| B     | DONE / MERGED         |
+| C     | DONE / MERGED         |
+| D     | DONE / VALIDATED LOCAL |
+| E     | NEXT                  |
+| F–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
 config, health, identity abstraction, platform/version). **That does not mean B
@@ -75,27 +77,37 @@ identical across pod recreation. See `docs/PROJECT_STATUS.md`.
 - C9. API SaaS para Edge. **OUT OF SCOPE (repo monitoreoia)**.
 - C10. UI SaaS Edge/Gateways. **OUT OF SCOPE (repo monitoreoia)**.
 
-**C — CODE DONE, NOT RECONCILED.** Todo lo anterior compila, pasa
-`go test ./...`, `go test -race ./...`, `go vet ./...` y `gofmt -l .` contra
-un mock SaaS local (`httptest`). Los paths (`/api/v1/gateway/enroll`,
-`/api/v1/edge/me`, `/api/v1/gateway/edge/rotate-key`) y los nombres de campo
-JSON son SUPUESTOS documentados en `internal/transport/contract.go` — deben
-reconciliarse contra la implementación real de `monitoreoia` antes de
-integrar contra el SaaS real. Ver `docs/PROJECT_STATUS.md` para el detalle.
+**C — DONE / MERGED / VALIDATED.** Todo lo anterior compila, pasa
+`go test ./...`, `go test -race ./...`, `go vet ./...` y `gofmt -l .`, y fue
+reconciliado y validado end-to-end contra la implementación real de
+`monitoreoia` (SaaS local) además de contra `httptest`, incluida su
+deployment en K3s. Ver `docs/PROJECT_STATUS.md` para el detalle.
 
 ## D — Heartbeat y administración
 
-- D1. Heartbeat Edge → SaaS.
-- D2. online/offline/degraded.
-- D3. Uptime.
-- D4. Versión.
-- D5. CPU/RAM/disco.
-- D6. arm64/amd64.
-- D7. Temperatura.
-- D8. Última conexión.
-- D9. Intervalo configurable.
-- D10. Retry/backoff.
-- D11. Vista de health en SaaS.
+- D1. Heartbeat Edge → SaaS. **DONE / VALIDATED LOCAL** — `internal/heartbeat`, integrado al ciclo de vida de módulos (`Module`), no un loop en `main.go`. Auth `Bearer` reutilizando `internal/transport`, sin cliente HTTP duplicado.
+- D2. online/offline/degraded. **DONE / VALIDATED LOCAL** — el Edge reporta sólo su propia visión (`health_status`: READY→healthy, DEGRADED→degraded). La conectividad la deriva el SaaS del momento de llegada contra su propio reloj; el Edge nunca la declara. Validado contra el SaaS real: Online, Offline tras threshold, y recovery.
+- D3. Uptime. **DONE / VALIDATED LOCAL** — uptime del **proceso** (monotónico), no del host.
+- D4. Versión. **DONE / VALIDATED LOCAL** — desde la fuente única existente (`internal/agent/version.go`), no hardcodeada.
+- D5. CPU/RAM/disco. **DONE / VALIDATED LOCAL** — `internal/platform`, `CGO_ENABLED=0`: CPU por deltas de procfs, RAM de `/proc/meminfo`, disco por `statfs` sobre `GEOCAM_DATA_DIR`. Degrada omitiendo la métrica, nunca con panic ni con un cero que se lea como medición real.
+- D6. arm64/amd64. **DONE / VALIDATED LOCAL**.
+- D7. Temperatura. **DONE / VALIDATED LOCAL (opcional)** — `/sys/class/thermal/` en Linux si existe. Su ausencia se omite del payload y **nunca** marca DEGRADED.
+- D8. Última conexión. **DONE / VALIDATED LOCAL (repo monitoreoia)** — `last_seen` es server-side, con el reloj del SaaS. El Edge manda `edge_timestamp` sólo como dato de diagnóstico.
+- D9. Intervalo configurable. **DONE / VALIDATED LOCAL** — `GEOCAM_HEARTBEAT_INTERVAL`, default `30s`, límites `5s`–`5m` inclusive; fuera de rango es error de arranque.
+- D10. Retry/backoff. **DONE / VALIDATED LOCAL** — backoff exponencial 1s→60s con jitter ±10%, reset ante el primer éxito. 429 respeta `Retry-After`. 401/403 **no** reintenta agresivamente, **no** borra la credential, **no** re-enrola. Validado con revocación real contra el SaaS: 401/403 → DEGRADED sin re-enroll.
+- D11. Vista de health en SaaS. **DONE / VALIDATED LOCAL (repo monitoreoia)**.
+
+**D — DONE / VALIDATED LOCAL.** Compila y pasa `go build ./...`,
+`go test ./...`, `go test -race ./...`, `go vet ./...` y `gofmt -l .`.
+Validado end-to-end contra el SaaS real local: Online, Offline, recovery,
+degraded al caer el SaaS y recovery automático, revocación (401/403), mismo
+`edge_id`/credential preservados. Validado también en K3s local (Rancher
+Desktop): recreación de pod, PVC-backed identity/credential, `boot_id`
+nuevo por proceso, `sequence_number` reiniciando correctamente, ≥2
+heartbeats post-recreation y SaaS Online. Una caída del SaaS deja al Edge
+`READY` con `/healthz` y `/readyz` en `200`; la degradación se ve sólo en
+`/status` bajo `heartbeat`. Ver `docs/ARCHITECTURE.md` para la semántica
+completa y `docs/PROJECT_STATUS.md` para el detalle de validación.
 
 ## E — Autodiscovery
 
