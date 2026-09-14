@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"slices"
 	"strings"
@@ -17,6 +18,7 @@ type Config struct {
 	SaaSURL           string
 	HeartbeatInterval time.Duration
 	DataDir           string
+	HealthAddr        string
 }
 
 // Defaults. No secrets, no credentials.
@@ -25,6 +27,9 @@ const (
 	DefaultLogLevel          = "info"
 	DefaultHeartbeatInterval = 30 * time.Second
 	DefaultDataDir           = "/var/lib/geocam-edge"
+	// DefaultHealthAddr binds the local health HTTP surface to localhost
+	// only: it is not meant to be exposed to the LAN.
+	DefaultHealthAddr = "127.0.0.1:8091"
 )
 
 var validLogLevels = []string{"debug", "info", "warn", "error"}
@@ -39,6 +44,7 @@ func Load() (*Config, error) {
 		SaaSURL:           strings.TrimSpace(os.Getenv("GEOCAM_SAAS_URL")),
 		HeartbeatInterval: DefaultHeartbeatInterval,
 		DataDir:           DefaultDataDir,
+		HealthAddr:        DefaultHealthAddr,
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_PROCESSING_MODE")); raw != "" {
@@ -71,6 +77,13 @@ func Load() (*Config, error) {
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_DATA_DIR")); raw != "" {
 		cfg.DataDir = raw
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_HEALTH_ADDR")); raw != "" {
+		if _, _, err := net.SplitHostPort(raw); err != nil {
+			return nil, fmt.Errorf("invalid health addr %q: %w", raw, err)
+		}
+		cfg.HealthAddr = raw
 	}
 
 	return cfg, nil

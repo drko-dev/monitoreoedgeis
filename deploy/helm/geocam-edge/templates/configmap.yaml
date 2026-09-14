@@ -6,6 +6,7 @@ metadata:
     {{- include "geocam-edge.labels" . | nindent 4 }}
 data:
   GEOCAM_EDGE_ID: {{ .Values.config.edgeId | quote }}
+  GEOCAM_HEALTH_ADDR: {{ .Values.config.healthAddr | quote }}
   GEOCAM_PROCESSING_MODE: {{ .Values.config.processingMode | quote }}
   GEOCAM_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   GEOCAM_SAAS_URL: {{ .Values.config.saasUrl | quote }}
