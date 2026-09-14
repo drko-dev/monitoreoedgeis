@@ -1,0 +1,32 @@
+replicaCount: 1
+
+image:
+  repository: geocam-edge
+  tag: dev
+  # The image is built locally into containerd (k8s.io namespace) with nerdctl,
+  # so it must never be pulled from a registry.
+  pullPolicy: Never
+
+# Agent configuration, rendered into a ConfigMap and consumed as env vars.
+config:
+  # One of: cloud, hybrid, edge.
+  processingMode: cloud
+  logLevel: info
+  # Not used yet: this milestone performs no SaaS I/O.
+  saasUrl: ""
+  heartbeatInterval: 30s
+  dataDir: /var/lib/geocam-edge
+  # Empty edgeId => the agent reports UNENROLLED.
+  edgeId: ""
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 16Mi
+  limits:
+    cpu: 250m
+    memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

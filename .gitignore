@@ -1,0 +1,16 @@
+# Build output
+# Anchored: unanchored patterns would also match cmd/geocam-edge/ and
+# deploy/helm/geocam-edge/.
+/bin/
+/dist/
+/geocam-edge
+/geocam-edge-linux-*
+
+# Go
+*.test
+*.out
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "geocam-edge.fullname" . }}
+  labels:
+    {{- include "geocam-edge.labels" . | nindent 4 }}
+data:
+  GEOCAM_EDGE_ID: {{ .Values.config.edgeId | quote }}
+  GEOCAM_PROCESSING_MODE: {{ .Values.config.processingMode | quote }}
+  GEOCAM_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  GEOCAM_SAAS_URL: {{ .Values.config.saasUrl | quote }}
+  GEOCAM_HEARTBEAT_INTERVAL: {{ .Values.config.heartbeatInterval | quote }}
+  GEOCAM_DATA_DIR: {{ .Values.config.dataDir | quote }}
