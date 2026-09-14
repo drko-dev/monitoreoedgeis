@@ -18,6 +18,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/agent"
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
+	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
@@ -41,6 +42,9 @@ func main() {
 			return
 		case "credential":
 			runCredentialCmd(os.Args[2:])
+			return
+		case "discovery":
+			runDiscoveryCmd(os.Args[2:])
 			return
 		}
 	}
@@ -494,4 +498,117 @@ func rotateSummary(edgeID string, version int) string {
 			"credential_version: %d\n",
 		edgeID, version,
 	)
+}
+
+func runDiscoveryCmd(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "geocam-edge discovery: missing subcommand (usage: geocam-edge discovery scan [--interface <iface>] [--timeout <duration>] [--json])")
+		os.Exit(1)
+	}
+
+	switch args[0] {
+	case "scan":
+		runDiscoveryScanCmd(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "geocam-edge discovery: unknown subcommand %q (usage: geocam-edge discovery scan)\n", args[0])
+		os.Exit(1)
+	}
+}
+
+func runDiscoveryScanCmd(args []string) {
+	fs := flag.NewFlagSet("discovery scan", flag.ExitOnError)
+	ifaceFlag := fs.String("interface", "", "comma-separated network interfaces to scan (default: auto-private)")
+	timeoutFlag := fs.Duration("timeout", 4*time.Second, "scan duration per interface (default: 4s)")
+	jsonFlag := fs.Bool("json", false, "output results in JSON format")
+	_ = fs.Parse(args)
+
+	var ifaces []string
+	if *ifaceFlag != "" {
+		for _, part := range strings.Split(*ifaceFlag, ",") {
+			if s := strings.TrimSpace(part); s != "" {
+				ifaces = append(ifaces, s)
+			}
+		}
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		cfg = &config.Config{
+			LogLevel: "info",
+		}
+	}
+	if len(ifaces) == 0 && len(cfg.DiscoveryInterfaces) > 0 {
+		ifaces = cfg.DiscoveryInterfaces
+	}
+
+	engine := discovery.NewEngine(nil, nil, nil, ifaces, *timeoutFlag, nil)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	result, err := engine.RunScan(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge discovery scan: error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonFlag {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(result.DevicesFound); err != nil {
+			fmt.Fprintf(os.Stderr, "geocam-edge discovery scan: encoding error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	fmt.Print(discoveryScanReport(result))
+}
+
+func discoveryScanReport(result *discovery.ScanResult) string {
+	if result == nil || len(result.DevicesFound) == 0 {
+		dur := ""
+		if result != nil {
+			dur = fmt.Sprintf(" (scanned in %s)", result.Duration.Round(time.Millisecond))
+		}
+		return fmt.Sprintf("No network video devices discovered%s.\n", dur)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("================================================================================\n")
+	sb.WriteString(fmt.Sprintf("DISCOVERY SCAN RESULTS: %d device(s) found in %s\n",
+		len(result.DevicesFound), result.Duration.Round(time.Millisecond)))
+	sb.WriteString("================================================================================\n")
+
+	for i, dev := range result.DevicesFound {
+		sb.WriteString(fmt.Sprintf("[%d] %s:%d%s\n", i+1, dev.IP, dev.Port, dev.Path))
+		if dev.EPRAddress != "" {
+			sb.WriteString(fmt.Sprintf("    EPR:           %s\n", dev.EPRAddress))
+		}
+		if dev.DeviceType != "" && dev.DeviceType != discovery.DeviceTypeUnknown {
+			sb.WriteString(fmt.Sprintf("    Type:          %s\n", dev.DeviceType))
+		}
+		if dev.Manufacturer != "" {
+			sb.WriteString(fmt.Sprintf("    Manufacturer:  %s\n", dev.Manufacturer))
+		}
+		if dev.Model != "" {
+			sb.WriteString(fmt.Sprintf("    Model:         %s\n", dev.Model))
+		}
+		if dev.Serial != "" {
+			sb.WriteString(fmt.Sprintf("    Serial:        %s\n", dev.Serial))
+		}
+		if dev.Firmware != "" {
+			sb.WriteString(fmt.Sprintf("    Firmware:      %s\n", dev.Firmware))
+		}
+		sb.WriteString(fmt.Sprintf("    Auth Required: %t\n", dev.AuthRequired))
+		if len(dev.VideoSources) > 0 {
+			sb.WriteString(fmt.Sprintf("    Channels:      %d\n", len(dev.VideoSources)))
+		}
+		if len(dev.Scopes) > 0 {
+			sb.WriteString(fmt.Sprintf("    Scopes:        %s\n", strings.Join(dev.Scopes, " ")))
+		}
+		sb.WriteString("--------------------------------------------------------------------------------\n")
+	}
+
+	return sb.String()
 }

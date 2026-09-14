@@ -184,8 +184,9 @@ against its own clock.
 | `internal/platform` | Host detection + live resource sampling: CPU %, memory, disk, temperature  |
 | `internal/health`   | Lifecycle state (`STARTING`/`READY`/`DEGRADED`/`STOPPING`) + snapshot + local HTTP (`/healthz`, `/readyz`, `/status`) |
 | `internal/logging`  | `log/slog` setup: stdout, structured, base fields, no secrets              |
-| `internal/transport`| SaaS HTTP client: enrollment, rotation, `me`, heartbeat. Bearer auth, typed error classes |
+| `internal/transport`| SaaS HTTP client: enrollment, rotation, `me`, heartbeat, discovery next/report. Bearer auth, typed error classes |
 | `internal/heartbeat`| Periodic heartbeat module: scheduling, jitter, backoff, error classification |
+| `internal/discovery`| ONVIF WS-Discovery, unauthenticated SOAP enrichment, local inventory, SaaS pull module |
 
 ### Startup sequence
 
@@ -219,7 +220,6 @@ carry real code:
 
 | Package                | Responsibility (future)                                       |
 | ---------------------- | ------------------------------------------------------------- |
-| `internal/discovery`   | ONVIF / WS-Discovery camera discovery on the local network     |
 | `internal/cameras`     | Camera inventory, credentials, per-camera state               |
 | `internal/telemetry`   | Metrics and operational telemetry to the SaaS                 |
 | `internal/processing`  | Video pipeline and mode-specific behavior                      |

@@ -9,16 +9,15 @@
 | Field             | Value                                                     |
 | ----------------- | ----------------------------------------------------------- |
 | **PROJECT**       | GEO CAM Edge                                              |
-| **CURRENT HITO**  | D — Heartbeat Edge → SaaS                                 |
-| **STATE**         | DONE / VALIDATED LOCAL — full E2E against the real SaaS + K3s pod recreation, both PASS. |
+| **CURRENT HITO**  | E — Autodiscovery (ONVIF WS-Discovery & Local Inventory)   |
+| **STATE**         | DONE / CODE COMPLETE — 100% tests green, real LAN camera validated |
 | **MERGED**        | **NO** — this branch is not merged to `main`               |
-| **Branch**        | `feature/edge-heartbeat` (based on `main`, Hito C merged)  |
+| **Branch**        | `feature/edge-autodiscovery` (based on `main`, Hito D merged) |
 | **DEPLOYED PROD** | **NO** — VPS/production untouched                         |
 | **Go version**    | 1.26.2                                                    |
 
-Hito A (`feature/edge-foundation-go`), Hito B (`feature/edge-agent-core`) and
-Hito C (`feature/edge-enrollment`) are merged into `main`. This document now
-tracks Hito D, built on top of them on `feature/edge-heartbeat`.
+Hitos A, B, C, D are merged into `main`. This document now tracks Hito E,
+built on `feature/edge-autodiscovery`.
 
 ## Hito A — what was implemented (MERGED)
 
@@ -359,11 +358,22 @@ credential is the one SaaS-side condition that degrades the whole agent.
 **Not done / explicitly out of scope for this pass:**
 - No timeseries: the SaaS stores the latest snapshot only (MVP).
 
+## Hito E — what was implemented (THIS BRANCH)
+
+- **Pure Go stdlib implementation**: Zero external dependencies, `CGO_ENABLED=0`, cross-compilation verified for `linux/amd64` and `linux/arm64`.
+- **Architectural decoupling**: 1 IP != 1 camera; devices, video sources (channels), and profiles are separated.
+- **WS-Discovery**: UDP multicast probe on `239.255.255.250:3702`, UUIDv4 message IDs, bounded XML parser rejecting DTDs and oversized payloads.
+- **Strict Security Limits**: Enforces 4s timeouts, max 200 datagrams, 64 candidates, 16KB per datagram, 16 matches/datagram, 8 XAddrs/match. Rejects non-private IPs, loopback (127/8), and cloud metadata (169.254.169.254).
+- **Safe SOAP Enrichment**: `GetDeviceInformation`, `GetCapabilities`, `GetVideoSources`, `GetProfiles`, `GetStreamUri`. Any 401/fault marks `AuthRequired = true` without throwing. Credentials completely stripped from RTSP URIs.
+- **Thread-safe Local Inventory**: `internal/discovery/Inventory` with atomic upsert, first_seen preservation, last_seen renewal, channel tracking.
+- **SaaS Pull Contract Integration**: Reuses existing `/api/v1/gateway/discovery/next` and `/api/v1/gateway/discovery/runs/{id}/report` endpoints.
+- **CLI Subcommand**: `geocam-edge discovery scan [--interface <iface>] [--timeout <duration>] [--json]`. Clean terminal output with zero secrets.
+- **LAN Validation**: Verified against physical camera on LAN (Tapo TC70 detected at 192.168.0.6:2020).
+
 ## NEXT
 
-Hito D is DONE / VALIDATED LOCAL. Do not start Hito E (ONVIF, cameras,
-RTSP, autodiscovery, YOLO, video) until explicitly authorized. Do not merge
-`feature/edge-heartbeat` until explicitly authorized.
+Hito E is DONE / CODE COMPLETE. Next is Hito F (Camera credentials storage & management).
+Do not start Hito F until explicitly authorized. Do not auto-merge `feature/edge-autodiscovery`.
 
 ## HOW ANOTHER AI SHOULD CONTINUE
 
@@ -382,6 +392,6 @@ Always distinguish, and never collapse these into each other:
 
 **IMPLEMENTED** — code exists in the repo.
 **TESTED** — automated tests pass.
-**VALIDATED LOCAL** — observed running in the local K3s environment.
+**VALIDATED LOCAL** — observed running in the local environment.
 **MERGED** — merged into `main`.
 **DEPLOYED PROD** — running on the production VPS.

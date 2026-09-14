@@ -11,9 +11,10 @@
 | A     | DONE / MERGED         |
 | B     | DONE / MERGED         |
 | C     | DONE / MERGED         |
-| D     | DONE / VALIDATED LOCAL |
-| E     | NEXT                  |
-| F–Z   | PLANNED               |
+| D     | DONE / MERGED         |
+| E     | DONE / CODE COMPLETE  |
+| F     | NEXT                  |
+| G–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
 config, health, identity abstraction, platform/version). **That does not mean B
@@ -110,23 +111,25 @@ heartbeats post-recreation y SaaS Online. Una caída del SaaS deja al Edge
 completa y `docs/PROJECT_STATUS.md` para el detalle de validación.
 
 ## E — Autodiscovery
+ 
+- E1. ONVIF WS-Discovery. **DONE** — `internal/discovery/wsdiscovery` (pure stdlib multicast `239.255.255.250:3702`, bounded XML parsing).
+- E2. Escaneo de dispositivos. **DONE** — `internal/discovery/engine.go` (auto-private interface selection, UDP probe, timeout bounded).
+- E3. IP/fabricante/modelo. **DONE** — passive metadata extraction + ONVIF `GetDeviceInformation` enrichment.
+- E4. Cámaras. **DONE** — classified via scopes and types (`DeviceTypeCamera`).
+- E5. DVR/NVR. **DONE** — classified via multichannel presence / scopes (`DeviceTypeNVR` / `DeviceTypeDVR`).
+- E6. Múltiples canales. **DONE** — architectural rule: 1 IP != 1 camera; `DiscoveredDevice` hosts multiple `VideoSource` entries.
+- E7. Capabilities. **DONE** — `GetCapabilities` in `internal/discovery/onvif`.
+- E8. Profiles. **DONE** — `GetProfiles` in `internal/discovery/onvif`.
+- E9. Resolución/FPS/codecs. **DONE** — extracted in `MediaProfile`.
+- E10. URI RTSP. **DONE** — `GetStreamUri` with fail-closed sanitization (credentials strictly purged, passwords with special chars stripped).
+- E11. Deduplicación. **DONE** — stable identity hierarchy: EPR UUID > Serial > normalized endpoint IP:port:path.
+- E12. Re-discovery. **DONE** — background rediscovery scheduler with jitter and mutex serialization.
+- E13. Inventario local. **DONE** — thread-safe `Inventory` (`internal/discovery/types.go`).
+- E14. Inventory → SaaS. **DONE** — pull model: `ClaimNextDiscoveryRun` + `ReportDiscoveryRun` (`internal/transport/discovery.go`, `internal/discovery/module.go`).
+- E15. UI dispositivos encontrados. **DONE (SaaS)** — `monitoreoia` `edge_devices.js` candidate rendering, device types, auth badges.
+- E16. Confirmar/rechazar. **DONE (SaaS)** — migration 019 (`'discovered' | 'confirmed' | 'ignored'`), endpoints, UI confirmation without premature camera creation.
 
-- E1. ONVIF WS-Discovery.
-- E2. Escaneo de dispositivos.
-- E3. IP/fabricante/modelo.
-- E4. Cámaras.
-- E5. DVR/NVR.
-- E6. Múltiples canales.
-- E7. Capabilities.
-- E8. Profiles.
-- E9. Resolución/FPS/codecs.
-- E10. URI RTSP.
-- E11. Deduplicación.
-- E12. Re-discovery.
-- E13. Inventario local.
-- E14. Inventory → SaaS.
-- E15. UI dispositivos encontrados.
-- E16. Confirmar/rechazar.
+**E — DONE / CODE COMPLETE.** Pure stdlib Go, `CGO_ENABLED=0`, cross-compiles to `linux/amd64` and `linux/arm64`, 100% tests passing with race detector, real device tested on LAN (Tapo TC70 detected). SaaS backward compatible with existing tables and models.
 
 ## F — Credenciales de cámaras
 
