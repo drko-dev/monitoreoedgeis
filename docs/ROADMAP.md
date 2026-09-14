@@ -12,7 +12,7 @@
 | B     | DONE / MERGED         |
 | C     | DONE / MERGED         |
 | D     | DONE / MERGED         |
-| E     | DONE / CODE COMPLETE  |
+| E     | DONE / VALIDATED LOCAL|
 | F     | NEXT                  |
 | G–Z   | PLANNED               |
 
@@ -129,7 +129,7 @@ completa y `docs/PROJECT_STATUS.md` para el detalle de validación.
 - E15. UI dispositivos encontrados. **DONE (SaaS)** — `monitoreoia` `edge_devices.js` candidate rendering, device types, auth badges.
 - E16. Confirmar/rechazar. **DONE (SaaS)** — migration 019 (`'discovered' | 'confirmed' | 'ignored'`), endpoints, UI confirmation without premature camera creation.
 
-**E — DONE / CODE COMPLETE.** Pure stdlib Go, `CGO_ENABLED=0`, cross-compiles to `linux/amd64` and `linux/arm64`, 100% tests passing with race detector, real device tested on LAN (Tapo TC70 detected). SaaS backward compatible with existing tables and models.
+**E — DONE / VALIDATED LOCAL.** Pure stdlib Go, `CGO_ENABLED=0`, cross-compiles to `linux/amd64` and `linux/arm64`, 100% tests passing with race detector, real device tested on LAN (Tapo TC70 detected at 192.168.0.6:2020), full E2E flow Edge ↔ SaaS validated (discovery/next + report, candidate persistence, confirmation, deduplication, auth_required, simulator scenarios). SaaS backward compatible with existing tables and models.
 
 ## F — Credenciales de cámaras
 

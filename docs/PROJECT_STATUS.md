@@ -10,7 +10,7 @@
 | ----------------- | ----------------------------------------------------------- |
 | **PROJECT**       | GEO CAM Edge                                              |
 | **CURRENT HITO**  | E — Autodiscovery (ONVIF WS-Discovery & Local Inventory)   |
-| **STATE**         | DONE / CODE COMPLETE — 100% tests green, real LAN camera validated |
+| **STATE**         | DONE / VALIDATED LOCAL — 100% tests green, real LAN camera validated |
 | **MERGED**        | **NO** — this branch is not merged to `main`               |
 | **Branch**        | `feature/edge-autodiscovery` (based on `main`, Hito D merged) |
 | **DEPLOYED PROD** | **NO** — VPS/production untouched                         |
@@ -372,7 +372,7 @@ credential is the one SaaS-side condition that degrades the whole agent.
 
 ## NEXT
 
-Hito E is DONE / CODE COMPLETE. Next is Hito F (Camera credentials storage & management).
+Hito E is DONE / VALIDATED LOCAL. Next is Hito F (Camera credentials storage & management).
 Do not start Hito F until explicitly authorized. Do not auto-merge `feature/edge-autodiscovery`.
 
 ## HOW ANOTHER AI SHOULD CONTINUE
