@@ -112,10 +112,21 @@ will implement this interface later.
 `internal/heartbeat` is a `Module`, not a loop in `main.go`: it starts and
 stops with the rest of the agent and unwinds cleanly on shutdown.
 
-**Payload.** `edge_id, agent_version, uptime_seconds, architecture,
-processing_mode, health_status, system{cpu_percent, memory_total_bytes,
-memory_used_bytes, disk_total_bytes, disk_used_bytes}` plus optional
-`temperature_c`. It deliberately carries **no tenant and no site**: the SaaS
+**Payload.** `edge_id, edge_version, uptime_seconds, architecture,
+processing_mode, health_status, metrics{cpu_percent, memory_total_bytes,
+memory_used_bytes, disk_total_bytes, disk_used_bytes, temperature_c}`.
+
+The SaaS model is `extra="forbid"`, so an unknown field is a `422`, not a
+field the server ignores. Two names were therefore reconciled against what
+the SaaS already had rather than sent alongside it:
+
+- `agent_version` → **`edge_version`**, the field the legacy Python agents
+  already populate and the Edge admin UI already renders.
+- `system{...}` → **`metrics{...}`**, the existing telemetry object, which
+  already carried `cpu_percent`. Sending a second container beside it would
+  have split resource readings across two shapes.
+
+It deliberately carries **no tenant and no site**: the SaaS
 derives those from the authenticated credential and must never take the
 Edge's word for them. `edge_id` is sent only so the SaaS can *cross-check* it
 against the authenticated device — it is never an identity claim.

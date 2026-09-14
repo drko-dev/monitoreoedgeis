@@ -49,7 +49,23 @@ func newHeartbeatModule(
 	// One CPU sampler for the life of the module: utilisation is a delta
 	// between consecutive readings, so it must not be rebuilt per heartbeat.
 	cpu := &platform.CPUSampler{}
-	bootID := ident.EdgeID
+
+	// A boot ID identifies this *process run*, so it must be regenerated on
+	// every start — the Edge ID is stable across restarts and would make the
+	// field meaningless. SequenceNumber restarts at 1 with it, so the pair
+	// lets the SaaS discard a stale snapshot that overtakes a newer one
+	// without mistaking a freshly restarted Edge (sequence 1, new boot) for
+	// an old one. Getting this wrong would leave a recreated K3s pod stuck
+	// OFFLINE behind its predecessor's higher sequence numbers.
+	//
+	// Entropy failure is not fatal: an empty boot_id is omitted from the
+	// payload and the heartbeat still reports liveness.
+	bootID, err := identity.NewUUIDv4()
+	if err != nil {
+		log.Warn("heartbeat: could not generate a boot id; continuing without one",
+			slog.Any("error", err))
+		bootID = ""
+	}
 	var sequence int64
 
 	build := func() transport.HeartbeatRequest {
@@ -58,7 +74,7 @@ func newHeartbeatModule(
 		snap := reporter.Snapshot()
 		return transport.HeartbeatRequest{
 			EdgeID:         ident.EdgeID,
-			AgentVersion:   Version,
+			EdgeVersion:    Version,
 			UptimeSeconds:  int64(reporter.Uptime().Seconds()),
 			Architecture:   snap.Architecture,
 			ProcessingMode: cfg.ProcessingMode.String(),
@@ -66,13 +82,13 @@ func newHeartbeatModule(
 			BootID:         bootID,
 			SequenceNumber: sequence,
 			EdgeTimestamp:  time.Now().UTC().Format(time.RFC3339),
-			TemperatureC:   sample.TemperatureC,
 			System: transport.HeartbeatSystem{
 				CPUPercent:       sample.CPUPercent,
 				MemoryTotalBytes: sample.MemTotalBytes,
 				MemoryUsedBytes:  sample.MemUsedBytes,
 				DiskTotalBytes:   sample.DiskTotalBytes,
 				DiskUsedBytes:    sample.DiskUsedBytes,
+				TemperatureC:     sample.TemperatureC,
 			},
 		}
 	}

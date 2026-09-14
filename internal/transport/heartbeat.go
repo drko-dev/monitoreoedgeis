@@ -29,15 +29,22 @@ func (e *RateLimitError) Error() string {
 
 func (e *RateLimitError) Unwrap() error { return ErrRateLimited }
 
-// HeartbeatSystem is the resource snapshot nested under "system" in a
+// HeartbeatSystem is the resource snapshot nested under "metrics" in a
 // heartbeat. Every field is optional: a host that cannot measure something
 // omits it rather than sending a zero that reads as a real measurement.
+//
+// It deliberately reuses the SaaS's existing "metrics" object — which already
+// carried cpu_percent — rather than introducing a second, parallel telemetry
+// container next to it.
 type HeartbeatSystem struct {
 	CPUPercent       *float64 `json:"cpu_percent,omitempty"`
 	MemoryTotalBytes uint64   `json:"memory_total_bytes,omitempty"`
 	MemoryUsedBytes  uint64   `json:"memory_used_bytes,omitempty"`
 	DiskTotalBytes   uint64   `json:"disk_total_bytes,omitempty"`
 	DiskUsedBytes    uint64   `json:"disk_used_bytes,omitempty"`
+	// TemperatureC sits with the other measurements rather than at the top
+	// level, and is omitted entirely on a host with no thermal sensor.
+	TemperatureC *float64 `json:"temperature_c,omitempty"`
 }
 
 // HeartbeatRequest is the body sent to HeartbeatPath. The SaaS validates it
@@ -50,8 +57,12 @@ type HeartbeatSystem struct {
 // authenticated device — it is a cross-check, never an identity claim, and
 // never a secret.
 type HeartbeatRequest struct {
-	EdgeID         string `json:"edge_id,omitempty"`
-	AgentVersion   string `json:"agent_version,omitempty"`
+	EdgeID string `json:"edge_id,omitempty"`
+	// EdgeVersion reuses the SaaS's existing agent-version field, which the
+	// legacy Python agents already populate and the Edge admin UI already
+	// renders. A second "agent_version" alongside it would have been the same
+	// fact under two names.
+	EdgeVersion    string `json:"edge_version,omitempty"`
 	UptimeSeconds  int64  `json:"uptime_seconds"`
 	Architecture   string `json:"architecture,omitempty"`
 	ProcessingMode string `json:"processing_mode,omitempty"`
@@ -65,10 +76,8 @@ type HeartbeatRequest struct {
 	SequenceNumber int64  `json:"sequence_number,omitempty"`
 	// EdgeTimestamp is diagnostic only. The authoritative last_seen is the
 	// SaaS's own clock at arrival.
-	EdgeTimestamp string `json:"edge_timestamp,omitempty"`
-	// TemperatureC is omitted entirely on hosts with no thermal sensor.
-	TemperatureC *float64        `json:"temperature_c,omitempty"`
-	System       HeartbeatSystem `json:"system"`
+	EdgeTimestamp string          `json:"edge_timestamp,omitempty"`
+	System        HeartbeatSystem `json:"metrics"`
 }
 
 // Heartbeat posts one heartbeat authenticated with deviceID + credential.

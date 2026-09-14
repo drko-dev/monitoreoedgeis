@@ -26,21 +26,21 @@ func sampleRequest() HeartbeatRequest {
 	temp := 47.25
 	return HeartbeatRequest{
 		EdgeID:         "edge-abc",
-		AgentVersion:   "1.2.3",
+		EdgeVersion:    "1.2.3",
 		UptimeSeconds:  3600,
 		Architecture:   "arm64",
 		ProcessingMode: "cloud",
 		HealthStatus:   "READY",
-		BootID:         "edge-abc",
+		BootID:         "boot-xyz",
 		SequenceNumber: 7,
 		EdgeTimestamp:  "2026-01-01T00:00:00Z",
-		TemperatureC:   &temp,
 		System: HeartbeatSystem{
 			CPUPercent:       &cpu,
 			MemoryTotalBytes: 8 << 30,
 			MemoryUsedBytes:  2 << 30,
 			DiskTotalBytes:   64 << 30,
 			DiskUsedBytes:    10 << 30,
+			TemperatureC:     &temp,
 		},
 	}
 }
@@ -114,21 +114,27 @@ func TestHeartbeatPayloadMatchesTheServerModel(t *testing.T) {
 
 	for key, want := range map[string]any{
 		"edge_id":         "edge-abc",
-		"agent_version":   "1.2.3",
+		"edge_version":    "1.2.3",
 		"uptime_seconds":  float64(3600),
 		"architecture":    "arm64",
 		"processing_mode": "cloud",
 		"health_status":   "READY",
-		"temperature_c":   47.25,
 	} {
 		if got := body[key]; got != want {
 			t.Errorf("%s = %#v, want %#v", key, got, want)
 		}
 	}
 
-	system, ok := body["system"].(map[string]any)
+	// The SaaS model is extra="forbid", so a field it does not know is a 422,
+	// not a field it ignores. agent_version was renamed to the pre-existing
+	// edge_version rather than sent alongside it.
+	if _, present := body["agent_version"]; present {
+		t.Error("agent_version must not be sent: the SaaS field is edge_version")
+	}
+
+	system, ok := body["metrics"].(map[string]any)
 	if !ok {
-		t.Fatalf("system = %#v, want a nested object", body["system"])
+		t.Fatalf("metrics = %#v, want a nested object", body["metrics"])
 	}
 	for key, want := range map[string]any{
 		"cpu_percent":        12.5,
@@ -136,10 +142,17 @@ func TestHeartbeatPayloadMatchesTheServerModel(t *testing.T) {
 		"memory_used_bytes":  float64(2 << 30),
 		"disk_total_bytes":   float64(64 << 30),
 		"disk_used_bytes":    float64(10 << 30),
+		"temperature_c":      47.25,
 	} {
 		if got := system[key]; got != want {
-			t.Errorf("system.%s = %#v, want %#v", key, got, want)
+			t.Errorf("metrics.%s = %#v, want %#v", key, got, want)
 		}
+	}
+
+	// Resource readings belong in the SaaS's existing metrics object, not in
+	// a second telemetry container beside it.
+	if _, present := body["system"]; present {
+		t.Error("payload must not carry a parallel \"system\" object next to \"metrics\"")
 	}
 }
 
@@ -181,15 +194,15 @@ func TestHeartbeatOmitsUnavailableOptionalMetrics(t *testing.T) {
 		t.Fatalf("Heartbeat: %v", err)
 	}
 
-	if _, present := body["temperature_c"]; present {
-		t.Error("temperature_c must be omitted when no sensor exists, not sent as null or 0")
+	system, _ := body["metrics"].(map[string]any)
+	if _, present := system["temperature_c"]; present {
+		t.Error("metrics.temperature_c must be omitted when no sensor exists, not sent as null or 0")
 	}
-	system, _ := body["system"].(map[string]any)
 	if _, present := system["cpu_percent"]; present {
-		t.Error("system.cpu_percent must be omitted when CPU cannot be measured")
+		t.Error("metrics.cpu_percent must be omitted when CPU cannot be measured")
 	}
 	if _, present := system["memory_total_bytes"]; present {
-		t.Error("system.memory_total_bytes must be omitted when memory cannot be read")
+		t.Error("metrics.memory_total_bytes must be omitted when memory cannot be read")
 	}
 }
 

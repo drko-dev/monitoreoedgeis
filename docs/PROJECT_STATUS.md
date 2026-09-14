@@ -298,10 +298,17 @@ Hito C client — no duplicated HTTP client — and sends both `X-Device-Id` and
 `Authorization: Bearer <credential>`, exactly like every other authenticated
 call.
 
-**Payload.** `edge_id, agent_version, uptime_seconds, architecture,
-processing_mode, health_status, system{cpu_percent, memory_total_bytes,
-memory_used_bytes, disk_total_bytes, disk_used_bytes}`, optional
-`temperature_c`, plus `boot_id`/`sequence_number` (reusing the existing legacy
+**Payload — reconciled against the real SaaS model.** `EdgeHeartbeatPayload`
+in `monitoreoia` is `extra="forbid"`, so an unknown field is a `422`. Two
+names were reconciled instead of duplicated: `agent_version` → `edge_version`
+(already populated by the legacy Python agents and rendered by the admin UI),
+and `system{...}` → `metrics{...}` (the existing telemetry object, which
+already carried `cpu_percent`).
+
+Sent: `edge_id, edge_version, uptime_seconds, architecture, processing_mode,
+health_status, metrics{cpu_percent, memory_total_bytes, memory_used_bytes,
+disk_total_bytes, disk_used_bytes, temperature_c}`, plus
+`boot_id`/`sequence_number` (reusing the existing legacy
 fields so the SaaS can discard a stale snapshot that overtakes a newer one)
 and a diagnostic-only `edge_timestamp`. It carries **no tenant and no site**:
 the SaaS derives those from the credential. `edge_id` is a cross-check for the
