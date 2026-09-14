@@ -10,7 +10,7 @@
 | ----------------- | ----------------------------------------------------------- |
 | **PROJECT**       | GEO CAM Edge                                              |
 | **CURRENT HITO**  | D — Heartbeat Edge → SaaS                                 |
-| **STATE**         | IMPLEMENTED, TESTED locally against a mock SaaS (`httptest`). |
+| **STATE**         | DONE / VALIDATED LOCAL — full E2E against the real SaaS + K3s pod recreation, both PASS. |
 | **MERGED**        | **NO** — this branch is not merged to `main`               |
 | **Branch**        | `feature/edge-heartbeat` (based on `main`, Hito C merged)  |
 | **DEPLOYED PROD** | **NO** — VPS/production untouched                         |
@@ -203,12 +203,11 @@ autodiscovery, RTSP, FFmpeg, OpenCV, YOLO, PyTorch, Vision Worker, real
 WebSocket, VPN, OTA, real camera credential management, video pipeline, AI
 processing.
 
-Gateway enrollment itself (`geocam-edge enroll` / `credential rotate`) IS
-implemented (see Hito C below), but has NOT been exercised against the real
-SaaS — only against a local `httptest` mock and manual smoke tests. Treat it
-as CODE DONE, not VALIDATED against production.
+Gateway enrollment (`geocam-edge enroll` / `credential rotate`) and heartbeat
+(Hito D) ARE exercised end-to-end against the real SaaS and in K3s — see
+Hito C and Hito D below.
 
-## Hito C: Enrollment con SaaS — CODE DONE, CONTRACT RECONCILED, NOT K3s-VALIDATED
+## Hito C: Enrollment con SaaS — DONE / MERGED / VALIDATED
 
 Added on `feature/edge-enrollment` (branched from `main` at `4ce560d`, which
 already has Hito B merged). The SaaS contract below was verified against the
@@ -269,20 +268,16 @@ hash of it:
 - No explicit `--force` re-enrollment flow (only the double-enrollment
   guard on `enroll`). Re-enrolling today means manually removing
   `credentials.json`.
-- No automated integration test against the real `monitoreoia` SaaS — only
-  `httptest`-mocked unit/integration tests (including the zero-knowledge
-  wire-level check that the plaintext credential never appears in the
-  enroll request body) and a manual smoke test against a local mock server.
-- Not validated inside K3s (Hito B's validation was; Hito C's was not, by
-  explicit user instruction).
 - No cross-restart persistence for a partially-failed rotation (documented
   `ponytail:` in `cmd/geocam-edge/main.go`): rotation retries only within one
   process invocation, up to 3 attempts.
 
-**Follow-up before this can be considered fully done:** a real end-to-end
-enrollment/rotation run against a staging SaaS, and K3s validation.
+**Update (Hito D closure):** enrollment/rotation were exercised end-to-end
+against the real local `monitoreoia` SaaS and validated inside K3s (pod
+recreation, PVC-backed identity/credential survival) as part of the Hito D
+E2E — see below. Hito C is DONE / MERGED / VALIDATED, not just code-complete.
 
-## Hito D: Heartbeat Edge → SaaS — CODE DONE
+## Hito D: Heartbeat Edge → SaaS — DONE / VALIDATED LOCAL
 
 Added on `feature/edge-heartbeat` (branched from `main`, Hito C merged).
 
@@ -341,16 +336,33 @@ under `heartbeat` (`state`, `last_success_at`, `last_attempt_at`,
 credential is the one SaaS-side condition that degrades the whole agent.
 `/status` never carries the credential, a Bearer header, a token or a hash.
 
+**Validated end-to-end against the real local `monitoreoia` SaaS** (not just
+`httptest`-mocked unit tests) and in K3s:
+- Online: heartbeat received, `last_seen` updated server-side, UI shows
+  Online, uptime/version/architecture/CPU/RAM/disk all present.
+- Offline: after the offline threshold with no heartbeat, UI shows Offline.
+- Recovery: restarting the Edge resumes heartbeating with the same
+  `edge_id` and credential (no re-enrollment) and the SaaS returns to
+  Online.
+- SaaS unavailable → degraded/recovery: stopping the local SaaS leaves the
+  Edge `READY` (no crash-loop) with `heartbeat.state` reporting the
+  degradation in `/status`; restarting the SaaS recovers automatically.
+- Revocation → 401/403: the Edge goes DEGRADED locally, does not
+  re-enroll, does not generate a new credential, and does not retry
+  aggressively.
+- K3s: full pod recreation exercised in Rancher Desktop K3s. Same `edge_id`
+  and credential survive the pod being deleted and recreated (PVC-backed
+  identity), a fresh `boot_id` is issued per process, `sequence_number`
+  restarts correctly under the new `boot_id`, and the SaaS observes ≥2
+  heartbeats and Online status after recreation.
+
 **Not done / explicitly out of scope for this pass:**
-- No integration test against the real `monitoreoia` SaaS — only
-  `httptest`-mocked tests.
-- Not validated inside K3s.
 - No timeseries: the SaaS stores the latest snapshot only (MVP).
 
 ## NEXT
 
-Do not start Hito E (ONVIF, cameras, RTSP, autodiscovery, YOLO, video) until
-Hito D is validated end-to-end against the real SaaS and in K3s. Do not merge
+Hito D is DONE / VALIDATED LOCAL. Do not start Hito E (ONVIF, cameras,
+RTSP, autodiscovery, YOLO, video) until explicitly authorized. Do not merge
 `feature/edge-heartbeat` until explicitly authorized.
 
 ## HOW ANOTHER AI SHOULD CONTINUE

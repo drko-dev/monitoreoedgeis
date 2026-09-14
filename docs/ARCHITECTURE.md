@@ -132,7 +132,7 @@ Edge's word for them. `edge_id` is sent only so the SaaS can *cross-check* it
 against the authenticated device — it is never an identity claim.
 
 - `uptime_seconds` is the **process's** uptime (monotonic), not the host's.
-- `agent_version` comes from the single existing version source, not a literal.
+- `edge_version` comes from the single existing version source, not a literal.
 - `architecture` reuses the existing `amd64`/`arm64` normalisation.
 
 **Metrics.** Sampled by `internal/platform` with `CGO_ENABLED=0`: CPU from
