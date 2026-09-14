@@ -11,6 +11,8 @@ func TestLoadDefaults(t *testing.T) {
 		"GEOCAM_EDGE_ID", "GEOCAM_PROCESSING_MODE", "GEOCAM_LOG_LEVEL",
 		"GEOCAM_SAAS_URL", "GEOCAM_HEARTBEAT_INTERVAL", "GEOCAM_DATA_DIR",
 		"GEOCAM_HEALTH_ADDR", "GEOCAM_ALLOW_INSECURE_HTTP", "GEOCAM_SAAS_TIMEOUT",
+		"GEOCAM_DISCOVERY_ENABLED", "GEOCAM_DISCOVERY_INTERVAL", "GEOCAM_DISCOVERY_TIMEOUT",
+		"GEOCAM_DISCOVERY_INTERFACES",
 	} {
 		t.Setenv(k, "")
 	}
@@ -43,6 +45,18 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.SaaSTimeout != DefaultSaaSTimeout {
 		t.Errorf("SaaSTimeout = %v, want %v", cfg.SaaSTimeout, DefaultSaaSTimeout)
 	}
+	if !cfg.DiscoveryEnabled {
+		t.Errorf("DiscoveryEnabled = false, want true by default")
+	}
+	if cfg.DiscoveryInterval != DefaultDiscoveryInterval {
+		t.Errorf("DiscoveryInterval = %v, want %v", cfg.DiscoveryInterval, DefaultDiscoveryInterval)
+	}
+	if cfg.DiscoveryTimeout != DefaultDiscoveryTimeout {
+		t.Errorf("DiscoveryTimeout = %v, want %v", cfg.DiscoveryTimeout, DefaultDiscoveryTimeout)
+	}
+	if len(cfg.DiscoveryInterfaces) != 0 {
+		t.Errorf("DiscoveryInterfaces = %v, want empty", cfg.DiscoveryInterfaces)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -53,6 +67,10 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("GEOCAM_HEARTBEAT_INTERVAL", "90s")
 	t.Setenv("GEOCAM_DATA_DIR", "/tmp/geocam")
 	t.Setenv("GEOCAM_HEALTH_ADDR", "127.0.0.1:9091")
+	t.Setenv("GEOCAM_DISCOVERY_ENABLED", "false")
+	t.Setenv("GEOCAM_DISCOVERY_INTERVAL", "10m")
+	t.Setenv("GEOCAM_DISCOVERY_TIMEOUT", "6s")
+	t.Setenv("GEOCAM_DISCOVERY_INTERFACES", "eth0, eth1")
 
 	cfg, err := Load()
 	if err != nil {
@@ -76,6 +94,18 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.HealthAddr != "127.0.0.1:9091" {
 		t.Errorf("HealthAddr = %q", cfg.HealthAddr)
 	}
+	if cfg.DiscoveryEnabled {
+		t.Errorf("DiscoveryEnabled = true, want false")
+	}
+	if cfg.DiscoveryInterval != 10*time.Minute {
+		t.Errorf("DiscoveryInterval = %v, want 10m", cfg.DiscoveryInterval)
+	}
+	if cfg.DiscoveryTimeout != 6*time.Second {
+		t.Errorf("DiscoveryTimeout = %v, want 6s", cfg.DiscoveryTimeout)
+	}
+	if len(cfg.DiscoveryInterfaces) != 2 || cfg.DiscoveryInterfaces[0] != "eth0" || cfg.DiscoveryInterfaces[1] != "eth1" {
+		t.Errorf("DiscoveryInterfaces = %v, want [eth0, eth1]", cfg.DiscoveryInterfaces)
+	}
 }
 
 func TestLoadRejectsInvalidValues(t *testing.T) {
@@ -92,6 +122,12 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{"GEOCAM_HEALTH_ADDR", "not-a-valid-addr"},
 		{"GEOCAM_SAAS_TIMEOUT", "soon"},
 		{"GEOCAM_SAAS_TIMEOUT", "-5s"},
+		{"GEOCAM_DISCOVERY_INTERVAL", "invalid"},
+		{"GEOCAM_DISCOVERY_INTERVAL", "30s"}, // Below MinDiscoveryInterval 1m
+		{"GEOCAM_DISCOVERY_INTERVAL", "25h"}, // Above MaxDiscoveryInterval 24h
+		{"GEOCAM_DISCOVERY_TIMEOUT", "invalid"},
+		{"GEOCAM_DISCOVERY_TIMEOUT", "500ms"}, // Below MinDiscoveryTimeout 1s
+		{"GEOCAM_DISCOVERY_TIMEOUT", "31s"},   // Above MaxDiscoveryTimeout 30s
 	}
 	for _, tt := range tests {
 		t.Run(tt.key+"="+tt.value, func(t *testing.T) {

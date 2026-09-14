@@ -31,4 +31,9 @@ const (
 	// fields — not a parallel v2 endpoint. The SaaS stamps last_seen from its
 	// own clock on arrival; nothing in the body claims connectivity.
 	HeartbeatPath = "/api/v1/edge/heartbeat"
+	// DiscoveryNextPath is polled by gateway devices to claim pending discovery runs.
+	// 204 No Content means no run is pending; 200 OK returns {"run_id": <int>}.
+	DiscoveryNextPath = "/api/v1/gateway/discovery/next"
+	// DiscoveryReportPath is used to report completion or failure of a claimed run.
+	DiscoveryReportPath = "/api/v1/gateway/discovery/runs/%d/report"
 )

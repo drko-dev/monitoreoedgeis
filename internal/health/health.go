@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
+	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
 	"github.com/drko-dev/monitoreoedgeis/internal/heartbeat"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
@@ -50,7 +51,8 @@ type Snapshot struct {
 	// the module is not running (unenrolled Edge, or no SaaS URL set). It
 	// carries timings, counters and an error class only — never the
 	// credential, never an Authorization header, never a hash.
-	Heartbeat *heartbeat.Status `json:"heartbeat,omitempty"`
+	Heartbeat *heartbeat.Status       `json:"heartbeat,omitempty"`
+	Discovery *discovery.ModuleStatus `json:"discovery,omitempty"`
 }
 
 // Reporter holds the mutable health state of the agent, including per-module
@@ -63,6 +65,7 @@ type Reporter struct {
 	modules          map[string]string
 	credentialStatus string
 	heartbeat        *heartbeat.Status
+	discovery        *discovery.ModuleStatus
 
 	version string
 	cfg     *config.Config
@@ -115,6 +118,14 @@ func (r *Reporter) SetHeartbeatStatus(s heartbeat.Status) {
 	r.heartbeat = &s
 }
 
+// SetDiscoveryStatus records the discovery module's latest status for
+// reporting in Snapshot. The module calls this on every status change.
+func (r *Reporter) SetDiscoveryStatus(s discovery.ModuleStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.discovery = &s
+}
+
 // State returns the current state.
 func (r *Reporter) State() State {
 	r.mu.RLock()
@@ -146,6 +157,11 @@ func (r *Reporter) Snapshot() Snapshot {
 		copied := *r.heartbeat
 		hb = &copied
 	}
+	var disc *discovery.ModuleStatus
+	if r.discovery != nil {
+		copied := *r.discovery
+		disc = &copied
+	}
 
 	return Snapshot{
 		Status:           r.state,
@@ -161,5 +177,6 @@ func (r *Reporter) Snapshot() Snapshot {
 		Uptime:           uptime.Round(time.Second).String(),
 		Modules:          modules,
 		Heartbeat:        hb,
+		Discovery:        disc,
 	}
 }

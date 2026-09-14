@@ -7,6 +7,7 @@ import (
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
+	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
@@ -147,5 +148,54 @@ func TestCredentialsExistsGuardsDoubleEnrollment(t *testing.T) {
 	}
 	if !creds.IsEnrolled() {
 		t.Fatal("IsEnrolled() = false, want true (double-enrollment guard would not trigger)")
+	}
+}
+
+func TestDiscoveryScanReportEmpty(t *testing.T) {
+	out := discoveryScanReport(nil)
+	if !strings.Contains(out, "No network video devices discovered") {
+		t.Errorf("unexpected output for nil result: %s", out)
+	}
+
+	emptyRes := &discovery.ScanResult{Duration: 500 * time.Millisecond}
+	out = discoveryScanReport(emptyRes)
+	if !strings.Contains(out, "No network video devices discovered") || !strings.Contains(out, "500ms") {
+		t.Errorf("unexpected output for empty result: %s", out)
+	}
+}
+
+func TestDiscoveryScanReportWithDevices(t *testing.T) {
+	res := &discovery.ScanResult{
+		Duration: 1200 * time.Millisecond,
+		DevicesFound: []discovery.DiscoveredDevice{
+			{
+				IP:           "192.168.1.50",
+				Port:         80,
+				Path:         "/onvif/device_service",
+				EPRAddress:   "urn:uuid:aabbccdd-1122-3344-5566-778899aabbcc",
+				DeviceType:   discovery.DeviceTypeCamera,
+				Manufacturer: "AcmeCorp",
+				Model:        "CamX",
+				Serial:       "SN0001",
+				Firmware:     "1.0.4",
+				AuthRequired: false,
+			},
+		},
+	}
+
+	out := discoveryScanReport(res)
+	for _, want := range []string{
+		"192.168.1.50:80/onvif/device_service",
+		"urn:uuid:aabbccdd-1122-3344-5566-778899aabbcc",
+		"camera",
+		"AcmeCorp",
+		"CamX",
+		"SN0001",
+		"1.0.4",
+		"Auth Required: false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q:\n%s", want, out)
+		}
 	}
 }

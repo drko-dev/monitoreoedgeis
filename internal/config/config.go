@@ -25,6 +25,11 @@ type Config struct {
 	AllowInsecureHTTP bool
 	// SaaSTimeout bounds every SaaS HTTP request (enroll, rotate, me).
 	SaaSTimeout time.Duration
+	// Discovery settings (Milestone E).
+	DiscoveryEnabled    bool
+	DiscoveryInterval   time.Duration
+	DiscoveryTimeout    time.Duration
+	DiscoveryInterfaces []string
 }
 
 // Defaults. No secrets, no credentials.
@@ -45,6 +50,14 @@ const (
 	DefaultHealthAddr = "127.0.0.1:8091"
 	// DefaultSaaSTimeout bounds SaaS HTTP requests.
 	DefaultSaaSTimeout = 10 * time.Second
+	// Discovery defaults and bounds.
+	DefaultDiscoveryEnabled  = true
+	DefaultDiscoveryInterval = 5 * time.Minute
+	MinDiscoveryInterval     = 1 * time.Minute
+	MaxDiscoveryInterval     = 24 * time.Hour
+	DefaultDiscoveryTimeout  = 4 * time.Second
+	MinDiscoveryTimeout      = 1 * time.Second
+	MaxDiscoveryTimeout      = 30 * time.Second
 )
 
 var validLogLevels = []string{"debug", "info", "warn", "error"}
@@ -61,6 +74,9 @@ func Load() (*Config, error) {
 		DataDir:           DefaultDataDir,
 		HealthAddr:        DefaultHealthAddr,
 		SaaSTimeout:       DefaultSaaSTimeout,
+		DiscoveryEnabled:  DefaultDiscoveryEnabled,
+		DiscoveryInterval: DefaultDiscoveryInterval,
+		DiscoveryTimeout:  DefaultDiscoveryTimeout,
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_PROCESSING_MODE")); raw != "" {
@@ -116,6 +132,45 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid SaaS timeout %q: must be positive", raw)
 		}
 		cfg.SaaSTimeout = d
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_DISCOVERY_ENABLED")); raw != "" {
+		cfg.DiscoveryEnabled = !(raw == "false" || raw == "0" || strings.ToLower(raw) == "f")
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_DISCOVERY_INTERVAL")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid discovery interval %q: %w", raw, err)
+		}
+		if d < MinDiscoveryInterval || d > MaxDiscoveryInterval {
+			return nil, fmt.Errorf("invalid discovery interval %q: must be between %s and %s",
+				raw, MinDiscoveryInterval, MaxDiscoveryInterval)
+		}
+		cfg.DiscoveryInterval = d
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_DISCOVERY_TIMEOUT")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid discovery timeout %q: %w", raw, err)
+		}
+		if d < MinDiscoveryTimeout || d > MaxDiscoveryTimeout {
+			return nil, fmt.Errorf("invalid discovery timeout %q: must be between %s and %s",
+				raw, MinDiscoveryTimeout, MaxDiscoveryTimeout)
+		}
+		cfg.DiscoveryTimeout = d
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_DISCOVERY_INTERFACES")); raw != "" {
+		parts := strings.Split(raw, ",")
+		var ifaces []string
+		for _, p := range parts {
+			if s := strings.TrimSpace(p); s != "" {
+				ifaces = append(ifaces, s)
+			}
+		}
+		cfg.DiscoveryInterfaces = ifaces
 	}
 
 	// Fail-fast: reject an insecure http:// SaaS URL here, before any

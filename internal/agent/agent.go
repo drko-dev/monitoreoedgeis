@@ -30,6 +30,7 @@ type Agent struct {
 	platform       platform.Info
 	health         *health.Reporter
 	heartbeatErr   error
+	discoveryErr   error
 	modules        *moduleManager
 }
 
@@ -72,7 +73,13 @@ func New(cfg *config.Config) *Agent {
 		mods = append(mods, hb)
 	}
 
+	disc, discErr := newDiscoveryModule(cfg, creds, reporter, logging.Component(log, "discovery"))
+	if disc != nil {
+		mods = append(mods, disc)
+	}
+
 	a.heartbeatErr = hbErr
+	a.discoveryErr = discErr
 	a.modules = newModuleManager(reporter.SetModuleState, mods...)
 	return a
 }
@@ -105,6 +112,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	case a.heartbeatErr != nil:
 		a.log.Error("agent will not become ready: heartbeat module could not be built",
 			slog.Any("error", a.heartbeatErr))
+		a.health.Set(health.StateDegraded)
+	case a.discoveryErr != nil:
+		a.log.Error("agent will not become ready: discovery module could not be built",
+			slog.Any("error", a.discoveryErr))
 		a.health.Set(health.StateDegraded)
 	default:
 		a.health.Set(health.StateReady)

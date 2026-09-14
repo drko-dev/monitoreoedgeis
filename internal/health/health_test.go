@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
+	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 )
@@ -91,5 +92,25 @@ func TestReporterModuleStates(t *testing.T) {
 	}
 	if snap.Modules["other"] != "stopped" {
 		t.Errorf("Modules[other] = %q, want %q", snap.Modules["other"], "stopped")
+	}
+}
+
+func TestReporterDiscoveryStatus(t *testing.T) {
+	r := newTestReporter()
+	if r.Snapshot().Discovery != nil {
+		t.Errorf("Discovery should be nil initially")
+	}
+
+	r.SetDiscoveryStatus(discovery.ModuleStatus{
+		State:       "idle",
+		DeviceCount: 3,
+	})
+
+	snap := r.Snapshot()
+	if snap.Discovery == nil {
+		t.Fatalf("expected non-nil Discovery in snapshot")
+	}
+	if snap.Discovery.State != "idle" || snap.Discovery.DeviceCount != 3 {
+		t.Errorf("unexpected Discovery snapshot: %+v", snap.Discovery)
 	}
 }

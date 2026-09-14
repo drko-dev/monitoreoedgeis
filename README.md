@@ -74,6 +74,10 @@ All configuration comes from environment variables:
 | `GEOCAM_DATA_DIR`          | `/var/lib/geocam-edge`  | Holds `identity.json` and `credentials.json` |
 | `GEOCAM_HEALTH_ADDR`       | `127.0.0.1:8091`        | Local health HTTP bind (localhost-only by default) |
 | `GEOCAM_ENROLLMENT_TOKEN`  | *(empty)*               | One-time enrollment token for `geocam-edge enroll`. Prefer piping via stdin instead. |
+| `GEOCAM_DISCOVERY_ENABLED` | `true`                  | Enables/disables ONVIF WS-Discovery and local inventory scanning |
+| `GEOCAM_DISCOVERY_INTERVAL`| `5m`                    | Interval between periodic background discovery scans (1m–24h) |
+| `GEOCAM_DISCOVERY_TIMEOUT` | `4s`                    | Probe timeout per interface during WS-Discovery (1s–30s) |
+| `GEOCAM_DISCOVERY_INTERFACES` | *(empty)*            | Comma-separated interface names to scan (defaults to auto-private RFC 1918/3927) |
 
 No secrets or credentials are ever logged. The enrollment token and the
 device credential only ever touch: the request to the SaaS, and
@@ -240,19 +244,21 @@ the SaaS release.
 ## Layout
 
 ```
-cmd/geocam-edge/   entrypoint (thin) + identity/check CLI subcommands
+cmd/geocam-edge/   entrypoint (thin) + identity/check/enroll/credential/discovery CLI subcommands
 internal/agent/    agent core: lifecycle, startup, shutdown, module lifecycle, version
 internal/config/   env configuration + ProcessingMode type
-internal/identity/ persistent edge_id (identity.json, UUID v4)
-internal/platform/ host and runtime detection
+internal/credentials/ local zero-knowledge credential store (credentials.json)
+internal/discovery/   ONVIF WS-Discovery, SOAP client, local inventory, SaaS pull module
 internal/health/   lifecycle state + runtime snapshot + local HTTP (/healthz, /readyz, /status)
+internal/heartbeat/ SaaS heartbeat & telemetry reporting loop
+internal/identity/ persistent edge_id (identity.json, UUID v4)
 internal/logging/  log/slog setup
+internal/platform/ host and runtime detection
+internal/transport/ SaaS HTTP client (enroll, me, rotate-key, heartbeat, discovery)
 deploy/helm/       local K3s chart
 ```
 
 ## Not implemented yet
 
-ONVIF, WS-Discovery, RTSP, FFmpeg, OpenCV, YOLO, PyTorch, the Vision Worker,
-real SaaS enrollment, real heartbeat, HTTP API, WebSockets, VPN, OTA, camera
-credentials and video processing are all **out of scope for this milestone**.
-They belong to Hito B and later.
+FFmpeg, OpenCV, YOLO, PyTorch, the Vision Worker, WebSockets, VPN, OTA, camera
+credentials and video streaming processing belong to subsequent milestones (Hito F and later).
