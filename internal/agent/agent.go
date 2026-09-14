@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
+	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/logging"
@@ -20,13 +21,15 @@ import (
 
 // Agent is the edge agent core.
 type Agent struct {
-	cfg         *config.Config
-	log         *slog.Logger
-	identity    identity.Identity
-	identityErr error
-	platform    platform.Info
-	health      *health.Reporter
-	modules     *moduleManager
+	cfg            *config.Config
+	log            *slog.Logger
+	identity       identity.Identity
+	identityErr    error
+	credentials    credentials.Credentials
+	credentialsErr error
+	platform       platform.Info
+	health         *health.Reporter
+	modules        *moduleManager
 }
 
 // New wires the agent from configuration. It performs no network I/O beyond
@@ -37,19 +40,23 @@ type Agent struct {
 // diagnosis, but Run never reaches READY — see logStartup/Run.
 func New(cfg *config.Config) *Agent {
 	ident, identErr := identity.Load(cfg.DataDir, cfg.EdgeID)
+	creds, credErr := credentials.Load(cfg.DataDir)
 	host := platform.Detect()
 
 	log := logging.New(cfg.LogLevel, Version, ident.EdgeID, cfg.ProcessingMode.String())
 	componentLog := logging.Component(log, "agent")
 	reporter := health.New(Version, cfg, ident, host)
+	reporter.SetCredentialStatus(creds.Status.String())
 
 	a := &Agent{
-		cfg:         cfg,
-		log:         componentLog,
-		identity:    ident,
-		identityErr: identErr,
-		platform:    host,
-		health:      reporter,
+		cfg:            cfg,
+		log:            componentLog,
+		identity:       ident,
+		identityErr:    identErr,
+		credentials:    creds,
+		credentialsErr: credErr,
+		platform:       host,
+		health:         reporter,
 	}
 	a.modules = newModuleManager(reporter.SetModuleState,
 		newHealthServerModule(cfg.HealthAddr, reporter, logging.Component(log, "health-http")),
@@ -75,6 +82,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	switch {
 	case a.identityErr != nil:
 		a.log.Error("agent will not become ready: identity error", slog.Any("error", a.identityErr))
+		a.health.Set(health.StateDegraded)
+	case a.credentialsErr != nil:
+		a.log.Error("agent will not become ready: credentials error", slog.Any("error", a.credentialsErr))
 		a.health.Set(health.StateDegraded)
 	case moduleErr != nil:
 		a.log.Error("agent will not become ready: module startup failed", slog.Any("error", moduleErr))
@@ -124,6 +134,14 @@ func (a *Agent) logStartup() {
 			slog.String("enrollment_status", a.identity.Status.String()),
 			slog.String("edge_id", a.identity.EdgeID),
 			slog.String("source", string(a.identity.Source)),
+		)
+	}
+	if a.credentialsErr != nil {
+		a.log.Error("credentials resolution failed", slog.Any("error", a.credentialsErr))
+	} else {
+		// Never log a.credentials.Credential or any Authorization header.
+		a.log.Info("credentials resolved",
+			slog.String("credential_status", a.credentials.Status.String()),
 		)
 	}
 }

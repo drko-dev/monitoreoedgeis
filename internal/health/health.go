@@ -32,6 +32,7 @@ type Snapshot struct {
 	Version          string            `json:"version"`
 	EdgeID           string            `json:"edge_id"`
 	EnrollmentStatus string            `json:"enrollment_status"`
+	CredentialStatus string            `json:"credential_status"`
 	Hostname         string            `json:"hostname"`
 	OS               string            `json:"os"`
 	Architecture     string            `json:"architecture"`
@@ -45,10 +46,11 @@ type Snapshot struct {
 // lifecycle state. It is the single safe accessor for runtime state — it is
 // safe for concurrent use and nothing about it is a package-level global.
 type Reporter struct {
-	mu        sync.RWMutex
-	state     State
-	startedAt time.Time
-	modules   map[string]string
+	mu               sync.RWMutex
+	state            State
+	startedAt        time.Time
+	modules          map[string]string
+	credentialStatus string
 
 	version string
 	cfg     *config.Config
@@ -84,6 +86,15 @@ func (r *Reporter) SetModuleState(name, state string) {
 	r.modules[name] = state
 }
 
+// SetCredentialStatus records the local SaaS credential status (see
+// internal/credentials.Status) for reporting in Snapshot. It is never the
+// credential secret itself — only the status string.
+func (r *Reporter) SetCredentialStatus(status string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.credentialStatus = status
+}
+
 // State returns the current state.
 func (r *Reporter) State() State {
 	r.mu.RLock()
@@ -114,6 +125,7 @@ func (r *Reporter) Snapshot() Snapshot {
 		Version:          r.version,
 		EdgeID:           r.ident.EdgeID,
 		EnrollmentStatus: r.ident.Status.String(),
+		CredentialStatus: r.credentialStatus,
 		Hostname:         r.host.Hostname,
 		OS:               r.host.OS,
 		Architecture:     r.host.GOARCH,

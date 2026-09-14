@@ -67,12 +67,17 @@ All configuration comes from environment variables:
 | `GEOCAM_EDGE_ID`           | *(empty)*               | **Dev override only.** When set, used verbatim and `identity.json` is never read/written. Leave empty in normal use. |
 | `GEOCAM_PROCESSING_MODE`   | `cloud`                 | `cloud` \| `hybrid` \| `edge`         |
 | `GEOCAM_LOG_LEVEL`         | `info`                  | `debug` \| `info` \| `warn` \| `error`|
-| `GEOCAM_SAAS_URL`          | *(empty)*               | Not used yet — no SaaS I/O            |
+| `GEOCAM_SAAS_URL`          | *(empty)*               | Base URL for `enroll`/`credential rotate`. Must be `https://` unless `GEOCAM_ALLOW_INSECURE_HTTP=true`. |
+| `GEOCAM_ALLOW_INSECURE_HTTP` | `false`               | **Dev only.** Allows `GEOCAM_SAAS_URL` to use `http://` instead of `https://`. Never weakens TLS verification for an `https://` URL — it only permits the plaintext scheme. Never set this in production. |
+| `GEOCAM_SAAS_TIMEOUT`      | `10s`                   | Timeout for every SaaS HTTP request (enroll/rotate/me)  |
 | `GEOCAM_HEARTBEAT_INTERVAL`| `30s`                   | Go duration; must be positive         |
-| `GEOCAM_DATA_DIR`          | `/var/lib/geocam-edge`  | Holds `identity.json`                 |
+| `GEOCAM_DATA_DIR`          | `/var/lib/geocam-edge`  | Holds `identity.json` and `credentials.json` |
 | `GEOCAM_HEALTH_ADDR`       | `127.0.0.1:8091`        | Local health HTTP bind (localhost-only by default) |
+| `GEOCAM_ENROLLMENT_TOKEN`  | *(empty)*               | One-time enrollment token for `geocam-edge enroll`. Prefer piping via stdin instead. |
 
-No secrets or credentials are read, stored or logged.
+No secrets or credentials are ever logged. The enrollment token and the
+device credential only ever touch: the request to the SaaS, and
+`credentials.json` (credential only, 0600, never the token).
 
 ## Identity
 
@@ -81,6 +86,70 @@ On first run the agent generates a random UUID (`edge_id`) and persists it to
 belongs to this agent *instance*, never to the underlying hardware. A
 corrupted `identity.json` is a hard error: the agent starts but stays
 `DEGRADED` rather than silently generating a new identity.
+
+`edge_id` is **permanent**: it never changes because of enrollment,
+credential rotation, revocation, re-enrollment, a restart, or the pod being
+recreated. The SaaS enrollment credential (below) is a completely separate,
+rotatable concept.
+
+## SaaS enrollment
+
+**Zero-knowledge model:** the Edge generates its own device credential
+locally (`edg_live_<random>`) and NEVER sends it to the SaaS in plaintext —
+only its SHA-256 hash. The SaaS never generates or returns a credential.
+
+`geocam-edge enroll` claims a one-time enrollment token, generates the
+credential, sends `device_key_hash = sha256(credential)` to the SaaS, and on
+success stores the credential in `credentials.json` under `GEOCAM_DATA_DIR`
+(0600, atomic write). It always reuses the existing `edge_id` — it never
+generates a new one. The credential is never printed, logged, or exposed
+over `/status`. Immediately after a successful claim it also calls
+`GET /edge/me` (authenticated with the just-generated credential) to learn
+the assigned organization/site, since the enroll response itself carries
+neither; if that follow-up call fails, the credential — already valid
+server-side — is still persisted, with empty organization/site and a
+warning telling you to run `geocam-edge check` or retry later.
+
+```bash
+# preferred: pipe the token, keeps it out of shell history
+echo "$TOKEN" | GEOCAM_SAAS_URL=https://saas.example.com go run ./cmd/geocam-edge enroll
+
+# or via env var
+GEOCAM_ENROLLMENT_TOKEN=$TOKEN GEOCAM_SAAS_URL=https://saas.example.com go run ./cmd/geocam-edge enroll
+
+# dev-only convenience (exposes the token in shell history / process list)
+go run ./cmd/geocam-edge enroll --token "$TOKEN"
+```
+
+Running `enroll` again while already enrolled fails on purpose ("already
+enrolled, use re-enrollment flow") — it never silently overwrites an
+existing credential.
+
+Rotate the stored credential (requires already being enrolled):
+
+```bash
+go run ./cmd/geocam-edge credential rotate
+```
+
+Rotation generates a new credential locally, sends only its hash plus a
+client-generated `rotation_id` (idempotency key) to the SaaS, authenticated
+with the CURRENT credential. On a network failure it retries the exact same
+request (same `rotation_id`, same hash) up to 3 attempts with a short
+backoff (1s/2s/4s) before giving up; a rejected/revoked current credential
+(401/403) is not retried. The new credential is only persisted — atomically,
+replacing the old one on disk only via a final successful rename — after the
+SaaS acknowledges the rotation, and is then verified against `/edge/me`. If
+all attempts fail, the previous credential on disk is left completely
+untouched and still works.
+
+Every authenticated call (`/edge/me`, rotate-key) sends both an
+`X-Device-Id` header and `Authorization: Bearer <credential>` — the SaaS
+requires the device id as its own header even though the credential is
+carried by Bearer.
+
+The SaaS contract (`internal/transport/contract.go`) has been verified
+against the real `monitoreoia` implementation — see `docs/PROJECT_STATUS.md`
+for the full reconciliation notes.
 
 ## Run locally
 

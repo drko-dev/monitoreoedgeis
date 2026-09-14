@@ -12,6 +12,12 @@ import (
 // this package did not generate itself.
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
+// NewUUIDv4 generates a random RFC 4122 version-4 UUID using crypto/rand.
+// Exported for reuse by callers that need a client-generated UUID outside
+// this package (e.g. a credential-rotation idempotency key) without
+// duplicating the generation logic.
+func NewUUIDv4() (string, error) { return newUUIDv4() }
+
 // newUUIDv4 generates a random RFC 4122 version-4 UUID using crypto/rand.
 func newUUIDv4() (string, error) {
 	var b [16]byte

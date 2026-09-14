@@ -10,7 +10,8 @@
 | ----- | --------------------- |
 | A     | DONE / VALIDATED LOCAL |
 | B     | CODE DONE / NOT YET K3s-VALIDATED |
-| C–Z   | PLANNED               |
+| C     | CODE DONE / NOT RECONCILED WITH REAL SaaS CONTRACT — see docs/PROJECT_STATUS.md |
+| D–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
 config, health, identity abstraction, platform/version). **That does not mean B
@@ -63,16 +64,24 @@ identical across pod recreation. See `docs/PROJECT_STATUS.md`.
 
 ## C — Enrollment con SaaS
 
-- C1. Flujo de alta.
-- C2. Código/token temporal de enrollment.
-- C3. Asociación Edge → tenant/site.
-- C4. Credencial propia del Edge.
-- C5. Persistencia segura.
-- C6. Rotación.
-- C7. Revocación.
-- C8. Re-enrollment.
-- C9. API SaaS para Edge.
-- C10. UI SaaS Edge/Gateways.
+- C1. Flujo de alta. **CODE DONE** — `geocam-edge enroll` (`cmd/geocam-edge/main.go`), token vía stdin/env/`--token` dev.
+- C2. Código/token temporal de enrollment. **CODE DONE** — token nunca persistido, nunca logueado; consumido una sola vez por request.
+- C3. Asociación Edge → tenant/site. **CODE DONE (cliente)** — `tenant_id`/`site_id` persistidos desde la respuesta del SaaS; nombres de campo son SUPUESTOS, ver `docs/PROJECT_STATUS.md`.
+- C4. Credencial propia del Edge. **CODE DONE** — `internal/credentials`, separada de `identity.json`.
+- C5. Persistencia segura. **CODE DONE** — `credentials.json`, atomic write (temp+rename), dir 0700/file 0600, nunca expuesta en `/status`/logs/CLI.
+- C6. Rotación. **CODE DONE** — `geocam-edge credential rotate`, atomic write antes de invalidar la credential vieja en disco, verificación post-rotación vía `/edge/me`.
+- C7. Revocación. **CODE DONE (detección, no persistida)** — un 401/403 de `/edge/me` se reporta como revocación al operador; el SaaS es quien revoca, este repo solo detecta.
+- C8. Re-enrollment. **PARTIAL** — doble enrollment bloqueado explícitamente; no existe todavía un flujo explícito de re-enrollment forzado (ej. `--force`) más allá de borrar `credentials.json` a mano.
+- C9. API SaaS para Edge. **OUT OF SCOPE (repo monitoreoia)**.
+- C10. UI SaaS Edge/Gateways. **OUT OF SCOPE (repo monitoreoia)**.
+
+**C — CODE DONE, NOT RECONCILED.** Todo lo anterior compila, pasa
+`go test ./...`, `go test -race ./...`, `go vet ./...` y `gofmt -l .` contra
+un mock SaaS local (`httptest`). Los paths (`/api/v1/gateway/enroll`,
+`/api/v1/edge/me`, `/api/v1/gateway/edge/rotate-key`) y los nombres de campo
+JSON son SUPUESTOS documentados en `internal/transport/contract.go` — deben
+reconciliarse contra la implementación real de `monitoreoia` antes de
+integrar contra el SaaS real. Ver `docs/PROJECT_STATUS.md` para el detalle.
 
 ## D — Heartbeat y administración
 

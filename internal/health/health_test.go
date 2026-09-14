@@ -70,6 +70,15 @@ func TestSnapshotUnenrolled(t *testing.T) {
 	}
 }
 
+func TestReporterCredentialStatus(t *testing.T) {
+	r := newTestReporter()
+	r.SetCredentialStatus("ENROLLED")
+
+	if got := r.Snapshot().CredentialStatus; got != "ENROLLED" {
+		t.Errorf("CredentialStatus = %q, want %q", got, "ENROLLED")
+	}
+}
+
 func TestReporterModuleStates(t *testing.T) {
 	r := newTestReporter()
 	r.SetModuleState("health-http", "starting")
