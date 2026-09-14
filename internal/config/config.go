@@ -19,6 +19,12 @@ type Config struct {
 	HeartbeatInterval time.Duration
 	DataDir           string
 	HealthAddr        string
+	// AllowInsecureHTTP permits SaaSURL to use http:// instead of https://.
+	// It never weakens TLS verification for an https:// URL — see
+	// internal/transport. Development only; defaults to false.
+	AllowInsecureHTTP bool
+	// SaaSTimeout bounds every SaaS HTTP request (enroll, rotate, me).
+	SaaSTimeout time.Duration
 }
 
 // Defaults. No secrets, no credentials.
@@ -30,6 +36,8 @@ const (
 	// DefaultHealthAddr binds the local health HTTP surface to localhost
 	// only: it is not meant to be exposed to the LAN.
 	DefaultHealthAddr = "127.0.0.1:8091"
+	// DefaultSaaSTimeout bounds SaaS HTTP requests.
+	DefaultSaaSTimeout = 10 * time.Second
 )
 
 var validLogLevels = []string{"debug", "info", "warn", "error"}
@@ -45,6 +53,7 @@ func Load() (*Config, error) {
 		HeartbeatInterval: DefaultHeartbeatInterval,
 		DataDir:           DefaultDataDir,
 		HealthAddr:        DefaultHealthAddr,
+		SaaSTimeout:       DefaultSaaSTimeout,
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_PROCESSING_MODE")); raw != "" {
@@ -84,6 +93,28 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid health addr %q: %w", raw, err)
 		}
 		cfg.HealthAddr = raw
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_ALLOW_INSECURE_HTTP")); raw == "true" {
+		cfg.AllowInsecureHTTP = true
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_SAAS_TIMEOUT")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid SaaS timeout %q: %w", raw, err)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("invalid SaaS timeout %q: must be positive", raw)
+		}
+		cfg.SaaSTimeout = d
+	}
+
+	// Fail-fast: reject an insecure http:// SaaS URL here, before any
+	// request is ever attempted, unless explicitly allowed for development.
+	if cfg.SaaSURL != "" && strings.HasPrefix(strings.ToLower(cfg.SaaSURL), "http://") && !cfg.AllowInsecureHTTP {
+		return nil, fmt.Errorf("insecure GEOCAM_SAAS_URL %q: http:// is disabled by default; "+
+			"set GEOCAM_ALLOW_INSECURE_HTTP=true to allow it in development", cfg.SaaSURL)
 	}
 
 	return cfg, nil

@@ -14,3 +14,7 @@
 .DS_Store
 .idea/
 .vscode/
+
+# Agent tooling state (local only)
+/.codegraph/
+/.omc/

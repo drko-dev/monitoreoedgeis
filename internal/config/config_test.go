@@ -10,7 +10,7 @@ func TestLoadDefaults(t *testing.T) {
 	for _, k := range []string{
 		"GEOCAM_EDGE_ID", "GEOCAM_PROCESSING_MODE", "GEOCAM_LOG_LEVEL",
 		"GEOCAM_SAAS_URL", "GEOCAM_HEARTBEAT_INTERVAL", "GEOCAM_DATA_DIR",
-		"GEOCAM_HEALTH_ADDR",
+		"GEOCAM_HEALTH_ADDR", "GEOCAM_ALLOW_INSECURE_HTTP", "GEOCAM_SAAS_TIMEOUT",
 	} {
 		t.Setenv(k, "")
 	}
@@ -36,6 +36,12 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.HealthAddr != DefaultHealthAddr {
 		t.Errorf("HealthAddr = %q, want %q", cfg.HealthAddr, DefaultHealthAddr)
+	}
+	if cfg.AllowInsecureHTTP {
+		t.Error("AllowInsecureHTTP = true, want false by default")
+	}
+	if cfg.SaaSTimeout != DefaultSaaSTimeout {
+		t.Errorf("SaaSTimeout = %v, want %v", cfg.SaaSTimeout, DefaultSaaSTimeout)
 	}
 }
 
@@ -79,6 +85,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{"GEOCAM_HEARTBEAT_INTERVAL", "soon"},
 		{"GEOCAM_HEARTBEAT_INTERVAL", "-5s"},
 		{"GEOCAM_HEALTH_ADDR", "not-a-valid-addr"},
+		{"GEOCAM_SAAS_TIMEOUT", "soon"},
+		{"GEOCAM_SAAS_TIMEOUT", "-5s"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.key+"="+tt.value, func(t *testing.T) {
@@ -87,6 +95,37 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 				t.Fatalf("Load() succeeded with %s=%q, want error", tt.key, tt.value)
 			}
 		})
+	}
+}
+
+func TestLoadRejectsInsecureHTTPByDefault(t *testing.T) {
+	t.Setenv("GEOCAM_SAAS_URL", "http://saas.example.test")
+	t.Setenv("GEOCAM_ALLOW_INSECURE_HTTP", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() succeeded with http:// GEOCAM_SAAS_URL and no override, want error")
+	}
+}
+
+func TestLoadAllowsInsecureHTTPWhenExplicit(t *testing.T) {
+	t.Setenv("GEOCAM_SAAS_URL", "http://saas.example.test")
+	t.Setenv("GEOCAM_ALLOW_INSECURE_HTTP", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.AllowInsecureHTTP {
+		t.Error("AllowInsecureHTTP = false, want true")
+	}
+	if cfg.SaaSURL != "http://saas.example.test" {
+		t.Errorf("SaaSURL = %q", cfg.SaaSURL)
+	}
+}
+
+func TestLoadAllowsHTTPSWithoutOverride(t *testing.T) {
+	t.Setenv("GEOCAM_SAAS_URL", "https://saas.example.test")
+	t.Setenv("GEOCAM_ALLOW_INSECURE_HTTP", "")
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load() error = %v, want nil for https:// URL", err)
 	}
 }
 

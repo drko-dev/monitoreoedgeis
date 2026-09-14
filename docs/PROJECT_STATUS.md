@@ -9,15 +9,16 @@
 | Field             | Value                                                     |
 | ----------------- | ----------------------------------------------------------- |
 | **PROJECT**       | GEO CAM Edge                                              |
-| **CURRENT HITO**  | B — Agent Core                                            |
-| **STATE**         | IMPLEMENTED, TESTED, **VALIDATED LOCAL (binary + K3s)**    |
+| **CURRENT HITO**  | C — Enrollment con SaaS                                   |
+| **STATE**         | IMPLEMENTED, TESTED locally against a mock SaaS. **NOT reconciled with the real SaaS contract, NOT K3s-validated.** |
 | **MERGED**        | **NO** — this branch is not merged to `main`               |
-| **Branch**        | `feature/edge-agent-core` (based on `main`, Hito A merged, HEAD `0eef45a`) |
+| **Branch**        | `feature/edge-enrollment` (based on `main`, Hito B merged, HEAD `4ce560d`) |
 | **DEPLOYED PROD** | **NO** — VPS/production untouched                         |
 | **Go version**    | 1.26.2                                                    |
 
-Hito A (`feature/edge-foundation-go`) is merged into `main`. This document now
-tracks Hito B, built on top of it on `feature/edge-agent-core`.
+Hito A (`feature/edge-foundation-go`) and Hito B (`feature/edge-agent-core`)
+are merged into `main`. This document now tracks Hito C, built on top of
+them on `feature/edge-enrollment`.
 
 ## Hito A — what was implemented (MERGED)
 
@@ -197,19 +198,95 @@ module exists yet — out of scope for B, per the task.
 Do not infer DONE just because something appears in the architecture document.
 None of the following exist yet:
 
-real enrollment, SaaS heartbeat, real transport, ONVIF, WS-Discovery,
+SaaS heartbeat, real transport for video, ONVIF, WS-Discovery,
 autodiscovery, RTSP, FFmpeg, OpenCV, YOLO, PyTorch, Vision Worker, real
 WebSocket, VPN, OTA, real camera credential management, video pipeline, AI
 processing.
 
-## NEXT — Hito C: Enrollment con SaaS
+Gateway enrollment itself (`geocam-edge enroll` / `credential rotate`) IS
+implemented (see Hito C below), but has NOT been exercised against the real
+SaaS — only against a local `httptest` mock and manual smoke tests. Treat it
+as CODE DONE, not VALIDATED against production.
 
-Hito B is DONE: code-level criteria pass locally (tests, vet, fmt, builds,
-manual endpoint verification) **and** K3s validation passed (probes green,
-PVC bound, `edge_id` identical across pod recreation). A PR is open against
-`main` but **not merged** (explicit user instruction: do not merge). The
-next milestone is **C — Enrollment** (see `docs/ROADMAP.md`) — do not start
-it until the user authorizes it.
+## Hito C: Enrollment con SaaS — CODE DONE, CONTRACT RECONCILED, NOT K3s-VALIDATED
+
+Added on `feature/edge-enrollment` (branched from `main` at `4ce560d`, which
+already has Hito B merged). The SaaS contract below was verified against the
+real `monitoreoia` source (gateway enroll router, `authenticate_edge_device`,
+self-service rotate-key router) — it is confirmed, not assumed.
+
+**Zero-knowledge credential model.** The Edge — never the SaaS — generates
+the device credential. The SaaS only ever receives and persists a SHA-256
+hash of it:
+- `geocam-edge enroll` generates a credential locally
+  (`credentials.GenerateCredential`, `edg_live_<32 random bytes, base64url>`,
+  `crypto/rand`), sends only `device_key_hash = sha256(credential)` to
+  `POST /api/v1/gateway/enroll` together with `gateway_instance_id` (the
+  agent's `edge_id`, required, 8-128 chars) and `agent_version`/`platform`/
+  `architecture`. There is no `hostname` field in the real contract; the
+  hostname is not sent (decision — see report). The 200/201 response has
+  only `device_id`/`device_kind`, no org/site/enrolled_at.
+- Once the claim succeeds, the Edge immediately calls
+  `GET /api/v1/edge/me`, authenticated with the credential it just
+  generated, to learn `organization_id`/`organization_name`/`site_id`/
+  `site_name`. If that call fails (network/timeout), the credential — which
+  is already valid server-side — is still persisted, with empty org/site and
+  a warning telling the operator to run `geocam-edge check` or retry later;
+  discarding it here would strand a device that is enrolled server-side but
+  can never authenticate.
+- `geocam-edge credential rotate` generates a new credential B locally,
+  authenticates with the CURRENT credential A (`X-Device-Id` + `Authorization:
+  Bearer`) and calls `POST /api/v1/edge/me/rotate-key` with
+  `{device_key_hash: sha256(B), rotation_id}` (`rotation_id` is a
+  client-generated UUID v4, `identity.NewUUIDv4`, reused as an idempotency
+  key). On network failure it retries the SAME request (same rotation_id,
+  same hash) up to 3 attempts total with 1s/2s/4s backoff, and only persists
+  B after the SaaS ACKs. A 401/403 (revoked credential) is not retried. If
+  all 3 attempts fail, A is left untouched on disk.
+- Every authenticated call sends BOTH `X-Device-Id` and
+  `Authorization: Bearer <credential>` — the SaaS's `authenticate_edge_device`
+  requires the device id as its own header even when the credential arrives
+  via Bearer.
+- `internal/transport` — stdlib `net/http` client: `Enroll`, `Me`,
+  `RotateKey`. Typed sentinel errors: `ErrTokenInvalid` (every enroll 401 —
+  invalid/expired/used/mismatched token are deliberately indistinguishable,
+  anti-enumeration, never inferred from response text), `ErrAlreadyEnrolled`
+  (409), `ErrInvalidRequest` (422, local payload validation failure),
+  `ErrUnauthorized`, `ErrSaaSUnavailable`, `ErrTimeout`, `ErrInsecureURL`.
+- `internal/credentials` — `credentials.json` storage (unchanged atomic
+  write mechanism: temp file + rename, dir 0700, file 0600, corrupt file =
+  hard error) plus `GenerateCredential`/`HashCredential`.
+- `GEOCAM_ALLOW_INSECURE_HTTP` — config flag (`internal/config`). An
+  `http://` `GEOCAM_SAAS_URL` is rejected at config-load time unless this is
+  explicitly `"true"`. Never disables TLS verification for `https://`.
+- `health.Snapshot` gained `credential_status` (`UNENROLLED`/`ENROLLED`),
+  distinct from `enrollment_status` (identity resolution, Hito B). The
+  credential secret is never in `Snapshot`.
+- Agent startup: a corrupt `credentials.json` puts the agent in DEGRADED,
+  never READY, never crashes.
+
+**Not done / explicitly out of scope for this pass:**
+- No explicit `--force` re-enrollment flow (only the double-enrollment
+  guard on `enroll`). Re-enrolling today means manually removing
+  `credentials.json`.
+- No automated integration test against the real `monitoreoia` SaaS — only
+  `httptest`-mocked unit/integration tests (including the zero-knowledge
+  wire-level check that the plaintext credential never appears in the
+  enroll request body) and a manual smoke test against a local mock server.
+- Not validated inside K3s (Hito B's validation was; Hito C's was not, by
+  explicit user instruction).
+- No cross-restart persistence for a partially-failed rotation (documented
+  `ponytail:` in `cmd/geocam-edge/main.go`): rotation retries only within one
+  process invocation, up to 3 attempts.
+
+**Follow-up before this can be considered fully done:** a real end-to-end
+enrollment/rotation run against a staging SaaS, and K3s validation.
+
+## NEXT
+
+Do not start further work (heartbeat, real transport, discovery) until the
+SaaS contract is reconciled and Hito C is validated end-to-end. Do not merge
+`feature/edge-enrollment` until explicitly authorized.
 
 ## HOW ANOTHER AI SHOULD CONTINUE
 

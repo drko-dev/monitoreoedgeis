@@ -107,6 +107,38 @@ func TestAgentDegradedOnCorruptIdentity(t *testing.T) {
 	}
 }
 
+// TestAgentDegradedOnCorruptCredentials: a corrupt credentials.json must
+// never be silently ignored. Run must never reach READY, and must stay
+// running (DEGRADED) so /status stays reachable — mirrors
+// TestAgentDegradedOnCorruptIdentity for internal/credentials.
+func TestAgentDegradedOnCorruptCredentials(t *testing.T) {
+	cfg := testConfig(t)
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, "credentials.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	a := New(cfg)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+
+	waitForState(t, a, health.StateDegraded)
+
+	time.Sleep(20 * time.Millisecond)
+	if got := a.Health().State(); got != health.StateDegraded {
+		t.Errorf("state = %q, want %q (must never reach READY on corrupt credentials)", got, health.StateDegraded)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run() did not return after context cancellation")
+	}
+}
+
 // fakeModule is a minimal Module used to exercise the manager in isolation.
 type fakeModule struct {
 	name      string

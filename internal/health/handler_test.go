@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
@@ -84,5 +85,33 @@ func TestHandlerStatus(t *testing.T) {
 	}
 	if snap.Modules["health-http"] != "running" {
 		t.Errorf("Modules[health-http] = %q, want %q", snap.Modules["health-http"], "running")
+	}
+}
+
+// TestHandlerStatusNeverExposesCredential proves /status can only ever leak
+// the credential STATUS string, never the credential secret itself — the
+// Reporter/Snapshot type simply has no field capable of carrying it, but
+// this test guards against a future field accidentally introducing one.
+func TestHandlerStatusNeverExposesCredential(t *testing.T) {
+	const secret = "edg_live_should_never_appear_in_status"
+
+	r := newTestReporter()
+	r.SetCredentialStatus("ENROLLED")
+
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	rec := httptest.NewRecorder()
+	Handler(r).ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if strings.Contains(body, secret) {
+		t.Fatalf("/status body unexpectedly contains the credential secret:\n%s", body)
+	}
+
+	var snap Snapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
+		t.Fatalf("invalid JSON body: %v", err)
+	}
+	if snap.CredentialStatus != "ENROLLED" {
+		t.Errorf("CredentialStatus = %q, want %q", snap.CredentialStatus, "ENROLLED")
 	}
 }
