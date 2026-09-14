@@ -69,8 +69,8 @@ All configuration comes from environment variables:
 | `GEOCAM_LOG_LEVEL`         | `info`                  | `debug` \| `info` \| `warn` \| `error`|
 | `GEOCAM_SAAS_URL`          | *(empty)*               | Base URL for `enroll`/`credential rotate`. Must be `https://` unless `GEOCAM_ALLOW_INSECURE_HTTP=true`. |
 | `GEOCAM_ALLOW_INSECURE_HTTP` | `false`               | **Dev only.** Allows `GEOCAM_SAAS_URL` to use `http://` instead of `https://`. Never weakens TLS verification for an `https://` URL — it only permits the plaintext scheme. Never set this in production. |
-| `GEOCAM_SAAS_TIMEOUT`      | `10s`                   | Timeout for every SaaS HTTP request (enroll/rotate/me)  |
-| `GEOCAM_HEARTBEAT_INTERVAL`| `30s`                   | Go duration; must be positive         |
+| `GEOCAM_SAAS_TIMEOUT`      | `10s`                   | Timeout for every SaaS HTTP request (enroll/rotate/me/heartbeat) |
+| `GEOCAM_HEARTBEAT_INTERVAL`| `30s`                   | Go duration between heartbeats. Must be within `5s`–`5m` (inclusive); anything outside is a startup error. |
 | `GEOCAM_DATA_DIR`          | `/var/lib/geocam-edge`  | Holds `identity.json` and `credentials.json` |
 | `GEOCAM_HEALTH_ADDR`       | `127.0.0.1:8091`        | Local health HTTP bind (localhost-only by default) |
 | `GEOCAM_ENROLLMENT_TOKEN`  | *(empty)*               | One-time enrollment token for `geocam-edge enroll`. Prefer piping via stdin instead. |

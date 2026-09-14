@@ -85,17 +85,23 @@ integrar contra el SaaS real. Ver `docs/PROJECT_STATUS.md` para el detalle.
 
 ## D — Heartbeat y administración
 
-- D1. Heartbeat Edge → SaaS.
-- D2. online/offline/degraded.
-- D3. Uptime.
-- D4. Versión.
-- D5. CPU/RAM/disco.
-- D6. arm64/amd64.
-- D7. Temperatura.
-- D8. Última conexión.
-- D9. Intervalo configurable.
-- D10. Retry/backoff.
-- D11. Vista de health en SaaS.
+- D1. Heartbeat Edge → SaaS. **CODE DONE** — `internal/heartbeat`, integrado al ciclo de vida de módulos (`Module`), no un loop en `main.go`. Auth `Bearer` reutilizando `internal/transport`, sin cliente HTTP duplicado.
+- D2. online/offline/degraded. **CODE DONE (lado Edge)** — el Edge reporta sólo su propia visión (`health_status`: READY→healthy, DEGRADED→degraded). La conectividad la deriva el SaaS del momento de llegada contra su propio reloj; el Edge nunca la declara.
+- D3. Uptime. **CODE DONE** — uptime del **proceso** (monotónico), no del host.
+- D4. Versión. **CODE DONE** — desde la fuente única existente (`internal/agent/version.go`), no hardcodeada.
+- D5. CPU/RAM/disco. **CODE DONE** — `internal/platform`, `CGO_ENABLED=0`: CPU por deltas de procfs, RAM de `/proc/meminfo`, disco por `statfs` sobre `GEOCAM_DATA_DIR`. Degrada omitiendo la métrica, nunca con panic ni con un cero que se lea como medición real.
+- D6. arm64/amd64. **CODE DONE** — reutiliza la normalización de arquitectura existente.
+- D7. Temperatura. **CODE DONE (opcional)** — `/sys/class/thermal/` en Linux si existe. Su ausencia se omite del payload y **nunca** marca DEGRADED.
+- D8. Última conexión. **OUT OF SCOPE (repo monitoreoia)** — `last_seen` es server-side, con el reloj del SaaS. El Edge manda `edge_timestamp` sólo como dato de diagnóstico.
+- D9. Intervalo configurable. **CODE DONE** — `GEOCAM_HEARTBEAT_INTERVAL`, default `30s`, límites `5s`–`5m` inclusive; fuera de rango es error de arranque.
+- D10. Retry/backoff. **CODE DONE** — backoff exponencial 1s→60s con jitter ±10%, reset ante el primer éxito. 429 respeta `Retry-After`. 401/403 **no** reintenta agresivamente, **no** borra la credential, **no** re-enrola.
+- D11. Vista de health en SaaS. **OUT OF SCOPE (repo monitoreoia)**.
+
+**D — CODE DONE (lado Edge).** Compila y pasa `go build ./...`,
+`go test ./...`, `go test -race ./...`, `go vet ./...` y `gofmt -l .` contra un
+mock SaaS local (`httptest`). Una caída del SaaS deja al Edge `READY` con
+`/healthz` y `/readyz` en `200`; la degradación se ve sólo en `/status` bajo
+`heartbeat`. Ver `docs/ARCHITECTURE.md` para la semántica completa.
 
 ## E — Autodiscovery
 

@@ -107,6 +107,61 @@ stops modules in reverse order with context cancellation propagated. No real
 module exists yet beyond the health HTTP server — discovery/transport/video
 will implement this interface later.
 
+### Heartbeat (Hito D)
+
+`internal/heartbeat` is a `Module`, not a loop in `main.go`: it starts and
+stops with the rest of the agent and unwinds cleanly on shutdown.
+
+**Payload.** `edge_id, agent_version, uptime_seconds, architecture,
+processing_mode, health_status, system{cpu_percent, memory_total_bytes,
+memory_used_bytes, disk_total_bytes, disk_used_bytes}` plus optional
+`temperature_c`. It deliberately carries **no tenant and no site**: the SaaS
+derives those from the authenticated credential and must never take the
+Edge's word for them. `edge_id` is sent only so the SaaS can *cross-check* it
+against the authenticated device — it is never an identity claim.
+
+- `uptime_seconds` is the **process's** uptime (monotonic), not the host's.
+- `agent_version` comes from the single existing version source, not a literal.
+- `architecture` reuses the existing `amd64`/`arm64` normalisation.
+
+**Metrics.** Sampled by `internal/platform` with `CGO_ENABLED=0`: CPU from
+procfs deltas, memory from `/proc/meminfo`, disk via `statfs` on
+`GEOCAM_DATA_DIR`, temperature from `/sys/class/thermal/` when present. Every
+metric degrades to "omitted" rather than panicking or sending a zero that
+would read as a real measurement. **A missing sensor never means DEGRADED.**
+
+**Scheduling.** `GEOCAM_HEARTBEAT_INTERVAL` (default `30s`, bounded `5s`–`5m`
+inclusive). The first send is spread across a startup window so a fleet
+restarting together does not stampede the SaaS. Transient failures back off
+exponentially (1s → 60s cap) with ±10% jitter; a single success resets it.
+
+**Error classification** decides the retry policy:
+
+| Condition | Behaviour |
+| --------- | --------- |
+| timeout / network / 5xx | transient — exponential backoff |
+| 429 | honour `Retry-After`, else fall back to backoff |
+| 422 | payload does not match the server model; retrying an identical body cannot help |
+| 401 / 403 | credential rejected — agent goes `DEGRADED`. **Never** retries aggressively, **never** discards the credential, **never** re-enrolls or generates a new one. |
+
+**Health semantics.** Local health is independent of SaaS reachability: while
+the SaaS is unreachable the Edge stays `READY` and both `/healthz` and
+`/readyz` keep returning `200`, because the Edge's local function is
+unaffected by an outage in a service it only reports to. The degradation is
+visible in `/status` under `heartbeat` instead. A **rejected credential** is
+the one SaaS-side condition that marks the whole agent `DEGRADED`, because an
+Edge the SaaS refuses to recognise is genuinely not doing its job.
+
+`/status` exposes the module's `state`, `last_success_at`, `last_attempt_at`,
+`consecutive_failures` and a sanitized `last_error` **class**. It never
+carries the credential, an `Authorization` header, a token or a hash — raw
+transport errors are never echoed, since they can contain URLs and response
+bodies and this field is served over HTTP.
+
+Online vs offline is **not** the Edge's call: the Edge reports only its own
+view of itself, and the SaaS derives connectivity from heartbeat arrival time
+against its own clock.
+
 ## Current modules (Go core)
 
 | Package             | Responsibility                                                            |
@@ -115,9 +170,11 @@ will implement this interface later.
 | `internal/agent`    | Agent core: wiring, startup sequence, run loop, graceful shutdown, version |
 | `internal/config`   | Env-var configuration, safe defaults, `ProcessingMode` type and validation |
 | `internal/identity` | Persistent `edge_id` (UUID v4, `identity.json`). No tokens, no certs      |
-| `internal/platform` | Host detection: hostname, OS, GOOS/GOARCH, kernel, CPU count, total RAM    |
+| `internal/platform` | Host detection + live resource sampling: CPU %, memory, disk, temperature  |
 | `internal/health`   | Lifecycle state (`STARTING`/`READY`/`DEGRADED`/`STOPPING`) + snapshot + local HTTP (`/healthz`, `/readyz`, `/status`) |
 | `internal/logging`  | `log/slog` setup: stdout, structured, base fields, no secrets              |
+| `internal/transport`| SaaS HTTP client: enrollment, rotation, `me`, heartbeat. Bearer auth, typed error classes |
+| `internal/heartbeat`| Periodic heartbeat module: scheduling, jitter, backoff, error classification |
 
 ### Startup sequence
 
@@ -153,7 +210,6 @@ carry real code:
 | ---------------------- | ------------------------------------------------------------- |
 | `internal/discovery`   | ONVIF / WS-Discovery camera discovery on the local network     |
 | `internal/cameras`     | Camera inventory, credentials, per-camera state               |
-| `internal/transport`   | SaaS transport: enrollment, heartbeat, HTTPS/WSS, buffering    |
 | `internal/telemetry`   | Metrics and operational telemetry to the SaaS                 |
 | `internal/processing`  | Video pipeline and mode-specific behavior                      |
 | *(separate process)*   | **Vision Worker** — Python + YOLO/Ultralytics, `edge` mode only |

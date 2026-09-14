@@ -9,16 +9,16 @@
 | Field             | Value                                                     |
 | ----------------- | ----------------------------------------------------------- |
 | **PROJECT**       | GEO CAM Edge                                              |
-| **CURRENT HITO**  | C — Enrollment con SaaS                                   |
-| **STATE**         | IMPLEMENTED, TESTED locally against a mock SaaS. **NOT reconciled with the real SaaS contract, NOT K3s-validated.** |
+| **CURRENT HITO**  | D — Heartbeat Edge → SaaS                                 |
+| **STATE**         | IMPLEMENTED, TESTED locally against a mock SaaS (`httptest`). |
 | **MERGED**        | **NO** — this branch is not merged to `main`               |
-| **Branch**        | `feature/edge-enrollment` (based on `main`, Hito B merged, HEAD `4ce560d`) |
+| **Branch**        | `feature/edge-heartbeat` (based on `main`, Hito C merged)  |
 | **DEPLOYED PROD** | **NO** — VPS/production untouched                         |
 | **Go version**    | 1.26.2                                                    |
 
-Hito A (`feature/edge-foundation-go`) and Hito B (`feature/edge-agent-core`)
-are merged into `main`. This document now tracks Hito C, built on top of
-them on `feature/edge-enrollment`.
+Hito A (`feature/edge-foundation-go`), Hito B (`feature/edge-agent-core`) and
+Hito C (`feature/edge-enrollment`) are merged into `main`. This document now
+tracks Hito D, built on top of them on `feature/edge-heartbeat`.
 
 ## Hito A — what was implemented (MERGED)
 
@@ -282,11 +282,69 @@ hash of it:
 **Follow-up before this can be considered fully done:** a real end-to-end
 enrollment/rotation run against a staging SaaS, and K3s validation.
 
+## Hito D: Heartbeat Edge → SaaS — CODE DONE
+
+Added on `feature/edge-heartbeat` (branched from `main`, Hito C merged).
+
+**Module, not a loop.** `internal/heartbeat` implements the Hito B `Module`
+interface and is registered in `internal/agent`, so it starts and stops with
+the rest of the agent. It is skipped entirely for an unenrolled Edge, and a
+construction error is non-fatal: a misconfigured SaaS URL must not take down
+the local health surface an operator would use to diagnose it (the agent does
+not reach READY in that case).
+
+**Transport.** `transport.Heartbeat` posts to the shared endpoint reusing the
+Hito C client — no duplicated HTTP client — and sends both `X-Device-Id` and
+`Authorization: Bearer <credential>`, exactly like every other authenticated
+call.
+
+**Payload.** `edge_id, agent_version, uptime_seconds, architecture,
+processing_mode, health_status, system{cpu_percent, memory_total_bytes,
+memory_used_bytes, disk_total_bytes, disk_used_bytes}`, optional
+`temperature_c`, plus `boot_id`/`sequence_number` (reusing the existing legacy
+fields so the SaaS can discard a stale snapshot that overtakes a newer one)
+and a diagnostic-only `edge_timestamp`. It carries **no tenant and no site**:
+the SaaS derives those from the credential. `edge_id` is a cross-check for the
+SaaS, never an identity claim.
+
+**Metrics** (`internal/platform`, `CGO_ENABLED=0`): CPU from procfs deltas
+(the sampler primes before reporting, so the first heartbeat omits
+`cpu_percent` rather than inventing one), memory from `/proc/meminfo`, disk
+via `statfs` on `GEOCAM_DATA_DIR` (walking up to an existing ancestor),
+temperature from `/sys/class/thermal/` picking the hottest plausible zone.
+Every metric is omitted rather than zeroed when unavailable, and a missing
+sensor never marks DEGRADED.
+
+**Scheduling.** `GEOCAM_HEARTBEAT_INTERVAL`, default `30s`, bounded `5s`–`5m`
+inclusive (out of range = startup error). First send spread across a startup
+window so a restarting fleet does not stampede. Backoff 1s→60s with ±10%
+jitter, reset on the first success.
+
+**Error classification.** timeout/network/5xx → transient backoff; 429 →
+honour `Retry-After` (falling back to backoff when absent/malformed); 422 →
+own class, since retrying an identical body cannot help; 401/403 → agent
+DEGRADED, no aggressive retry, credential **never** discarded, **no**
+re-enrollment and **no** new credential generated.
+
+**Health semantics.** A SaaS outage leaves the Edge `READY` with `/healthz`
+and `/readyz` both `200` — local function is unaffected by an outage in a
+service the Edge only reports to. The degradation appears only in `/status`
+under `heartbeat` (`state`, `last_success_at`, `last_attempt_at`,
+`consecutive_failures`, sanitized `last_error` **class**). A rejected
+credential is the one SaaS-side condition that degrades the whole agent.
+`/status` never carries the credential, a Bearer header, a token or a hash.
+
+**Not done / explicitly out of scope for this pass:**
+- No integration test against the real `monitoreoia` SaaS — only
+  `httptest`-mocked tests.
+- Not validated inside K3s.
+- No timeseries: the SaaS stores the latest snapshot only (MVP).
+
 ## NEXT
 
-Do not start further work (heartbeat, real transport, discovery) until the
-SaaS contract is reconciled and Hito C is validated end-to-end. Do not merge
-`feature/edge-enrollment` until explicitly authorized.
+Do not start Hito E (ONVIF, cameras, RTSP, autodiscovery, YOLO, video) until
+Hito D is validated end-to-end against the real SaaS and in K3s. Do not merge
+`feature/edge-heartbeat` until explicitly authorized.
 
 ## HOW ANOTHER AI SHOULD CONTINUE
 
