@@ -26,37 +26,62 @@ import (
 )
 
 func main() {
-	// Subcommands are dispatched on os.Args[1] before flag.Parse() so that
-	// `--version`/`-version` keep working exactly as before for the default
-	// (no-subcommand) invocation.
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "identity":
-			runIdentityCmd(os.Args[2:])
-			return
-		case "check":
-			runCheckCmd(os.Args[2:])
-			return
-		case "enroll":
-			runEnrollCmd(os.Args[2:])
-			return
-		case "credential":
-			runCredentialCmd(os.Args[2:])
-			return
-		case "discovery":
-			runDiscoveryCmd(os.Args[2:])
-			return
-		}
-	}
-
-	showVersion := flag.Bool("version", false, "print version and exit")
-	flag.Parse()
-
-	if *showVersion {
-		fmt.Printf("geocam-edge %s (commit %s, built %s)\n",
-			agent.Version, agent.Commit, agent.BuildDate)
+	if len(os.Args) < 2 {
+		runAgentCmd(nil)
 		return
 	}
+
+	cmd, args := os.Args[1], os.Args[2:]
+
+	switch cmd {
+	case "-h", "--help", "help":
+		printRootUsage(os.Stdout)
+		return
+	case "-version", "--version":
+		printVersion()
+		return
+	case "run":
+		runAgentCmd(args)
+	case "version":
+		runVersionCmd(args)
+	case "identity":
+		runIdentityCmd(args)
+	case "config":
+		runConfigCmd(args)
+	case "check":
+		runCheckCmd(args)
+	case "enroll":
+		runEnrollCmd(args)
+	case "credential":
+		runCredentialCmd(args)
+	case "discovery":
+		runDiscoveryCmd(args)
+	case "saas":
+		runSaasCmd(args)
+	default:
+		fmt.Fprintf(os.Stderr, "geocam-edge: unknown command %q\n", cmd)
+		fmt.Fprintln(os.Stderr, "Run 'geocam-edge --help' for usage.")
+		os.Exit(1)
+	}
+}
+
+// isHelpRequest reports whether args opens with a help request, so every
+// subcommand can print its own detailed usage instead of relying on the
+// flag package's bare, flag-only default usage.
+func isHelpRequest(args []string) bool {
+	return len(args) > 0 && (args[0] == "-h" || args[0] == "--help" || args[0] == "help")
+}
+
+// runAgentCmd starts the actual agent daemon. It is the single
+// implementation shared by both `geocam-edge run` and plain `geocam-edge`
+// (no subcommand) — there is exactly one code path that starts the daemon.
+func runAgentCmd(args []string) {
+	if isHelpRequest(args) {
+		printRunUsage(os.Stdout)
+		return
+	}
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	_ = fs.Parse(args)
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -73,10 +98,42 @@ func main() {
 	}
 }
 
+// runVersionCmd implements `geocam-edge version`. --version (the flag) keeps
+// working too and prints the same thing.
+func runVersionCmd(args []string) {
+	if isHelpRequest(args) {
+		printVersionUsage(os.Stdout)
+		return
+	}
+	fs := flag.NewFlagSet("version", flag.ExitOnError)
+	_ = fs.Parse(args)
+	printVersion()
+}
+
+func printVersion() {
+	host := platform.Detect()
+	fmt.Print(versionReport(host))
+}
+
+// versionReport formats build/version metadata. No secrets. Kept pure so it
+// is directly testable.
+func versionReport(host platform.Info) string {
+	return fmt.Sprintf(
+		"geocam-edge %s (commit %s, built %s)\n"+
+			"platform:     %s\n"+
+			"architecture: %s\n",
+		agent.Version, agent.Commit, agent.BuildDate, host.OS, host.GOARCH,
+	)
+}
+
 // runIdentityCmd prints edge_id, version, architecture, processing_mode and
 // data dir — no secrets. It resolves (and, on first run, persists) identity
 // exactly like the running agent would.
 func runIdentityCmd(args []string) {
+	if isHelpRequest(args) {
+		printIdentityUsage(os.Stdout)
+		return
+	}
 	fs := flag.NewFlagSet("identity", flag.ExitOnError)
 	_ = fs.Parse(args)
 
@@ -115,6 +172,10 @@ func identityReport(ident identity.Identity, cfg *config.Config, host platform.I
 // non-zero when the agent is unreachable or not READY — usable directly as
 // a systemd/K8s exec health check.
 func runCheckCmd(args []string) {
+	if isHelpRequest(args) {
+		printCheckUsage(os.Stdout)
+		return
+	}
 	fs := flag.NewFlagSet("check", flag.ExitOnError)
 	_ = fs.Parse(args)
 
@@ -163,6 +224,10 @@ func checkReport(snap health.Snapshot) (report string, ready bool) {
 // persists the resulting credential. It always reuses the existing
 // (persisted) edge_id — it never generates a new one.
 func runEnrollCmd(args []string) {
+	if isHelpRequest(args) {
+		printEnrollUsage(os.Stdout)
+		return
+	}
 	fs := flag.NewFlagSet("enroll", flag.ExitOnError)
 	tokenFlag := fs.String("token", "",
 		"enrollment token (dev only — exposes the token in shell history and process listings; "+
@@ -355,6 +420,10 @@ func enrollSummary(edgeID, deviceID, organizationID, siteID string) string {
 
 // runCredentialCmd dispatches `geocam-edge credential <subcommand>`.
 func runCredentialCmd(args []string) {
+	if isHelpRequest(args) {
+		printCredentialUsage(os.Stdout)
+		return
+	}
 	if len(args) == 0 || args[0] != "rotate" {
 		fmt.Fprintln(os.Stderr, "geocam-edge credential: usage: geocam-edge credential rotate")
 		os.Exit(1)
@@ -367,6 +436,10 @@ func runCredentialCmd(args []string) {
 // old one on disk, so a mid-write failure never corrupts or loses the
 // previous, still-valid credential.
 func runCredentialRotateCmd(args []string) {
+	if isHelpRequest(args) {
+		printCredentialRotateUsage(os.Stdout)
+		return
+	}
 	fs := flag.NewFlagSet("credential rotate", flag.ExitOnError)
 	_ = fs.Parse(args)
 
@@ -501,6 +574,10 @@ func rotateSummary(edgeID string, version int) string {
 }
 
 func runDiscoveryCmd(args []string) {
+	if isHelpRequest(args) {
+		printDiscoveryUsage(os.Stdout)
+		return
+	}
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "geocam-edge discovery: missing subcommand (usage: geocam-edge discovery scan [--interface <iface>] [--timeout <duration>] [--json])")
 		os.Exit(1)
@@ -516,6 +593,10 @@ func runDiscoveryCmd(args []string) {
 }
 
 func runDiscoveryScanCmd(args []string) {
+	if isHelpRequest(args) {
+		printDiscoveryScanUsage(os.Stdout)
+		return
+	}
 	fs := flag.NewFlagSet("discovery scan", flag.ExitOnError)
 	ifaceFlag := fs.String("interface", "", "comma-separated network interfaces to scan (default: auto-private)")
 	timeoutFlag := fs.Duration("timeout", 4*time.Second, "scan duration per interface (default: 4s)")
@@ -612,3 +693,384 @@ func discoveryScanReport(result *discovery.ScanResult) string {
 
 	return sb.String()
 }
+
+// runConfigCmd prints the effective, NON-secret configuration: everything in
+// internal/config.Config plus a yes/no enrollment-token/enrolled summary.
+// Never prints GEOCAM_ENROLLMENT_TOKEN's value or the stored credential.
+func runConfigCmd(args []string) {
+	if isHelpRequest(args) {
+		printConfigUsage(os.Stdout)
+		return
+	}
+	fs := flag.NewFlagSet("config", flag.ExitOnError)
+	_ = fs.Parse(args)
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge config: configuration error: %v\n", err)
+		os.Exit(1)
+	}
+
+	creds, err := credentials.Load(cfg.DataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge config: %v\n", err)
+		os.Exit(1)
+	}
+
+	host := platform.Detect()
+	tokenConfigured := strings.TrimSpace(os.Getenv("GEOCAM_ENROLLMENT_TOKEN")) != ""
+	fmt.Print(configReport(cfg, host, creds, tokenConfigured))
+}
+
+// configReport formats `geocam-edge config` output. Kept pure (no I/O) so it
+// is directly testable. It never includes GEOCAM_ENROLLMENT_TOKEN's value or
+// creds.Credential — only booleans derived from them.
+func configReport(cfg *config.Config, host platform.Info, creds credentials.Credentials, enrollmentTokenConfigured bool) string {
+	interfaces := "auto"
+	if len(cfg.DiscoveryInterfaces) > 0 {
+		interfaces = strings.Join(cfg.DiscoveryInterfaces, ",")
+	}
+	tokenState := "not configured"
+	if enrollmentTokenConfigured {
+		tokenState = "configured"
+	}
+	enrolledState := "no"
+	if creds.IsEnrolled() {
+		enrolledState = "yes"
+	}
+
+	return fmt.Sprintf(
+		"version:              %s\n"+
+			"architecture:         %s\n"+
+			"saas_url:             %s\n"+
+			"processing_mode:      %s\n"+
+			"data_dir:             %s\n"+
+			"health_addr:          %s\n"+
+			"heartbeat_interval:   %s\n"+
+			"discovery_enabled:    %t\n"+
+			"discovery_interval:   %s\n"+
+			"discovery_timeout:    %s\n"+
+			"discovery_interfaces: %s\n"+
+			"connectivity_enabled: %t\n"+
+			"stream_role:          %s\n"+
+			"stream_timeout:       %s\n"+
+			"enrollment_token:     %s\n"+
+			"enrolled:             %s\n",
+		agent.Version, host.GOARCH, cfg.SaaSURL, cfg.ProcessingMode, cfg.DataDir, cfg.HealthAddr,
+		cfg.HeartbeatInterval, cfg.DiscoveryEnabled, cfg.DiscoveryInterval, cfg.DiscoveryTimeout,
+		interfaces, cfg.ConnectivityEnabled, cfg.StreamRole, cfg.StreamTimeout, tokenState, enrolledState,
+	)
+}
+
+// runSaasCmd dispatches `geocam-edge saas <subcommand>`.
+func runSaasCmd(args []string) {
+	if isHelpRequest(args) {
+		printSaasUsage(os.Stdout)
+		return
+	}
+	if len(args) == 0 || args[0] != "check" {
+		fmt.Fprintln(os.Stderr, "geocam-edge saas: usage: geocam-edge saas check")
+		os.Exit(1)
+	}
+	runSaasCheckCmd(args[1:])
+}
+
+// runSaasCheckCmd verifies real SaaS connectivity and authentication by
+// reusing the existing /edge/me endpoint via transport.Client.Me — no new
+// SaaS endpoint or contract change.
+func runSaasCheckCmd(args []string) {
+	if isHelpRequest(args) {
+		printSaasCheckUsage(os.Stdout)
+		return
+	}
+	fs := flag.NewFlagSet("saas check", flag.ExitOnError)
+	_ = fs.Parse(args)
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge saas check: configuration error: %v\n", err)
+		os.Exit(1)
+	}
+	if cfg.SaaSURL == "" {
+		fmt.Fprintln(os.Stderr, "SaaS connectivity: FAIL")
+		fmt.Fprintln(os.Stderr, "reason:            GEOCAM_SAAS_URL is not configured")
+		os.Exit(1)
+	}
+
+	creds, err := credentials.Load(cfg.DataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge saas check: %v\n", err)
+		os.Exit(1)
+	}
+	if !creds.IsEnrolled() {
+		fmt.Printf(
+			"SaaS connectivity: NOT ENROLLED\n"+
+				"saas_url:          %s\n"+
+				"edge_id:           %s\n",
+			cfg.SaaSURL, cfg.EdgeID,
+		)
+		os.Exit(1)
+	}
+
+	client, err := transport.New(cfg.SaaSURL, cfg.AllowInsecureHTTP, cfg.SaaSTimeout, agent.Version)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge saas check: %v\n", err)
+		os.Exit(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.SaaSTimeout+time.Second)
+	defer cancel()
+
+	meResp, meErr := client.Me(ctx, creds.DeviceID, creds.Credential)
+	report, ok := saasCheckReport(cfg.SaaSURL, creds.EdgeID, meResp, meErr)
+	if !ok {
+		fmt.Fprint(os.Stderr, report)
+		os.Exit(1)
+	}
+	fmt.Print(report)
+}
+
+// saasCheckReport formats `geocam-edge saas check` output against an already
+// resolved /edge/me result. Kept pure (no I/O) so it is directly testable.
+// Never includes creds.Credential. err is classified via the transport
+// sentinel errors (errors.Is) so the failure reason is always clear.
+func saasCheckReport(saasURL, edgeID string, me transport.MeResponse, err error) (report string, ok bool) {
+	if err == nil {
+		return fmt.Sprintf(
+			"SaaS connectivity: OK\n"+
+				"authentication:    OK\n"+
+				"saas_url:          %s\n"+
+				"edge_id:           %s\n"+
+				"device_id:         %s\n"+
+				"organization_id:   %s\n"+
+				"site_id:           %s\n",
+			saasURL, edgeID, me.DeviceID, me.OrganizationID.String(), me.SiteID.String(),
+		), true
+	}
+
+	return fmt.Sprintf(
+		"SaaS connectivity: FAIL\n"+
+			"reason:            %s\n"+
+			"saas_url:          %s\n"+
+			"edge_id:           %s\n",
+		saasErrorMessage(err), saasURL, edgeID,
+	), false
+}
+
+// --- Usage text --------------------------------------------------------
+//
+// Every printXUsage function is a thin fmt.Fprint wrapper around a constant
+// so tests can assert on content without spawning a process, and so
+// `--help`/`-h`/`help` behave identically everywhere.
+
+const rootUsage = `geocam-edge is the GEO CAM Edge agent CLI.
+
+Usage:
+  geocam-edge [command] [flags]
+
+Commands:
+  run                  Start the edge agent daemon (default when no command is given)
+  version              Print version, commit, build date and platform
+  identity             Print this Edge's identity (edge_id, source, version, data dir)
+  config               Print effective, non-secret configuration
+  check                Check a running agent's health over its local HTTP surface
+  enroll               Enroll this Edge against the SaaS using a one-time token
+  credential rotate    Rotate the locally stored SaaS credential
+  discovery scan       Scan the LAN for ONVIF/RTSP camera devices
+  saas check           Verify SaaS connectivity and authentication
+
+Flags:
+  -h, --help           Show this help
+  --version            Print version and exit (same as 'geocam-edge version')
+
+Run 'geocam-edge <command> --help' for details on a specific command.
+
+Typical flow:
+  geocam-edge config
+  geocam-edge identity
+  geocam-edge enroll
+  geocam-edge saas check
+  geocam-edge run              # in one terminal
+  geocam-edge check            # in another terminal
+  geocam-edge discovery scan
+
+Environment variables (all optional unless noted):
+  GEOCAM_SAAS_URL               SaaS base URL (required for enroll/credential rotate/saas check)
+  GEOCAM_ENROLLMENT_TOKEN       one-time enrollment token (alternative to stdin/--token)
+  GEOCAM_PROCESSING_MODE        processing mode (default: cloud)
+  GEOCAM_LOG_LEVEL              debug|info|warn|error (default: info)
+  GEOCAM_SAAS_TIMEOUT           SaaS HTTP request timeout (default: 10s)
+  GEOCAM_DATA_DIR               local state directory (default: /var/lib/geocam-edge)
+  GEOCAM_HEALTH_ADDR            local health HTTP bind address (default: 127.0.0.1:8091)
+  GEOCAM_HEARTBEAT_INTERVAL     heartbeat interval, 5s-5m (default: 30s)
+  GEOCAM_ALLOW_INSECURE_HTTP    allow http:// (not https://) for GEOCAM_SAAS_URL (default: false)
+  GEOCAM_DISCOVERY_ENABLED      enable background discovery (default: true)
+  GEOCAM_DISCOVERY_INTERVAL     background discovery interval, 1m-24h (default: 5m)
+  GEOCAM_DISCOVERY_TIMEOUT      background discovery scan timeout, 1s-30s (default: 4s)
+  GEOCAM_DISCOVERY_INTERFACES   comma-separated interfaces to scan (default: auto)
+  GEOCAM_CONNECTIVITY_ENABLED   enable camera connectivity supervisor (default: true)
+  GEOCAM_STREAM_ROLE            sub|main (default: sub)
+  GEOCAM_STREAM_TIMEOUT         camera stream dial/packet timeout, 1s-60s (default: 5s)
+`
+
+func printRootUsage(w io.Writer) { fmt.Fprint(w, rootUsage) }
+
+const runUsage = `Usage: geocam-edge run
+
+Start the edge agent daemon: loads configuration, starts the local health
+HTTP surface, heartbeat, discovery (if enabled) and camera connectivity
+supervisor (if enabled), and blocks until SIGINT/SIGTERM.
+
+This is the same code path used when geocam-edge is invoked with no command
+at all.
+`
+
+func printRunUsage(w io.Writer) { fmt.Fprint(w, runUsage) }
+
+const versionUsage = `Usage: geocam-edge version
+
+Print version, commit, build date, platform and architecture. No secrets.
+
+Equivalent to 'geocam-edge --version', which is also still supported.
+`
+
+func printVersionUsage(w io.Writer) { fmt.Fprint(w, versionUsage) }
+
+const identityUsage = `Usage: geocam-edge identity
+
+Print this Edge's identity: edge_id, identity_source, version, architecture,
+processing_mode and data_dir. No secrets.
+`
+
+func printIdentityUsage(w io.Writer) { fmt.Fprint(w, identityUsage) }
+
+const configUsage = `Usage: geocam-edge config
+
+Print the effective, non-secret configuration loaded from the environment
+(see 'geocam-edge --help' for the full list of GEOCAM_* variables), plus:
+
+  enrollment_token: configured|not configured   (never the value)
+  enrolled:         yes|no                      (from local credential state)
+
+Never prints GEOCAM_ENROLLMENT_TOKEN's value or the stored credential.
+`
+
+func printConfigUsage(w io.Writer) { fmt.Fprint(w, configUsage) }
+
+const checkUsage = `Usage: geocam-edge check
+
+Query an already-running agent's local health HTTP surface (GEOCAM_HEALTH_ADDR,
+default 127.0.0.1:8091) and print its status/edge_id/version/processing_mode/
+uptime. Exits non-zero if the agent is unreachable or not READY. Suitable as
+a systemd/Docker/Kubernetes health check.
+`
+
+func printCheckUsage(w io.Writer) { fmt.Fprint(w, checkUsage) }
+
+const enrollUsage = `Usage: geocam-edge enroll [--token <token>]
+
+Claim a one-time enrollment token against the SaaS (requires GEOCAM_SAAS_URL)
+and persist the resulting credential locally. Fails if this Edge is already
+enrolled — re-enrollment is never silent.
+
+The enrollment token is resolved in this order:
+  1. stdin, if piped                (preferred)
+  2. GEOCAM_ENROLLMENT_TOKEN        (recommended for automation)
+  3. --token <token>                (dev only — exposes the token in shell
+                                      history and process listings)
+
+A credential is generated locally and never leaves this device in plaintext
+(only its SHA-256 hash is sent to the SaaS). The resulting credential and
+identity are persisted under GEOCAM_DATA_DIR. Nothing is ever printed to
+stdout/stderr that would leak the credential or the token.
+
+Examples:
+  echo "$TOKEN" | geocam-edge enroll
+  GEOCAM_ENROLLMENT_TOKEN=... geocam-edge enroll
+  geocam-edge enroll --token dev-only-token   # development only
+`
+
+func printEnrollUsage(w io.Writer) { fmt.Fprint(w, enrollUsage) }
+
+const credentialUsage = `Usage: geocam-edge credential <subcommand>
+
+Subcommands:
+  rotate    Rotate the locally stored SaaS credential
+
+Run 'geocam-edge credential rotate --help' for details.
+`
+
+func printCredentialUsage(w io.Writer) { fmt.Fprint(w, credentialUsage) }
+
+const credentialRotateUsage = `Usage: geocam-edge credential rotate
+
+Rotate this Edge's SaaS credential: a new credential is generated locally,
+its hash is submitted to the SaaS (up to 3 attempts with backoff, stopping
+immediately if the SaaS rejects the current credential as unauthorized), and
+only once the SaaS acknowledges the rotation is the new credential persisted
+to disk ATOMICALLY (temp file + rename) — the previous credential on disk is
+never touched until the write fully succeeds.
+
+If the SaaS acknowledges the rotation but the local write fails, the old
+credential is left intact on disk but no longer valid against the SaaS: rerun
+'geocam-edge credential rotate' to retry. Requires prior enrollment.
+`
+
+func printCredentialRotateUsage(w io.Writer) { fmt.Fprint(w, credentialRotateUsage) }
+
+const discoveryUsage = `Usage: geocam-edge discovery <subcommand>
+
+Subcommands:
+  scan    Scan the LAN for ONVIF/RTSP camera devices
+
+Run 'geocam-edge discovery scan --help' for details.
+`
+
+func printDiscoveryUsage(w io.Writer) { fmt.Fprint(w, discoveryUsage) }
+
+const discoveryScanUsage = `Usage: geocam-edge discovery scan [--interface <iface[,iface...]>] [--timeout <duration>] [--json]
+
+Run a one-shot ONVIF/WS-Discovery scan of the LAN and print discovered
+camera devices.
+
+Flags:
+  --interface   comma-separated network interfaces to scan (default: auto-private,
+                or GEOCAM_DISCOVERY_INTERFACES if set)
+  --timeout     scan duration per interface (default: 4s)
+  --json        output results as JSON instead of a formatted table
+
+Examples:
+  geocam-edge discovery scan
+  geocam-edge discovery scan --interface eth0,wlan0 --timeout 8s
+  geocam-edge discovery scan --json
+`
+
+func printDiscoveryScanUsage(w io.Writer) { fmt.Fprint(w, discoveryScanUsage) }
+
+const saasUsage = `Usage: geocam-edge saas <subcommand>
+
+Subcommands:
+  check    Verify SaaS connectivity and authentication
+
+Run 'geocam-edge saas check --help' for details.
+`
+
+func printSaasUsage(w io.Writer) { fmt.Fprint(w, saasUsage) }
+
+const saasCheckUsage = `Usage: geocam-edge saas check
+
+Verify real SaaS connectivity and authentication by calling the existing
+GET /edge/me endpoint with the locally stored credential (no new SaaS
+endpoint, no contract change).
+
+  - GEOCAM_SAAS_URL not configured       -> FAIL, exit 1
+  - not enrolled locally                 -> NOT ENROLLED, exit 1
+  - enrolled, SaaS call succeeds         -> OK, exit 0
+  - enrolled, SaaS call fails            -> FAIL with a specific reason
+                                             (unreachable, timed out, credential
+                                             rejected/revoked, insecure URL), exit 1
+
+Never prints the stored credential.
+`
+
+func printSaasCheckUsage(w io.Writer) { fmt.Fprint(w, saasCheckUsage) }

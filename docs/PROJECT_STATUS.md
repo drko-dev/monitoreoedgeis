@@ -196,14 +196,15 @@ module exists yet — out of scope for B, per the task.
 Do not infer DONE just because something appears in the architecture document.
 None of the following exist yet:
 
-SaaS heartbeat, real transport for video, ONVIF, WS-Discovery,
-autodiscovery, RTSP, FFmpeg, OpenCV, YOLO, PyTorch, Vision Worker, real
-WebSocket, VPN, OTA, real camera credential management, video pipeline, AI
-processing.
+FFmpeg, OpenCV, YOLO, PyTorch, Vision Worker, video pipeline (decode/sampling/
+frame routing), AI processing, real WebSocket, VPN, OTA.
 
-Gateway enrollment (`geocam-edge enroll` / `credential rotate`) and heartbeat
-(Hito D) ARE exercised end-to-end against the real SaaS and in K3s — see
-Hito C and Hito D below.
+Through Hito G, the following ARE implemented, merged to `main`, and exposed
+via the `geocam-edge` CLI: gateway enrollment and credential rotation (Hito
+C), SaaS heartbeat (Hito D), ONVIF WS-Discovery/autodiscovery (Hito E),
+per-device/per-group camera credential management (Hito F), and RTSP camera
+connectivity with reconnection/health state (Hito G) — see Hito C through
+Hito G below.
 
 ## Hito C: Enrollment con SaaS — DONE / MERGED / VALIDATED
 

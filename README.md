@@ -3,11 +3,12 @@
 Lightweight Go agent for GEO CAM edge gateways (Raspberry Pi, Orange Pi, mini-PC,
 server). It runs on-site, next to the cameras, and talks to the GEO CAM SaaS.
 
-This repository is on **Hito B: Agent Core**, built on the merged Hito A
-foundation. It contains the agent core only — config, persistent identity,
-platform detection, health (now with a local HTTP surface), logging, module
-lifecycle. There is no camera, vision, RTSP, ONVIF or YOLO functionality yet
-(see [Not implemented yet](#not-implemented-yet)).
+Through Hito G, merged to `main`: agent core (config, persistent identity,
+platform detection, health, logging, module lifecycle), SaaS enrollment and
+credential rotation, SaaS heartbeat, ONVIF/WS-Discovery LAN autodiscovery,
+per-device camera credential management, and RTSP camera connectivity with
+reconnection and health state. There is still no local vision/YOLO inference,
+video pipeline, OTA, or VPN (see [Not implemented yet](#not-implemented-yet)).
 
 ## Project documentation
 
@@ -155,19 +156,71 @@ The SaaS contract (`internal/transport/contract.go`) has been verified
 against the real `monitoreoia` implementation — see `docs/PROJECT_STATUS.md`
 for the full reconciliation notes.
 
+## CLI
+
+```
+geocam-edge [command] [flags]
+
+  run                  Start the edge agent daemon (default when no command is given)
+  version              Print version, commit, build date and platform
+  identity             Print this Edge's identity (edge_id, source, version, data dir)
+  config               Print effective, non-secret configuration
+  check                Check a running agent's health over its local HTTP surface
+  enroll               Enroll this Edge against the SaaS using a one-time token
+  credential rotate    Rotate the locally stored SaaS credential
+  discovery scan       Scan the LAN for ONVIF/RTSP camera devices
+  saas check           Verify SaaS connectivity and authentication
+```
+
+Run `geocam-edge --help` or `geocam-edge <command> --help` for details. An
+unknown command (e.g. `geocam-edge pepito`) fails with a clear error instead
+of silently starting the daemon.
+
 ## Run locally
 
 ```bash
-go run ./cmd/geocam-edge
-GEOCAM_LOG_LEVEL=debug go run ./cmd/geocam-edge
-go run ./cmd/geocam-edge --version
+go run ./cmd/geocam-edge --help
+go run ./cmd/geocam-edge config     # effective non-secret config
 go run ./cmd/geocam-edge identity   # print edge_id/version/arch/mode/data_dir, no secrets
-go run ./cmd/geocam-edge check      # query a running agent's local health status
+go run ./cmd/geocam-edge enroll     # enroll against SaaS (see Quick Start below)
+go run ./cmd/geocam-edge saas check # verify real SaaS connectivity/auth
+go run ./cmd/geocam-edge run        # start the daemon (same as no command at all)
+go run ./cmd/geocam-edge check      # in another terminal: query the running agent's health
+go run ./cmd/geocam-edge discovery scan
 ```
 
 The agent starts, logs its version/platform/mode/identity, starts its health
 HTTP server, becomes `READY`, and stays alive as a daemon. `Ctrl-C` (SIGINT)
 or SIGTERM shuts it down cleanly with exit code 0.
+
+### Quick Start
+
+```bash
+# 1. See what commands exist and what flags they take
+geocam-edge --help
+
+# 2. Inspect effective, non-secret configuration
+geocam-edge config
+
+# 3. See this Edge's identity
+geocam-edge identity
+
+# 4. Enroll against the SaaS (requires GEOCAM_SAAS_URL; token via stdin is
+#    preferred over --token, which is dev-only and insecure)
+echo "$ENROLLMENT_TOKEN" | geocam-edge enroll
+
+# 5. Verify real SaaS connectivity and authentication
+geocam-edge saas check
+
+# 6. Run the agent daemon (in one terminal)...
+geocam-edge run
+
+# 7. ...and check its health from another terminal
+geocam-edge check
+
+# 8. Discover ONVIF/RTSP cameras on the LAN
+geocam-edge discovery scan
+```
 
 ## Local health HTTP
 
@@ -260,5 +313,8 @@ deploy/helm/       local K3s chart
 
 ## Not implemented yet
 
-FFmpeg, OpenCV, YOLO, PyTorch, the Vision Worker, WebSockets, VPN, OTA, camera
-credentials and video streaming processing belong to subsequent milestones (Hito F and later).
+FFmpeg, OpenCV, YOLO, PyTorch, the Vision Worker, real WebSockets, VPN, OTA,
+and video pipeline/AI processing (decode, sampling, frame routing) belong to
+subsequent milestones (Hito H and later). Camera credential management
+(Hito F) and RTSP camera connectivity (Hito G) are already implemented and
+merged to `main`.
