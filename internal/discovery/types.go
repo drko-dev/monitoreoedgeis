@@ -123,8 +123,17 @@ func (inv *Inventory) Upsert(dev DiscoveredDevice) *DiscoveredDevice {
 	}
 
 	now := time.Now().UTC()
+	inv.evictExpiredLocked(now)
+
 	existing, found := inv.devices[key]
 	if !found {
+		if len(inv.devices) >= MaxInventoryDevices {
+			// Fail-closed: reject the new device rather than evicting an
+			// arbitrary existing one under active-attack conditions. Report it
+			// for this scan without persisting it into the inventory.
+			rejected := dev
+			return &rejected
+		}
 		dev.FirstSeen = now
 		dev.LastSeen = now
 		stored := dev
@@ -179,6 +188,15 @@ func (inv *Inventory) Upsert(dev DiscoveredDevice) *DiscoveredDevice {
 	}
 
 	return existing
+}
+
+// evictExpiredLocked removes devices not seen within DeviceTTL. Caller must hold inv.mu.
+func (inv *Inventory) evictExpiredLocked(now time.Time) {
+	for key, d := range inv.devices {
+		if now.Sub(d.LastSeen) > DeviceTTL {
+			delete(inv.devices, key)
+		}
+	}
 }
 
 // List returns a snapshot of all discovered devices in the inventory.

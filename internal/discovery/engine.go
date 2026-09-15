@@ -38,6 +38,11 @@ func NewEngine(
 	if onvifClient == nil {
 		onvifClient = onvif.NewClient(2*time.Second, nil)
 	}
+	// Inject the shared fail-closed XAddr validator into every outbound SOAP
+	// call the client makes, regardless of where the destination XAddr came
+	// from (initial discovery, GetCapabilities' Media XAddr, etc). This closes
+	// the second-hop SSRF path since PostSOAP now refuses to run without it.
+	onvifClient.SetXAddrValidator(ValidateXAddr)
 	if inventory == nil {
 		inventory = NewInventory()
 	}

@@ -1,8 +1,11 @@
 package onvif
 
 import (
+	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -74,6 +77,43 @@ func TestSanitizeRTSPURI(t *testing.T) {
 			t.Errorf("expected rtsp prefix: %s", got)
 		}
 	}
+}
+
+func TestGetStreamUri_EscapesProfileTokenXMLInjection(t *testing.T) {
+	malicious := `abc</ProfileToken><Evil>injected</Evil><ProfileToken>`
+
+	var capturedBody string
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		b, _ := io.ReadAll(req.Body)
+		capturedBody = string(b)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body></s:Body></s:Envelope>`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	client := NewClient(time.Second, nil)
+	client.SetTransport(rt)
+	client.SetXAddrValidator(func(raw string) (*url.URL, int, error) {
+		u, err := url.Parse(raw)
+		return u, 80, err
+	})
+
+	_, _ = client.GetStreamUri(context.Background(), "http://192.168.1.50/onvif/media_service", malicious)
+
+	if strings.Contains(capturedBody, "<Evil>") {
+		t.Fatalf("XML injection succeeded, request body contains raw injected tag: %s", capturedBody)
+	}
+	if !strings.Contains(capturedBody, "&lt;Evil&gt;") {
+		t.Fatalf("expected malicious profileToken to be escaped as literal text, got: %s", capturedBody)
+	}
+}
+
+type roundTripFunc func(req *http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func TestNoopCredentialProvider(t *testing.T) {

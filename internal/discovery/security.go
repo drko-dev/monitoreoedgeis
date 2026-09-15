@@ -27,6 +27,8 @@ const (
 	MaxTypesLength             = 512
 	MaxScopesLength            = 2048
 	MaxMetadataLength          = 128
+	MaxInventoryDevices        = 512            // Hard cap on total devices held across scans
+	DeviceTTL                  = 24 * time.Hour // Devices not seen within this window are evicted
 )
 
 var (
@@ -135,8 +137,15 @@ func ValidateXAddr(raw string) (*url.URL, int, error) {
 		return nil, 0, ErrXAddrLoopbackDenied
 	}
 
-	// Reject cloud metadata endpoint specifically
-	if ip.String() == "169.254.169.254" {
+	// Reject cloud metadata endpoints specifically. The rest of 169.254.0.0/16
+	// (RFC 3927 link-local) stays allowed because self-assigned cameras that
+	// failed DHCP legitimately announce addresses in that range during
+	// initial discovery — see docs/PROJECT_STATUS.md. Only the fixed IPs
+	// actually used by cloud metadata services are denylisted:
+	//  - 169.254.169.254: AWS EC2/ECS, GCP, Azure, DigitalOcean, Oracle Cloud
+	//  - 169.254.170.2:   AWS ECS/Fargate task metadata (v2/v3/v4)
+	switch ip.String() {
+	case "169.254.169.254", "169.254.170.2":
 		return nil, 0, ErrXAddrCloudMetaDenied
 	}
 
