@@ -89,6 +89,12 @@ func NewClient(timeout time.Duration, credProv CredentialProvider) *Client {
 				// Refuse to follow redirects to prevent SSRF hopping
 				return http.ErrUseLastResponse
 			},
+			// Many embedded ONVIF HTTP servers (observed on the Tapo TC70)
+			// mishandle keep-alive across requests with different
+			// WS-Security nonces/paths, returning a spurious auth fault on
+			// a reused connection. Force one fresh TCP connection per
+			// request instead of relying on http.DefaultTransport's pool.
+			Transport: &http.Transport{DisableKeepAlives: true},
 		},
 		credProv: credProv,
 	}
@@ -110,6 +116,15 @@ func (c *Client) SetXAddrValidator(fn func(string) (*url.URL, int, error)) {
 
 // PostSOAP executes one bounded SOAP POST request against an XAddr URL.
 func (c *Client) PostSOAP(ctx context.Context, xaddr, action, bodyXML string) ([]byte, error) {
+	return c.postSOAP(ctx, xaddr, action, "", bodyXML)
+}
+
+// postSOAP is the shared implementation behind PostSOAP and PostSOAPAuth.
+// headerXML, when non-empty, is injected as the SOAP <s:Header> element —
+// used to carry the WS-Security UsernameToken on authenticated requests.
+// When headerXML is empty, the envelope is byte-identical to the previous
+// unauthenticated-only implementation.
+func (c *Client) postSOAP(ctx context.Context, xaddr, action, headerXML, bodyXML string) ([]byte, error) {
 	if c.validateAddr == nil {
 		return nil, fmt.Errorf("onvif: XAddr validator not configured, refusing request fail-closed")
 	}
@@ -118,10 +133,15 @@ func (c *Client) PostSOAP(ctx context.Context, xaddr, action, bodyXML string) ([
 		return nil, fmt.Errorf("onvif: destination rejected: %w", err)
 	}
 
+	var header string
+	if headerXML != "" {
+		header = "<s:Header>" + headerXML + "</s:Header>\n  "
+	}
+
 	envelope := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">
-  <s:Body>%s</s:Body>
-</s:Envelope>`, bodyXML)
+  %s<s:Body>%s</s:Body>
+</s:Envelope>`, header, bodyXML)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), strings.NewReader(envelope))
 	if err != nil {
@@ -414,7 +434,14 @@ func (c *Client) GetStreamUri(ctx context.Context, mediaXAddr, profileToken stri
 
 func isAuthFault(body []byte) bool {
 	lower := bytes.ToLower(body)
-	if !bytes.Contains(lower, []byte("fault")) {
+	// Match a real SOAP <...:Fault> element boundary, not a bare "fault"
+	// substring: plenty of legitimate ONVIF responses (e.g. GetProfiles'
+	// PTZ fields like DefaultAbsolutePantTiltPositionSpace) contain
+	// "default", which itself contains "fault" — a bare substring check
+	// false-positives on those as an auth fault.
+	if !bytes.Contains(lower, []byte(":fault>")) &&
+		!bytes.Contains(lower, []byte(":fault ")) &&
+		!bytes.Contains(lower, []byte("<fault>")) {
 		return false
 	}
 	return bytes.Contains(lower, []byte("notauthorized")) ||

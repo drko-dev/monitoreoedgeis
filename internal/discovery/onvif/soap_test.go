@@ -49,6 +49,39 @@ func TestAuthRequired_Http401(t *testing.T) {
 	_ = client
 }
 
+// TestIsAuthFault_DoesNotFalsePositiveOnDefaultFields guards against a real
+// false positive found via Tapo TC70 hardware testing: a successful
+// GetProfiles response containing PTZ "Default..." field names (e.g.
+// DefaultAbsolutePantTiltPositionSpace) together with the standard
+// xmlns:wsse="...wssecurity..." namespace declaration was previously
+// misclassified as an auth fault, because "default" contains "fault" as a
+// bare substring and the namespace URI contains "security".
+func TestIsAuthFault_DoesNotFalsePositiveOnDefaultFields(t *testing.T) {
+	body := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+  <SOAP-ENV:Body>
+    <trt:GetProfilesResponse>
+      <trt:Profiles token="profile_1">
+        <tt:PTZConfiguration>
+          <tt:DefaultAbsolutePantTiltPositionSpace>http://www.onvif.org/ver10/tptz/PanTiltSpaces/PositionGenericSpace</tt:DefaultAbsolutePantTiltPositionSpace>
+          <tt:DefaultPTZSpeed/>
+          <tt:DefaultPTZTimeout>PT5S</tt:DefaultPTZTimeout>
+        </tt:PTZConfiguration>
+      </trt:Profiles>
+    </trt:GetProfilesResponse>
+  </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>`)
+	if isAuthFault(body) {
+		t.Fatalf("isAuthFault false-positived on a successful response with PTZ Default* fields")
+	}
+
+	// A real auth fault must still be detected.
+	realFault := []byte(`<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"><SOAP-ENV:Body><SOAP-ENV:Fault><SOAP-ENV:Reason><SOAP-ENV:Text>NotAuthorized</SOAP-ENV:Text></SOAP-ENV:Reason></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>`)
+	if !isAuthFault(realFault) {
+		t.Fatalf("isAuthFault must still detect a real SOAP Fault with NotAuthorized")
+	}
+}
+
 func TestSanitizeRTSPURI(t *testing.T) {
 	cases := []struct {
 		input    string
