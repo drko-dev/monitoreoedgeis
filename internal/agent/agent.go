@@ -17,6 +17,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/logging"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
+	"github.com/drko-dev/monitoreoedgeis/internal/rtsp"
 )
 
 // Agent is the edge agent core.
@@ -31,6 +32,7 @@ type Agent struct {
 	health         *health.Reporter
 	heartbeatErr   error
 	discoveryErr   error
+	rtspManager    *rtsp.Manager
 	modules        *moduleManager
 }
 
@@ -78,6 +80,20 @@ func New(cfg *config.Config) *Agent {
 		mods = append(mods, disc)
 	}
 
+	if cfg.ConnectivityEnabled {
+		rtspCfg := rtsp.Config{
+			StreamRole:     cfg.StreamRole,
+			PacketTimeout:  cfg.StreamTimeout,
+			InitialBackoff: 1 * time.Second,
+			MaxBackoff:     60 * time.Second,
+			DialTimeout:    cfg.StreamTimeout,
+			Enabled:        true,
+		}
+		rtspMgr := rtsp.NewManager(rtspCfg, reporter, logging.Component(log, "rtsp"))
+		mods = append(mods, rtspMgr)
+		a.rtspManager = rtspMgr
+	}
+
 	a.heartbeatErr = hbErr
 	a.discoveryErr = discErr
 	a.modules = newModuleManager(reporter.SetModuleState, mods...)
@@ -86,6 +102,9 @@ func New(cfg *config.Config) *Agent {
 
 // Health exposes the health reporter (used by tests and future endpoints).
 func (a *Agent) Health() *health.Reporter { return a.health }
+
+// RTSPManager exposes the RTSP connectivity manager (nil if connectivity disabled).
+func (a *Agent) RTSPManager() *rtsp.Manager { return a.rtspManager }
 
 // Run starts the agent and blocks until ctx is cancelled, then shuts down
 // gracefully. A cancelled context is a clean stop, not an error.

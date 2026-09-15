@@ -30,6 +30,10 @@ type Config struct {
 	DiscoveryInterval   time.Duration
 	DiscoveryTimeout    time.Duration
 	DiscoveryInterfaces []string
+	// Camera connectivity settings (Milestone G).
+	ConnectivityEnabled bool
+	StreamRole          string
+	StreamTimeout       time.Duration
 }
 
 // Defaults. No secrets, no credentials.
@@ -58,6 +62,12 @@ const (
 	DefaultDiscoveryTimeout  = 4 * time.Second
 	MinDiscoveryTimeout      = 1 * time.Second
 	MaxDiscoveryTimeout      = 30 * time.Second
+	// Connectivity defaults and bounds (Milestone G).
+	DefaultConnectivityEnabled = true
+	DefaultStreamRole          = "sub"
+	DefaultStreamTimeout       = 5 * time.Second
+	MinStreamTimeout           = 1 * time.Second
+	MaxStreamTimeout           = 60 * time.Second
 )
 
 var validLogLevels = []string{"debug", "info", "warn", "error"}
@@ -66,17 +76,20 @@ var validLogLevels = []string{"debug", "info", "warn", "error"}
 // An invalid value is a hard startup error.
 func Load() (*Config, error) {
 	cfg := &Config{
-		EdgeID:            strings.TrimSpace(os.Getenv("GEOCAM_EDGE_ID")),
-		ProcessingMode:    DefaultProcessingMode,
-		LogLevel:          DefaultLogLevel,
-		SaaSURL:           strings.TrimSpace(os.Getenv("GEOCAM_SAAS_URL")),
-		HeartbeatInterval: DefaultHeartbeatInterval,
-		DataDir:           DefaultDataDir,
-		HealthAddr:        DefaultHealthAddr,
-		SaaSTimeout:       DefaultSaaSTimeout,
-		DiscoveryEnabled:  DefaultDiscoveryEnabled,
-		DiscoveryInterval: DefaultDiscoveryInterval,
-		DiscoveryTimeout:  DefaultDiscoveryTimeout,
+		EdgeID:              strings.TrimSpace(os.Getenv("GEOCAM_EDGE_ID")),
+		ProcessingMode:      DefaultProcessingMode,
+		LogLevel:            DefaultLogLevel,
+		SaaSURL:             strings.TrimSpace(os.Getenv("GEOCAM_SAAS_URL")),
+		HeartbeatInterval:   DefaultHeartbeatInterval,
+		DataDir:             DefaultDataDir,
+		HealthAddr:          DefaultHealthAddr,
+		SaaSTimeout:         DefaultSaaSTimeout,
+		DiscoveryEnabled:    DefaultDiscoveryEnabled,
+		DiscoveryInterval:   DefaultDiscoveryInterval,
+		DiscoveryTimeout:    DefaultDiscoveryTimeout,
+		ConnectivityEnabled: DefaultConnectivityEnabled,
+		StreamRole:          DefaultStreamRole,
+		StreamTimeout:       DefaultStreamTimeout,
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_PROCESSING_MODE")); raw != "" {
@@ -171,6 +184,30 @@ func Load() (*Config, error) {
 			}
 		}
 		cfg.DiscoveryInterfaces = ifaces
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_CONNECTIVITY_ENABLED")); raw != "" {
+		cfg.ConnectivityEnabled = strings.ToLower(raw) == "true" || raw == "1"
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_STREAM_ROLE")); raw != "" {
+		role := strings.ToLower(raw)
+		if role != "sub" && role != "main" {
+			return nil, fmt.Errorf("invalid stream role %q: must be 'sub' or 'main'", raw)
+		}
+		cfg.StreamRole = role
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_STREAM_TIMEOUT")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid stream timeout %q: %w", raw, err)
+		}
+		if d < MinStreamTimeout || d > MaxStreamTimeout {
+			return nil, fmt.Errorf("invalid stream timeout %q: must be between %s and %s",
+				raw, MinStreamTimeout, MaxStreamTimeout)
+		}
+		cfg.StreamTimeout = d
 	}
 
 	// Fail-fast: reject an insecure http:// SaaS URL here, before any

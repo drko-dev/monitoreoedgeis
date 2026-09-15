@@ -9,14 +9,14 @@
 | Field             | Value                                                     |
 | ----------------- | ----------------------------------------------------------- |
 | **PROJECT**       | GEO CAM Edge                                              |
-| **CURRENT HITO**  | E — Autodiscovery (ONVIF WS-Discovery & Local Inventory)   |
-| **STATE**         | DONE / MERGED                                             |
-| **MERGED**        | **YES** — merged into `main` (PR #5)                       |
-| **Branch**        | `main`                                                     |
+| **CURRENT HITO**  | G — Camera Connectivity                                   |
+| **STATE**         | DONE / VALIDATED LOCAL                                    |
+| **MERGED**        | **NO** — PR open on `feature/camera-connectivity`          |
+| **Branch**        | `feature/camera-connectivity`                              |
 | **DEPLOYED PROD** | **NO** — VPS/production untouched                         |
 | **Go version**    | 1.26.2                                                    |
 
-Hitos A, B, C, D, E are merged into `main`. Next is Hito F.
+Hitos A, B, C, D, E, F are merged into `main`. Hito G is validated locally. Next is Hito H.
 
 ## Hito A — what was implemented (MERGED)
 
@@ -369,10 +369,32 @@ credential is the one SaaS-side condition that degrades the whole agent.
 - **CLI Subcommand**: `geocam-edge discovery scan [--interface <iface>] [--timeout <duration>] [--json]`. Clean terminal output with zero secrets.
 - **LAN Validation**: Verified against physical camera on LAN (Tapo TC70 detected at 192.168.0.6:2020).
 
+## Hito F — Camera Credentials (MERGED)
+
+- Credential storage with AES-256-GCM encryption at rest.
+- DEVICE and GROUP scoped credential assignment and resolution.
+- ONVIF authentication and credential testing against physical hardware.
+- RTSP Digest authentication test client.
+- Merged into `main` via PR #7.
+
+## Hito G — what was implemented (THIS BRANCH)
+
+- **Pure Go stdlib RTSP Client**: `internal/rtsp` handles DESCRIBE -> SETUP -> PLAY -> ReadPacket -> TEARDOWN over TCP interleaved `RTP/AVP/TCP;unicast;interleaved=0-1`. Zero external C/FFmpeg dependencies (`CGO_ENABLED=0`).
+- **Resilient Reconnection**: `Supervisor` implements bounded exponential backoff (1s -> 2s -> 4s -> ... -> max 60s) with clean context cancellation.
+- **Silence & Timeout Detection**: 5s packet read timeout declarations with automatic degradation and reconnection.
+- **Camera Health State Machine**: State transitions (`connecting`, `online`, `degraded`, `offline`) captured in thread-safe `CameraStreamStatus`.
+- **Stream Role Selection**: Main/substream selection defaulting to `sub` (configurable via `GEOCAM_STREAM_ROLE`).
+- **ONVIF Metadata Mapping**: Extracts codec, resolution (width/height), and nominal FPS from ONVIF media profiles.
+- **Heartbeat Telemetry Integration**: Telemetry payload `cameras: [...]` added to `HeartbeatRequest`, ingested and persisted in PostgreSQL `edge_camera_status` table.
+- **SaaS UI Enrichment**: Candidate rows in `edge_devices.js` display real-time stream status badge (`Online`, `Conectando`, `Degradado`, `Offline`) and technical stream parameters.
+- **Help Center**: Added comprehensive documentation for camera connectivity under `/dispositivos-edge`.
+- **Strict Credential Privacy**: No secrets, tokens, or plaintext passwords logged or returned in status payloads.
+- **LAN Live Camera Validation**: Verified against physical Tapo TC70 camera (`192.168.0.6:554/stream2`), reading 20+ live interleaved packets in 1.47s.
+
 ## NEXT
 
-Hito E is DONE / MERGED. Next is Hito F (Camera credentials storage & management).
-Do not start Hito F until explicitly authorized.
+Hito G is DONE / VALIDATED LOCAL. PR is open on `feature/camera-connectivity`.
+Next is Hito H (Video Pipeline: decode, sampling, frame routing). Do NOT start Hito H until authorized.
 
 ## HOW ANOTHER AI SHOULD CONTINUE
 
