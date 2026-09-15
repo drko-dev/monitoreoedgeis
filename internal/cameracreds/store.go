@@ -141,12 +141,15 @@ func (s *Store) Apply(incoming []Credential) (changed bool, err error) {
 		changed = true
 	}
 
-	s.entries = next
 	if !changed {
+		s.entries = next
 		return false, nil
 	}
+	prev := s.entries
+	s.entries = next
 	if err := s.persistLocked(); err != nil {
-		return true, err
+		s.entries = prev // memoria y disco siguen coincidiendo; el próximo intento reintenta
+		return false, err
 	}
 	return true, nil
 }

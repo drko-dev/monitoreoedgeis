@@ -196,6 +196,47 @@ func TestStore_Apply_AbsentEntryIsRevoked(t *testing.T) {
 	}
 }
 
+func TestStore_Apply_PersistFailureKeepsMemoryInSyncWithDisk(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses directory permission checks")
+	}
+	dir := t.TempDir()
+	store, err := OpenStore(dir, testKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred := Credential{ID: "c1", Scope: ScopeDevice, CandidateKeys: []string{"dev-1"}, Username: "admin", Password: "hunter2", Revision: 1}
+
+	// Make the data dir unwritable so persistLocked's temp-file creation fails.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+
+	if _, err := store.Apply([]Credential{cred}); err == nil {
+		t.Fatal("expected Apply to fail while data dir is unwritable")
+	}
+	if _, ok := NewProvider(store).Resolve("dev-1", ""); ok {
+		t.Fatal("memory should still reflect the state before the failed Apply")
+	}
+
+	// Fix the underlying problem and retry with the same payload: it must not
+	// be silently treated as changed=false forever.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := store.Apply([]Credential{cred})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("retry with the same payload after fixing the disk problem must persist, not report changed=false")
+	}
+	if _, ok := NewProvider(store).Resolve("dev-1", ""); !ok {
+		t.Fatal("credential should be resolvable after the successful retry")
+	}
+}
+
 func TestOpenStore_CorruptFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {

@@ -205,7 +205,7 @@ discarded and recreated.
 `/api/v1/gateway/camera-credentials` — **assumed**, not yet confirmed
 against SaaS source; the SaaS team is building this endpoint in parallel, so
 only that one constant needs to change if the real route differs). The
-response is `{"credentials": [{id, scope, target_id, username, password,
+response is `{"credentials": [{id, scope, candidate_keys[], username, password,
 revision, revoked}]}`, treated as the SaaS's full, authoritative snapshot of
 currently active credentials — not an incremental diff. `Store.Apply` then
 applies per-entry revision/idempotency rules:
