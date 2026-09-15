@@ -173,6 +173,68 @@ Online vs offline is **not** the Edge's call: the Edge reports only its own
 view of itself, and the SaaS derives connectivity from heartbeat arrival time
 against its own clock.
 
+### Camera credentials (Hito F, block 1)
+
+`internal/cameracreds` caches per-camera ONVIF/RTSP credentials synced from
+the SaaS. It is deliberately separate from `internal/credentials` (the
+Edge's own SaaS enrollment credential) and from `internal/discovery` (which
+this block does not touch): neither package imports the other, and no ONVIF
+WS-Security/Digest auth is wired to it yet — that is the next block.
+
+**Master key.** A random 32-byte AES-256 key is generated once and persisted
+to `<data-dir>/camera_master.key` (dir `0700`, file `0600`, atomic
+temp-file-then-rename, same pattern as `identity.json`). It is never derived
+from the enrollment credential, so rotating that credential can never make
+the camera-credentials cache unreadable. A present-but-corrupt key file
+(wrong size, unreadable) is a hard error — it is never silently regenerated,
+since that would permanently orphan an already-encrypted cache. The key
+value and its length are never logged.
+
+**Encrypted persistence.** Credentials live in
+`<data-dir>/camera_credentials.json`, written atomically with the same
+0700/0600 pattern. Each entry's password is sealed with AES-256-GCM under
+the local master key as `base64(nonce || ciphertext || tag)`; username and
+metadata (id, scope, target id, revision) stay in plaintext JSON since they
+are not secrets. The file's schema is versioned like `identity.json` and
+`credentials.json`, and a malformed file is a hard error, never silently
+discarded and recreated.
+
+**Sync contract.** `internal/cameracreds.Syncer` calls
+`transport.Client.FetchCameraCredentials`, a GET against
+`transport.CameraCredentialsPath` (currently
+`/api/v1/gateway/camera-credentials` — **assumed**, not yet confirmed
+against SaaS source; the SaaS team is building this endpoint in parallel, so
+only that one constant needs to change if the real route differs). The
+response is `{"credentials": [{id, scope, candidate_keys[], username, password,
+revision, revoked}]}`, treated as the SaaS's full, authoritative snapshot of
+currently active credentials — not an incremental diff. `Store.Apply` then
+applies per-entry revision/idempotency rules:
+
+| Incoming vs. cached (by id)        | Result                                   |
+| ----------------------------------- | ----------------------------------------- |
+| not cached yet, or higher revision  | replaces the cached entry                 |
+| same revision                       | no-op                                     |
+| lower (stale) revision              | ignored, cached entry kept                |
+| id absent from the response, or `revoked: true` | removed from the local cache  |
+
+A fetch failure (SaaS unreachable, timeout, unauthorized, ...) or a
+malformed payload (bad scope, missing fields) leaves the cache exactly as it
+was and is logged with a sanitized reason/error class only — the
+request/response body and the credentials it carries are never logged.
+`cameracreds.Module` (Name/Start/Stop, same shape as the other modules)
+polls `Syncer.Sync` on a fixed interval (`DefaultSyncInterval`, 5 minutes);
+it is not yet registered in the agent's module manager — that wiring is left
+for whichever block first needs credentials flowing automatically, since
+this block's contract works equally well driven by an explicit `Sync` call.
+
+**Resolution.** `cameracreds.Provider.Resolve(stableIdentity, groupID)`
+prefers a `DEVICE`-scoped assignment matched by Hito E's
+`discovery.Candidate.StableIdentity` (never an IP address) and falls back to
+a `GROUP`-scoped assignment matched by a SaaS-defined group id. It returns
+`ok=false` when neither matches. It is read-only and does not import
+`internal/discovery`, so wiring it into ONVIF authentication remains entirely
+the next block's job.
+
 ## Current modules (Go core)
 
 | Package             | Responsibility                                                            |
@@ -187,6 +249,7 @@ against its own clock.
 | `internal/transport`| SaaS HTTP client: enrollment, rotation, `me`, heartbeat, discovery next/report. Bearer auth, typed error classes |
 | `internal/heartbeat`| Periodic heartbeat module: scheduling, jitter, backoff, error classification |
 | `internal/discovery`| ONVIF WS-Discovery, unauthenticated SOAP enrichment, local inventory, SaaS pull module |
+| `internal/cameracreds`| Per-camera credential cache: local AES-256-GCM encryption, SaaS sync, DEVICE/GROUP resolution |
 
 ### Startup sequence
 
