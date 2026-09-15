@@ -19,6 +19,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/heartbeat"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
+	"github.com/drko-dev/monitoreoedgeis/internal/rtsp"
 )
 
 // State is the lifecycle state of the agent.
@@ -51,8 +52,9 @@ type Snapshot struct {
 	// the module is not running (unenrolled Edge, or no SaaS URL set). It
 	// carries timings, counters and an error class only — never the
 	// credential, never an Authorization header, never a hash.
-	Heartbeat *heartbeat.Status       `json:"heartbeat,omitempty"`
-	Discovery *discovery.ModuleStatus `json:"discovery,omitempty"`
+	Heartbeat *heartbeat.Status         `json:"heartbeat,omitempty"`
+	Discovery *discovery.ModuleStatus   `json:"discovery,omitempty"`
+	Cameras   []rtsp.CameraStreamStatus `json:"cameras,omitempty"`
 }
 
 // Reporter holds the mutable health state of the agent, including per-module
@@ -66,6 +68,7 @@ type Reporter struct {
 	credentialStatus string
 	heartbeat        *heartbeat.Status
 	discovery        *discovery.ModuleStatus
+	cameras          []rtsp.CameraStreamStatus
 
 	version string
 	cfg     *config.Config
@@ -118,12 +121,24 @@ func (r *Reporter) SetHeartbeatStatus(s heartbeat.Status) {
 	r.heartbeat = &s
 }
 
-// SetDiscoveryStatus records the discovery module's latest status for
-// reporting in Snapshot. The module calls this on every status change.
-func (r *Reporter) SetDiscoveryStatus(s discovery.ModuleStatus) {
+// SetDiscoveryStatus records the current status of the discovery module.
+func (r *Reporter) SetDiscoveryStatus(status discovery.ModuleStatus) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.discovery = &s
+	copied := status
+	r.discovery = &copied
+}
+
+// SetCameras records the current snapshot of monitored camera streams.
+func (r *Reporter) SetCameras(cameras []rtsp.CameraStreamStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cameras == nil {
+		r.cameras = nil
+		return
+	}
+	r.cameras = make([]rtsp.CameraStreamStatus, len(cameras))
+	copy(r.cameras, cameras)
 }
 
 // State returns the current state.
@@ -162,6 +177,11 @@ func (r *Reporter) Snapshot() Snapshot {
 		copied := *r.discovery
 		disc = &copied
 	}
+	var cams []rtsp.CameraStreamStatus
+	if len(r.cameras) > 0 {
+		cams = make([]rtsp.CameraStreamStatus, len(r.cameras))
+		copy(cams, r.cameras)
+	}
 
 	return Snapshot{
 		Status:           r.state,
@@ -178,5 +198,6 @@ func (r *Reporter) Snapshot() Snapshot {
 		Modules:          modules,
 		Heartbeat:        hb,
 		Discovery:        disc,
+		Cameras:          cams,
 	}
 }

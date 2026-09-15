@@ -13,8 +13,10 @@
 | C     | DONE / MERGED         |
 | D     | DONE / MERGED         |
 | E     | DONE / MERGED         |
-| F     | NEXT                  |
-| G–Z   | PLANNED               |
+| F     | DONE / MERGED         |
+| G     | DONE / VALIDATED LOCAL|
+| H     | NEXT                  |
+| I–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
 config, health, identity abstraction, platform/version). **That does not mean B
@@ -143,18 +145,20 @@ completa y `docs/PROJECT_STATUS.md` para el detalle de validación.
 - F8. Sync seguro Edge.
 
 ## G — Camera Connectivity
+ 
+- G1. Cliente RTSP. **DONE** — `internal/rtsp` (DESCRIBE -> SETUP -> PLAY -> TEARDOWN over TCP interleaved `RTP/AVP/TCP;unicast;interleaved=0-1`).
+- G2. Reconexión. **DONE** — `internal/rtsp/supervisor.go` exponential backoff (1s -> 2s -> 4s -> ... -> max 60s), bounded and context-controlled.
+- G3. Timeouts. **DONE** — Read timeout / silence threshold (5s), auto-degraded, auto-reconnect.
+- G4. Health cámara. **DONE** — state machine `connecting`, `online`, `degraded`, `offline` in `CameraStreamStatus`.
+- G5. Main/substream. **DONE** — default `sub`, configurable via `GEOCAM_STREAM_ROLE`.
+- G6. Codec. **DONE** — extracted from ONVIF `MediaProfile` (H.264 / H.265 / etc.).
+- G7. FPS. **DONE** — extracted from ONVIF `MediaProfile`.
+- G8. Resolución. **DONE** — width & height extracted from ONVIF `MediaProfile`.
+- G9. Stream caído. **DONE** — socket closure, EOF, timeout, auth failure handled cleanly with transition to degraded/offline and reconnect.
+- G10. Estado en SaaS. **DONE** — heartbeat telemetry `cameras: [...]` upserted to `edge_camera_status` and exposed in discovery candidates table.
+- G11. Métricas de pérdida/reconexión. **DONE** — `packets_received`, `bytes_received`, `reconnect_count`, `last_packet_at`, `last_error_safe` tracked without secret leakage.
 
-- G1. Cliente RTSP.
-- G2. Reconexión.
-- G3. Timeouts.
-- G4. Health cámara.
-- G5. Main/substream.
-- G6. Codec.
-- G7. FPS.
-- G8. Resolución.
-- G9. Stream caído.
-- G10. Estado en SaaS.
-- G11. Métricas de pérdida/reconexión.
+**G — DONE / VALIDATED LOCAL.** Pure stdlib Go, `CGO_ENABLED=0`, cross-compiles to `linux/amd64` and `linux/arm64`, 100% tests passing with race detector, live Tapo TC70 camera streaming validated on LAN (`192.168.0.6:554/stream2`), 20+ packets received in 1.47s. Zero FFmpeg, zero video decoding, zero video frames. Ready for PR.
 
 ## H — Video Pipeline
 

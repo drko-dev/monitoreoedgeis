@@ -76,8 +76,25 @@ type HeartbeatRequest struct {
 	SequenceNumber int64  `json:"sequence_number,omitempty"`
 	// EdgeTimestamp is diagnostic only. The authoritative last_seen is the
 	// SaaS's own clock at arrival.
-	EdgeTimestamp string          `json:"edge_timestamp,omitempty"`
-	System        HeartbeatSystem `json:"metrics"`
+	EdgeTimestamp string               `json:"edge_timestamp,omitempty"`
+	System        HeartbeatSystem      `json:"metrics"`
+	Cameras       []CameraStreamStatus `json:"cameras,omitempty"`
+}
+
+// CameraStreamStatus carries live camera RTSP connectivity telemetry (Milestone G).
+type CameraStreamStatus struct {
+	CandidateKey    string  `json:"candidate_key"`
+	Status          string  `json:"status"`
+	StreamRole      string  `json:"stream_role,omitempty"`
+	Codec           string  `json:"codec,omitempty"`
+	Width           int     `json:"width,omitempty"`
+	Height          int     `json:"height,omitempty"`
+	FPS             float64 `json:"fps,omitempty"`
+	ReconnectCount  int64   `json:"reconnect_count"`
+	PacketsReceived int64   `json:"packets_received"`
+	BytesReceived   int64   `json:"bytes_received"`
+	LastPacketAt    *string `json:"last_packet_at,omitempty"`
+	LastErrorSafe   string  `json:"last_error_safe,omitempty"`
 }
 
 // Heartbeat posts one heartbeat authenticated with deviceID + credential.

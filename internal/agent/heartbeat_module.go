@@ -72,6 +72,29 @@ func newHeartbeatModule(
 		sample := platform.Collect(cfg.DataDir, cpu)
 		sequence++
 		snap := reporter.Snapshot()
+		var cams []transport.CameraStreamStatus
+		for _, c := range snap.Cameras {
+			var lastPkt *string
+			if c.LastPacketAt != nil {
+				formatted := c.LastPacketAt.UTC().Format(time.RFC3339)
+				lastPkt = &formatted
+			}
+			cams = append(cams, transport.CameraStreamStatus{
+				CandidateKey:    c.CandidateKey,
+				Status:          string(c.Status),
+				StreamRole:      c.StreamRole,
+				Codec:           c.Codec,
+				Width:           c.Width,
+				Height:          c.Height,
+				FPS:             c.FPS,
+				ReconnectCount:  c.ReconnectCount,
+				PacketsReceived: c.PacketsReceived,
+				BytesReceived:   c.BytesReceived,
+				LastPacketAt:    lastPkt,
+				LastErrorSafe:   c.LastErrorSafe,
+			})
+		}
+
 		return transport.HeartbeatRequest{
 			EdgeID:         ident.EdgeID,
 			EdgeVersion:    Version,
@@ -90,6 +113,7 @@ func newHeartbeatModule(
 				DiskUsedBytes:    sample.DiskUsedBytes,
 				TemperatureC:     sample.TemperatureC,
 			},
+			Cameras: cams,
 		}
 	}
 
