@@ -27,10 +27,12 @@ type Credential struct {
 	ID string
 	// Scope is ScopeDevice or ScopeGroup.
 	Scope Scope
-	// TargetID is the stable_identity (ScopeDevice) or the SaaS group id
-	// (ScopeGroup) this credential applies to. Never an IP address.
-	TargetID string
-	Username string
+	// CandidateKeys are the stable_identity/group-id strings this credential
+	// applies to — never an IP address. A DEVICE credential has exactly one
+	// entry; a GROUP credential can have N (one per device assigned to that
+	// group).
+	CandidateKeys []string
+	Username      string
 	// Password is the plaintext secret. Never logged, never encoded in a
 	// String()/error message.
 	Password string
@@ -47,8 +49,13 @@ func (c Credential) validate() error {
 	if c.Scope != ScopeDevice && c.Scope != ScopeGroup {
 		return fmt.Errorf("cameracreds: credential %s: invalid scope %q", c.ID, c.Scope)
 	}
-	if c.TargetID == "" {
-		return fmt.Errorf("cameracreds: credential %s: missing target_id", c.ID)
+	if len(c.CandidateKeys) == 0 {
+		return fmt.Errorf("cameracreds: credential %s: missing candidate_keys", c.ID)
+	}
+	for _, k := range c.CandidateKeys {
+		if k == "" {
+			return fmt.Errorf("cameracreds: credential %s: empty candidate_key", c.ID)
+		}
 	}
 	if c.Username == "" {
 		return fmt.Errorf("cameracreds: credential %s: missing username", c.ID)

@@ -25,18 +25,44 @@ func (p *Provider) Resolve(stableIdentity, groupID string) (Credential, bool) {
 	entries := p.store.Snapshot()
 
 	if stableIdentity != "" {
-		for _, c := range entries {
-			if c.Scope == ScopeDevice && c.TargetID == stableIdentity {
-				return c, true
-			}
+		if c, ok := bestMatch(entries, ScopeDevice, stableIdentity); ok {
+			return c, true
 		}
 	}
 	if groupID != "" {
-		for _, c := range entries {
-			if c.Scope == ScopeGroup && c.TargetID == groupID {
-				return c, true
-			}
+		if c, ok := bestMatch(entries, ScopeGroup, groupID); ok {
+			return c, true
 		}
 	}
 	return Credential{}, false
+}
+
+// bestMatch returns the credential of the given scope whose CandidateKeys
+// contains candidateKey. If more than one matches — an ambiguous state the
+// SaaS is expected to prevent via a 409 on assignment, but the Edge cannot
+// rely on that silently against a stale/duplicate cache — it picks the one
+// with the lexicographically smallest ID, so the result is deterministic
+// regardless of Go's unordered map iteration in Store.Snapshot.
+func bestMatch(entries []Credential, scope Scope, candidateKey string) (Credential, bool) {
+	var best Credential
+	found := false
+	for _, c := range entries {
+		if c.Scope != scope || !containsKey(c.CandidateKeys, candidateKey) {
+			continue
+		}
+		if !found || c.ID < best.ID {
+			best = c
+			found = true
+		}
+	}
+	return best, found
+}
+
+func containsKey(keys []string, key string) bool {
+	for _, k := range keys {
+		if k == key {
+			return true
+		}
+	}
+	return false
 }

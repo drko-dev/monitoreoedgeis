@@ -29,12 +29,12 @@ type fileRecord struct {
 }
 
 type entryRecord struct {
-	ID          string `json:"id"`
-	Scope       string `json:"scope"`
-	TargetID    string `json:"target_id"`
-	Username    string `json:"username"`
-	Revision    int    `json:"revision"`
-	PasswordEnc string `json:"password_enc"`
+	ID            string   `json:"id"`
+	Scope         string   `json:"scope"`
+	CandidateKeys []string `json:"candidate_keys"`
+	Username      string   `json:"username"`
+	Revision      int      `json:"revision"`
+	PasswordEnc   string   `json:"password_enc"`
 }
 
 func credentialsPath(dataDir string) string {
@@ -82,12 +82,12 @@ func OpenStore(dataDir string, masterKey []byte) (*Store, error) {
 			return nil, fmt.Errorf("%w: entry %s: %v", ErrCorrupt, e.ID, decErr)
 		}
 		cred := Credential{
-			ID:       e.ID,
-			Scope:    Scope(e.Scope),
-			TargetID: e.TargetID,
-			Username: e.Username,
-			Password: password,
-			Revision: e.Revision,
+			ID:            e.ID,
+			Scope:         Scope(e.Scope),
+			CandidateKeys: e.CandidateKeys,
+			Username:      e.Username,
+			Password:      password,
+			Revision:      e.Revision,
 		}
 		if valErr := cred.validate(); valErr != nil {
 			return nil, fmt.Errorf("%w: %v", ErrCorrupt, valErr)
@@ -165,12 +165,12 @@ func (s *Store) persistLocked() error {
 			return fmt.Errorf("cameracreds: encrypt credential %s: %w", c.ID, err)
 		}
 		rec.Entries = append(rec.Entries, entryRecord{
-			ID:          c.ID,
-			Scope:       string(c.Scope),
-			TargetID:    c.TargetID,
-			Username:    c.Username,
-			Revision:    c.Revision,
-			PasswordEnc: enc,
+			ID:            c.ID,
+			Scope:         string(c.Scope),
+			CandidateKeys: c.CandidateKeys,
+			Username:      c.Username,
+			Revision:      c.Revision,
+			PasswordEnc:   enc,
 		})
 	}
 

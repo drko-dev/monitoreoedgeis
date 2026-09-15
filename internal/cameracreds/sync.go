@@ -94,12 +94,12 @@ func decodePayload(resp transport.CameraCredentialsResponse) ([]Credential, erro
 			continue
 		}
 		c := Credential{
-			ID:       p.ID,
-			Scope:    Scope(p.Scope),
-			TargetID: p.TargetID,
-			Username: p.Username,
-			Password: p.Password,
-			Revision: p.Revision,
+			ID:            p.ID,
+			Scope:         Scope(p.Scope),
+			CandidateKeys: p.CandidateKeys,
+			Username:      p.Username,
+			Password:      p.Password,
+			Revision:      p.Revision,
 		}
 		if err := c.validate(); err != nil {
 			return nil, fmt.Errorf("cameracreds: %w", err)

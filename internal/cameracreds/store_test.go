@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -39,7 +40,7 @@ func TestStore_ApplyAndPersist_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cred := Credential{ID: "c1", Scope: ScopeDevice, TargetID: "onvif-abc123", Username: "admin", Password: "hunter2", Revision: 1}
+	cred := Credential{ID: "c1", Scope: ScopeDevice, CandidateKeys: []string{"onvif-abc123"}, Username: "admin", Password: "hunter2", Revision: 1}
 	if _, err := store.Apply([]Credential{cred}); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +67,7 @@ func TestStore_NoPlaintextOnDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := store.Apply([]Credential{
-		{ID: "c1", Scope: ScopeDevice, TargetID: "dev-1", Username: "admin", Password: "hunter2", Revision: 1},
+		{ID: "c1", Scope: ScopeDevice, CandidateKeys: []string{"dev-1"}, Username: "admin", Password: "hunter2", Revision: 1},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +89,7 @@ func TestStore_AtomicWrite_NoOrphanedTempFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := store.Apply([]Credential{
-		{ID: "c1", Scope: ScopeDevice, TargetID: "dev-1", Username: "admin", Password: "hunter2", Revision: 1},
+		{ID: "c1", Scope: ScopeDevice, CandidateKeys: []string{"dev-1"}, Username: "admin", Password: "hunter2", Revision: 1},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +110,7 @@ func TestStore_Apply_SameRevisionIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cred := Credential{ID: "c1", Scope: ScopeDevice, TargetID: "dev-1", Username: "admin", Password: "hunter2", Revision: 3}
+	cred := Credential{ID: "c1", Scope: ScopeDevice, CandidateKeys: []string{"dev-1"}, Username: "admin", Password: "hunter2", Revision: 3}
 	if _, err := store.Apply([]Credential{cred}); err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +123,7 @@ func TestStore_Apply_SameRevisionIsIdempotent(t *testing.T) {
 		t.Fatal("re-applying the same revision should be a no-op")
 	}
 	got, ok := NewProvider(store).Resolve("dev-1", "")
-	if !ok || got != cred {
+	if !ok || !reflect.DeepEqual(got, cred) {
 		t.Fatalf("cache mutated by idempotent apply: %+v", got)
 	}
 }
@@ -132,11 +133,11 @@ func TestStore_Apply_HigherRevisionReplaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := Credential{ID: "c1", Scope: ScopeDevice, TargetID: "dev-1", Username: "admin", Password: "old-pass", Revision: 1}
+	old := Credential{ID: "c1", Scope: ScopeDevice, CandidateKeys: []string{"dev-1"}, Username: "admin", Password: "old-pass", Revision: 1}
 	if _, err := store.Apply([]Credential{old}); err != nil {
 		t.Fatal(err)
 	}
-	newer := Credential{ID: "c1", Scope: ScopeDevice, TargetID: "dev-1", Username: "admin", Password: "new-pass", Revision: 2}
+	newer := Credential{ID: "c1", Scope: ScopeDevice, CandidateKeys: []string{"dev-1"}, Username: "admin", Password: "new-pass", Revision: 2}
 	changed, err := store.Apply([]Credential{newer})
 	if err != nil {
 		t.Fatal(err)
@@ -155,11 +156,11 @@ func TestStore_Apply_StaleRevisionIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	current := Credential{ID: "c1", Scope: ScopeDevice, TargetID: "dev-1", Username: "admin", Password: "current-pass", Revision: 5}
+	current := Credential{ID: "c1", Scope: ScopeDevice, CandidateKeys: []string{"dev-1"}, Username: "admin", Password: "current-pass", Revision: 5}
 	if _, err := store.Apply([]Credential{current}); err != nil {
 		t.Fatal(err)
 	}
-	stale := Credential{ID: "c1", Scope: ScopeDevice, TargetID: "dev-1", Username: "admin", Password: "stale-pass", Revision: 2}
+	stale := Credential{ID: "c1", Scope: ScopeDevice, CandidateKeys: []string{"dev-1"}, Username: "admin", Password: "stale-pass", Revision: 2}
 	changed, err := store.Apply([]Credential{stale})
 	if err != nil {
 		t.Fatal(err)
@@ -178,7 +179,7 @@ func TestStore_Apply_AbsentEntryIsRevoked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cred := Credential{ID: "c1", Scope: ScopeDevice, TargetID: "dev-1", Username: "admin", Password: "pass", Revision: 1}
+	cred := Credential{ID: "c1", Scope: ScopeDevice, CandidateKeys: []string{"dev-1"}, Username: "admin", Password: "pass", Revision: 1}
 	if _, err := store.Apply([]Credential{cred}); err != nil {
 		t.Fatal(err)
 	}

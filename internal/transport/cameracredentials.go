@@ -22,12 +22,15 @@ const CameraCredentialsPath = "/api/v1/gateway/camera-credentials"
 // never be logged; internal/cameracreds encrypts it before it ever touches
 // disk.
 type CameraCredentialPayload struct {
-	ID       string `json:"id"`
-	Scope    string `json:"scope"` // "DEVICE" or "GROUP"
-	TargetID string `json:"target_id"`
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Revision int    `json:"revision"`
+	ID    string `json:"id"`
+	Scope string `json:"scope"` // "DEVICE" or "GROUP"
+	// CandidateKeys are the stable_identity/group-id strings this credential
+	// applies to: exactly one entry for a DEVICE credential, N for a GROUP
+	// credential assigned to N devices.
+	CandidateKeys []string `json:"candidate_keys"`
+	Username      string   `json:"username"`
+	Password      string   `json:"password"`
+	Revision      int      `json:"revision"`
 	// Revoked, when true, means this entry must be removed from the local
 	// cache even if the SaaS still lists it (e.g. mid-revocation window).
 	Revoked bool `json:"revoked,omitempty"`
