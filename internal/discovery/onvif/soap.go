@@ -69,8 +69,9 @@ func (NoopCredentialProvider) GetCredentials(string) (string, string, bool) {
 
 // Client performs scoped, bounded ONVIF SOAP queries.
 type Client struct {
-	httpClient *http.Client
-	credProv   CredentialProvider
+	httpClient   *http.Client
+	credProv     CredentialProvider
+	validateAddr func(string) (*url.URL, int, error)
 }
 
 // NewClient creates an ONVIF SOAP client with strict bounded request timeouts.
@@ -98,18 +99,23 @@ func (c *Client) SetTransport(rt http.RoundTripper) {
 	c.httpClient.Transport = rt
 }
 
+// SetXAddrValidator injects the shared fail-closed XAddr validation (discovery.ValidateXAddr)
+// used by PostSOAP. It is set by the discovery package when constructing/wiring the Client,
+// avoiding an import cycle (onvif cannot import discovery) while ensuring every outbound
+// SOAP destination — from initial discovery, GetCapabilities' Media XAddr, or anywhere
+// else a camera-controlled XAddr enters the flow — is checked by the same rules.
+func (c *Client) SetXAddrValidator(fn func(string) (*url.URL, int, error)) {
+	c.validateAddr = fn
+}
+
 // PostSOAP executes one bounded SOAP POST request against an XAddr URL.
 func (c *Client) PostSOAP(ctx context.Context, xaddr, action, bodyXML string) ([]byte, error) {
-	u, err := url.Parse(xaddr)
+	if c.validateAddr == nil {
+		return nil, fmt.Errorf("onvif: XAddr validator not configured, refusing request fail-closed")
+	}
+	u, _, err := c.validateAddr(xaddr)
 	if err != nil {
-		return nil, fmt.Errorf("onvif: invalid destination %q: %w", xaddr, err)
-	}
-	scheme := strings.ToLower(u.Scheme)
-	if scheme != "http" && scheme != "https" {
-		return nil, fmt.Errorf("onvif: invalid scheme %q: only http/https allowed", scheme)
-	}
-	if u.User != nil || strings.Contains(u.Host, "@") {
-		return nil, fmt.Errorf("onvif: destination contains prohibited userinfo")
+		return nil, fmt.Errorf("onvif: destination rejected: %w", err)
 	}
 
 	envelope := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
@@ -365,13 +371,18 @@ func (c *Client) GetProfiles(ctx context.Context, mediaXAddr string) ([]MediaPro
 // CRITICAL RULE: The returned URI is always sanitized to strip userinfo.
 // No video connection or decode is initiated.
 func (c *Client) GetStreamUri(ctx context.Context, mediaXAddr, profileToken string) (string, error) {
+	var escapedToken bytes.Buffer
+	if err := xml.EscapeText(&escapedToken, []byte(profileToken)); err != nil {
+		return "", fmt.Errorf("onvif: failed to escape profile token: %w", err)
+	}
+
 	body := fmt.Sprintf(`<GetStreamUri xmlns="http://www.onvif.org/ver10/media/wsdl">
   <StreamSetup xmlns="http://www.onvif.org/ver10/schema">
     <Stream>RTP-Unicast</Stream>
     <Transport><Protocol>RTSP</Protocol></Transport>
   </StreamSetup>
   <ProfileToken>%s</ProfileToken>
-</GetStreamUri>`, profileToken)
+</GetStreamUri>`, escapedToken.String())
 
 	respBytes, err := c.PostSOAP(ctx, mediaXAddr, "http://www.onvif.org/ver10/media/wsdl/GetStreamUri", body)
 	if err != nil {
