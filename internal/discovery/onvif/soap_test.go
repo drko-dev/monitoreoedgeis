@@ -82,6 +82,26 @@ func TestIsAuthFault_DoesNotFalsePositiveOnDefaultFields(t *testing.T) {
 	}
 }
 
+// TestIsAuthFault_DoesNotFalsePositiveOnNonAuthFaultWithWSSENamespace guards
+// against a residual false positive: the bare "security" match matched any
+// SOAP Fault at all on an envelope that declares the wsse namespace (its URI
+// contains "security"), even a fault with a completely unrelated cause such
+// as an invalid argument value.
+func TestIsAuthFault_DoesNotFalsePositiveOnNonAuthFaultWithWSSENamespace(t *testing.T) {
+	body := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
+  <SOAP-ENV:Body>
+    <SOAP-ENV:Fault>
+      <SOAP-ENV:Code><SOAP-ENV:Value>SOAP-ENV:Sender</SOAP-ENV:Value><SOAP-ENV:Subcode><SOAP-ENV:Value>ter:InvalidArgVal</SOAP-ENV:Value></SOAP-ENV:Subcode></SOAP-ENV:Code>
+      <SOAP-ENV:Reason><SOAP-ENV:Text>Invalid Argument Value</SOAP-ENV:Text></SOAP-ENV:Reason>
+    </SOAP-ENV:Fault>
+  </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>`)
+	if isAuthFault(body) {
+		t.Fatalf("isAuthFault false-positived on a non-auth SOAP Fault (ter:InvalidArgVal) just because the envelope declares the wsse namespace")
+	}
+}
+
 func TestSanitizeRTSPURI(t *testing.T) {
 	cases := []struct {
 		input    string

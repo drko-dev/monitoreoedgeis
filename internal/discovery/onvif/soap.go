@@ -441,13 +441,18 @@ func isAuthFault(body []byte) bool {
 	// false-positives on those as an auth fault.
 	if !bytes.Contains(lower, []byte(":fault>")) &&
 		!bytes.Contains(lower, []byte(":fault ")) &&
-		!bytes.Contains(lower, []byte("<fault>")) {
+		!bytes.Contains(lower, []byte("<fault>")) &&
+		!bytes.Contains(lower, []byte("<fault ")) {
 		return false
 	}
+	// "security" alone false-positives: the wsse namespace URI
+	// (...-wss-security-secext-1.0.xsd) contains the substring "security"
+	// and appears on any envelope from a device that declares WS-Security,
+	// even for a completely unrelated SOAP Fault (e.g. ter:InvalidArgVal).
+	// Keep only terms that are genuinely specific to an auth failure.
 	return bytes.Contains(lower, []byte("notauthorized")) ||
 		bytes.Contains(lower, []byte("failedauthentication")) ||
-		bytes.Contains(lower, []byte("unauthorized")) ||
-		bytes.Contains(lower, []byte("security"))
+		bytes.Contains(lower, []byte("unauthorized"))
 }
 
 func sanitizeText(s string, maxLen int) string {

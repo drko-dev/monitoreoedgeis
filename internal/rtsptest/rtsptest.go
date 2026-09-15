@@ -40,7 +40,10 @@ type Result struct {
 	Err   error
 }
 
-var digestParamRe = regexp.MustCompile(`(\w+)="([^"]*)"`)
+// digestParamRe matches both quoted (realm="X") and unquoted (qop=auth)
+// challenge parameters — RFC 2617 allows qop/algorithm/stale unquoted, and
+// real IP cameras commonly send qop=auth without quotes.
+var digestParamRe = regexp.MustCompile(`(\w+)\s*=\s*(?:"([^"]*)"|([^,\s]+))`)
 
 // ParseTarget splits a full rtsp:// URL into a dial address ("host:port")
 // and a request path. Any userinfo in rawURL (rtsp://user:pass@host/...)
@@ -77,7 +80,19 @@ func TestDescribe(ctx context.Context, addr, rtspPath, username, password string
 	}
 	uri := "rtsp://" + addr + rtspPath
 
-	status, challenge, err := describe(ctx, addr, rtspPath, timeout, "")
+	// One TCP connection for the whole flow: many embedded RTSP servers (IP
+	// cameras) tie the digest nonce they issue to the connection that
+	// received it and reject an otherwise-correct digest sent over a new
+	// connection.
+	dialer := &net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return Result{State: classify(err), Err: err}
+	}
+	defer conn.Close()
+
+	cseq := 1
+	status, challenge, err := sendDescribe(conn, addr, rtspPath, timeout, "", cseq)
 	if err != nil {
 		return Result{State: classify(err), Err: err}
 	}
@@ -93,44 +108,50 @@ func TestDescribe(ctx context.Context, addr, rtspPath, username, password string
 		return Result{State: StateError, Err: err}
 	}
 
-	authHeader, err := buildDigestAuth(username, password, "DESCRIBE", uri, params)
-	if err != nil {
-		return Result{State: StateError, Err: err}
-	}
+	// At most 2 authenticated attempts: a nonce can go stale mid-flow, in
+	// which case the server's second 401 carries stale=true plus a fresh
+	// nonce. Retry once against that fresh nonce, never loop further.
+	for attempt := 0; attempt < 2; attempt++ {
+		authHeader, err := buildDigestAuth(username, password, "DESCRIBE", uri, params)
+		if err != nil {
+			return Result{State: StateError, Err: err}
+		}
 
-	status2, _, err := describe(ctx, addr, rtspPath, timeout, authHeader)
-	if err != nil {
-		return Result{State: classify(err), Err: err}
+		cseq++
+		status2, challenge2, err := sendDescribe(conn, addr, rtspPath, timeout, authHeader, cseq)
+		if err != nil {
+			return Result{State: classify(err), Err: err}
+		}
+		switch status2 {
+		case 200:
+			return Result{State: StateValid}
+		case 401:
+			if attempt == 0 {
+				if params2, perr := parseDigestChallenge(challenge2); perr == nil && params2["stale"] == "true" {
+					params = params2
+					continue
+				}
+			}
+			return Result{State: StateInvalid}
+		default:
+			return Result{State: StateError, Err: fmt.Errorf("rtsptest: unexpected status %d to authenticated DESCRIBE", status2)}
+		}
 	}
-	switch status2 {
-	case 200:
-		return Result{State: StateValid}
-	case 401:
-		return Result{State: StateInvalid}
-	default:
-		return Result{State: StateError, Err: fmt.Errorf("rtsptest: unexpected status %d to authenticated DESCRIBE", status2)}
-	}
+	return Result{State: StateInvalid}
 }
 
-// describe opens one bounded TCP connection, sends a DESCRIBE request
-// (optionally with an Authorization header), and returns the status code
-// and the WWW-Authenticate header value (empty if absent), then closes the
-// connection.
-func describe(ctx context.Context, addr, rtspPath string, timeout time.Duration, authHeader string) (int, string, error) {
-	dialer := &net.Dialer{Timeout: timeout}
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		return 0, "", err
-	}
-	defer conn.Close()
-
+// sendDescribe sends a DESCRIBE request (optionally with an Authorization
+// header) over an already-connected conn and returns the status code and the
+// WWW-Authenticate header value (empty if absent). conn is reused across
+// every attempt of a single TestDescribe call; the caller owns closing it.
+func sendDescribe(conn net.Conn, addr, rtspPath string, timeout time.Duration, authHeader string, cseq int) (int, string, error) {
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return 0, "", err
 	}
 
 	var req strings.Builder
 	fmt.Fprintf(&req, "DESCRIBE rtsp://%s%s RTSP/1.0\r\n", addr, rtspPath)
-	req.WriteString("CSeq: 1\r\n")
+	fmt.Fprintf(&req, "CSeq: %d\r\n", cseq)
 	req.WriteString("Accept: application/sdp\r\n")
 	if authHeader != "" {
 		req.WriteString("Authorization: " + authHeader + "\r\n")
@@ -185,7 +206,11 @@ func parseDigestChallenge(header string) (map[string]string, error) {
 	}
 	params := map[string]string{}
 	for _, m := range digestParamRe.FindAllStringSubmatch(header, -1) {
-		params[strings.ToLower(m[1])] = m[2]
+		v := m[2]
+		if v == "" {
+			v = m[3]
+		}
+		params[strings.ToLower(m[1])] = v
 	}
 	if params["realm"] == "" || params["nonce"] == "" {
 		return nil, errors.New("rtsptest: digest challenge missing realm or nonce")

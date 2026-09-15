@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -28,6 +29,13 @@ type fakeServer struct {
 	malformedChallenge bool
 	// hang, when true, never responds (to exercise the timeout path).
 	hang bool
+	// unquotedQop, when true, sends qop unquoted in the challenge (as real
+	// IP cameras commonly do), instead of qop="auth".
+	unquotedQop bool
+	// staleOnce, when true, rejects the first authenticated attempt with a
+	// 401 carrying stale=true and a fresh nonce, then accepts a retry
+	// against that fresh nonce.
+	staleOnce bool
 }
 
 func startFakeServer(t *testing.T, s *fakeServer) string {
@@ -51,6 +59,11 @@ func startFakeServer(t *testing.T, s *fakeServer) string {
 	return ln.Addr().String()
 }
 
+// connSeq gives every accepted connection its own nonce, so a client that
+// (bug HIGH-2) presents a nonce issued on one connection over a different
+// connection gets a hard mismatch instead of an accidental pass.
+var connSeq int64
+
 func (s *fakeServer) handle(conn net.Conn) {
 	defer conn.Close()
 	if s.hang {
@@ -59,26 +72,56 @@ func (s *fakeServer) handle(conn net.Conn) {
 		return
 	}
 
+	nonce := fmt.Sprintf("%s-%d", testNonce, atomic.AddInt64(&connSeq, 1))
+	staleSent := false
 	reader := bufio.NewReader(conn)
-	req, authHeader := readRequest(reader)
-	if req == "" {
-		return
-	}
 
-	if authHeader == "" {
-		if s.malformedChallenge {
-			writeStatus(conn, 401, `WWW-Authenticate: Digest realm="no-nonce-here"`)
+	// Loop: a fixed client conversation on one connection is at most an
+	// unauthenticated probe, an authenticated attempt, and (with staleOnce)
+	// one retry — never unbounded, but more than a single request/response.
+	for {
+		req, authHeader := readRequest(reader)
+		if req == "" {
 			return
 		}
-		writeStatus(conn, 401, fmt.Sprintf(`WWW-Authenticate: Digest realm="%s", nonce="%s", qop="auth"`, testRealm, testNonce))
-		return
-	}
 
-	if validateDigest(authHeader, s.username, s.password) {
-		writeStatus(conn, 200, "Content-Type: application/sdp\r\nContent-Length: 0")
+		if authHeader == "" {
+			if s.malformedChallenge {
+				writeStatus(conn, 401, `WWW-Authenticate: Digest realm="no-nonce-here"`)
+				continue
+			}
+			writeStatus(conn, 401, s.challengeHeader(nonce, false))
+			continue
+		}
+
+		if s.staleOnce && !staleSent {
+			staleSent = true
+			nonce += "-fresh"
+			writeStatus(conn, 401, s.challengeHeader(nonce, true))
+			continue
+		}
+
+		if validateDigest(authHeader, s.username, s.password, nonce) {
+			writeStatus(conn, 200, "Content-Type: application/sdp\r\nContent-Length: 0")
+			return
+		}
+		writeStatus(conn, 401, s.challengeHeader(nonce, false))
 		return
 	}
-	writeStatus(conn, 401, fmt.Sprintf(`WWW-Authenticate: Digest realm="%s", nonce="%s", qop="auth"`, testRealm, testNonce))
+}
+
+// challengeHeader builds the WWW-Authenticate header value. qop is quoted
+// unless unquotedQop is set (real IP cameras commonly send it bare).
+func (s *fakeServer) challengeHeader(nonce string, stale bool) string {
+	qop := `qop="auth"`
+	if s.unquotedQop {
+		qop = "qop=auth"
+	}
+	extra := ""
+	if stale {
+		extra = ", stale=true"
+	}
+	return fmt.Sprintf(`WWW-Authenticate: Digest realm="%s", nonce="%s", %s%s`, testRealm, nonce, qop, extra)
 }
 
 func readRequest(reader *bufio.Reader) (requestLine, authHeader string) {
@@ -121,7 +164,7 @@ func statusText(code int) string {
 // validateDigest recomputes the expected RFC 2617 response server-side and
 // compares it against what the client sent, to confirm TestDescribe's
 // client-side computation is correct end to end.
-func validateDigest(authHeader, username, password string) bool {
+func validateDigest(authHeader, username, password, expectedNonce string) bool {
 	authHeader = strings.TrimPrefix(strings.TrimSpace(authHeader), "Digest")
 	fields := map[string]string{}
 	for _, part := range strings.Split(authHeader, ",") {
@@ -135,6 +178,9 @@ func validateDigest(authHeader, username, password string) bool {
 		fields[key] = val
 	}
 	if fields["username"] != username {
+		return false
+	}
+	if fields["nonce"] != expectedNonce {
 		return false
 	}
 	ha1 := testMD5Hex(username + ":" + fields["realm"] + ":" + password)
@@ -165,6 +211,39 @@ func TestTestDescribe_WrongPassword(t *testing.T) {
 	result := TestDescribe(context.Background(), addr, "/stream1", "admin", "wrong-pw", 2*time.Second)
 	if result.State != StateInvalid {
 		t.Fatalf("expected INVALID for wrong password, got %v", result.State)
+	}
+}
+
+// TestTestDescribe_UnquotedQop guards HIGH-1: RFC 2617 allows qop unquoted
+// in the challenge (qop=auth, no quotes), and real IP cameras commonly send
+// it that way. The existing qop="auth" (quoted) case is covered by
+// TestTestDescribe_ValidCredential — that was the blind spot that let this
+// bug through, since the unquoted form silently fell back to the legacy
+// no-qop digest formula and produced a 401 even for a correct password.
+func TestTestDescribe_UnquotedQop(t *testing.T) {
+	s := &fakeServer{username: "admin", password: "correct-pw", unquotedQop: true}
+	addr := startFakeServer(t, s)
+
+	result := TestDescribe(context.Background(), addr, "/stream1", "admin", "correct-pw", 2*time.Second)
+	if result.State != StateValid {
+		t.Fatalf("expected VALID for unquoted qop challenge, got %v (err=%v)", result.State, result.Err)
+	}
+}
+
+// TestTestDescribe_StaleNonceRetry guards HIGH-2's bounded retry path: a
+// server that rejects the first authenticated attempt with stale=true and a
+// fresh nonce (nonce expired mid-flow) must be retried exactly once with the
+// fresh nonce before giving up. It also exercises connection reuse: the fake
+// server ties its nonce to the accepting connection (see connSeq), so this
+// only succeeds if the authenticated attempts are sent on the same TCP
+// connection that received the challenges.
+func TestTestDescribe_StaleNonceRetry(t *testing.T) {
+	s := &fakeServer{username: "admin", password: "correct-pw", staleOnce: true}
+	addr := startFakeServer(t, s)
+
+	result := TestDescribe(context.Background(), addr, "/stream1", "admin", "correct-pw", 2*time.Second)
+	if result.State != StateValid {
+		t.Fatalf("expected VALID after one stale-nonce retry, got %v (err=%v)", result.State, result.Err)
 	}
 }
 
