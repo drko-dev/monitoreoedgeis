@@ -33,3 +33,80 @@ jobs:
         run: |
           GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/geocam-edge
           GOOS=linux GOARCH=arm64 go build -o /dev/null ./cmd/geocam-edge
+
+  # Hito H: validates the Docker image's LGPL-only ffmpeg build on a real
+  # linux/amd64 machine (GitHub-hosted ubuntu-latest runners are amd64 —
+  # no QEMU emulation, unlike local verification on an Apple Silicon dev
+  # machine, which was cut short for exactly this reason). Docker-image-only,
+  # does not touch Go build/test/vet/fmt (covered by the `build` job above)
+  # or the real TC70 hardware test (which uses a separate local machine).
+  docker-amd64-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image (linux/amd64, real hardware, no emulation)
+        run: |
+          docker build \
+            --build-arg VERSION=ci \
+            --build-arg COMMIT=${{ github.sha }} \
+            --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            -t geocam-edge:amd64-smoke .
+
+      - name: Confirm image architecture is amd64
+        run: |
+          arch=$(docker image inspect geocam-edge:amd64-smoke --format '{{.Architecture}}')
+          echo "architecture: $arch"
+          [ "$arch" = "amd64" ] || { echo "FAIL: expected amd64, got $arch"; exit 1; }
+
+      - name: Confirm nonroot user is configured
+        run: |
+          user=$(docker image inspect geocam-edge:amd64-smoke --format '{{.Config.User}}')
+          echo "configured user: $user"
+          [ "$user" = "nonroot:nonroot" ] || { echo "FAIL: expected nonroot:nonroot, got $user"; exit 1; }
+
+      - name: ffmpeg -version has no GPL/nonfree/libx264/libx265
+        run: |
+          out=$(docker run --rm --entrypoint /usr/local/bin/ffmpeg geocam-edge:amd64-smoke -version)
+          echo "$out"
+          if echo "$out" | grep -Eq -- '--enable-gpl|--enable-nonfree|--enable-libx264|--enable-libx265'; then
+            echo "FAIL: a GPL/nonfree/libx264/libx265 flag is present in ffmpeg -version"
+            exit 1
+          fi
+          echo "OK: no GPL/nonfree/libx264/libx265 flags"
+
+      - name: H264 -> rawvideo decode smoke (exact production pipeline command)
+        run: |
+          # Generate a tiny test clip with a throwaway full ffmpeg (CI
+          # tooling only — never part of the shipped image, which has no
+          # encoder at all).
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc=size=64x64:rate=5 \
+            -frames:v 5 -c:v libx264 -profile:v baseline -pix_fmt yuv420p -f h264 clip.h264
+
+          docker run -i --rm --entrypoint /usr/local/bin/ffmpeg geocam-edge:amd64-smoke \
+            -hide_banner -loglevel error -f h264 -i pipe:0 -f rawvideo -pix_fmt yuv420p -an -sn pipe:1 \
+            < clip.h264 > out.raw
+
+          size=$(stat -c%s out.raw)
+          expected=$((64 * 64 * 3 / 2 * 5))
+          echo "decoded output: ${size} bytes, expected: ${expected} bytes (5 frames of 64x64 yuv420p)"
+          [ "$size" -eq "$expected" ] || { echo "FAIL: unexpected decoded output size"; exit 1; }
+          echo "OK: decode smoke passed"
+
+      - name: geocam-edge starts and container stays up as nonroot
+        run: |
+          docker run --rm --entrypoint /usr/local/bin/geocam-edge geocam-edge:amd64-smoke version
+
+          docker run -d --name smoke geocam-edge:amd64-smoke
+          sleep 3
+          status=$(docker inspect -f '{{.State.Status}}' smoke)
+          echo "container status: $status"
+          docker logs smoke
+          if [ "$status" != "running" ]; then
+            echo "FAIL: container is not running"
+            exit 1
+          fi
+          docker rm -f smoke
+          echo "OK: container started and stayed up as nonroot"
