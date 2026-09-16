@@ -178,18 +178,22 @@ Not done / deliberately out of scope: `video probe` CLI (justified, `/status` co
 
 **HITO H — READY FOR FINAL REVIEW**
 
-## I — Modo Cloud
+## I — Modo Cloud (first slice: Edge→SaaS frame push — `feature/video-pipeline` Edge / `feature/edge-frame-push` SaaS, not merged/deployed)
 
-- I1. processing_mode=cloud.
-- I2. Sin YOLO pesado local.
-- I3. Sampling configurable.
-- I4. Compresión/transporte.
-- I5. Frames/substreams a Cloud.
-- I6. Buffer offline.
-- I7. Bandwidth control.
-- I8. Worker Cloud.
-- I9. Eventos al SaaS.
-- I10. Métricas de costo.
+- I1. processing_mode=cloud. **DONE (gate)** — `internal/agent/cloudsink_module.go`'s `newCloudSink` reuses the existing `GEOCAM_PROCESSING_MODE` (`config.ModeCloud`), no new env var duplicating it.
+- I2. Sin YOLO pesado local. **N/A by construction** — the Edge only encodes/uploads JPEG; no inference code was added to this repo.
+- I3. Sampling configurable. **DONE** — reuses Hito H's `GEOCAM_VIDEO_TARGET_FPS`/`Sampler` unchanged; the cloud sink never samples independently.
+- I4. Compresión/transporte. **DONE (first cut)** — `internal/cloudsink.CloudSink` encodes each sampled `Frame` (yuv420p) to JPEG (quality 85, no RGB round-trip) and uploads it as one `POST /api/v1/edge/frames` per frame (`internal/transport.Client.PostFrame`). No WebSocket/batching yet — deliberately deferred until real bandwidth numbers justify it.
+- I5. Frames/substreams a Cloud. **DONE** — Router dispatches every routed `Frame` to `CloudSink` in addition to `DebugSink`; substream selection is unchanged (Hito H's `GEOCAM_STREAM_ROLE`).
+- I6. Buffer offline. **NOT DONE** — a failed upload is dropped, not queued; no offline buffering this slice.
+- I7. Bandwidth control. **NOT DONE** — no compression tuning/rate limiting beyond fixed JPEG quality; deferred pending real bandwidth measurement (see I10).
+- I8. Worker Cloud. **DONE (SaaS side)** — `cloud_vision_worker.py`'s new `POST /internal/cameras/{camera_id}/frame` IPC route + `CloudVisionManager.push_frame()` feed the existing YOLO detector/persistence path; the RTSP-pull loop is now skipped for any camera linked to an Edge device (`edge_device_cameras`), never both paths at once.
+- I9. Eventos al SaaS. **Unchanged** — detection events still flow through the existing `coordinate_event_ingestion_transaction` path once `push_frame` hands a frame to the same detection loop RTSP-pull used; no new event schema.
+- I10. Métricas de costo. **NOT DONE** — no bandwidth/frame-cost metrics yet; needs a real-camera measurement pass before I7 can be scoped.
+
+**Transport contract**: `POST /api/v1/edge/frames`, body = raw `image/jpeg`, auth = existing Edge Bearer credential (`X-Device-Id` + `Authorization: Bearer`), metadata via headers (`X-Candidate-Key`, `X-Frame-Seq`, `X-Frame-Timestamp`) since there is no JSON envelope. `organization_id` is always resolved server-side from the authenticated device, never sent by the Edge; `camera_id` is resolved server-side from `candidate_key` via `edge_device_cameras` (existing table, existing admin linking endpoint) — the Edge never sends a raw `camera_id`.
+
+Not done this slice: offline buffering (I6), bandwidth control (I7), cost metrics (I10). These need real-camera bandwidth numbers first — deliberately not speculated on.
 
 ## J — Modo Hybrid
 

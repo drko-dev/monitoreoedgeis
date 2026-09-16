@@ -286,3 +286,97 @@ func contains(s, substr string) bool {
 	}
 	return false
 }
+
+func TestPostFrameSuccess(t *testing.T) {
+	frameBody := []byte{0xFF, 0xD8, 0xFF, 0xD9} // not a real jpeg, just distinguishable bytes
+	capturedAt := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != FramesPath {
+			t.Errorf("path = %q, want %q", r.URL.Path, FramesPath)
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %q, want POST", r.Method)
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "image/jpeg" {
+			t.Errorf("Content-Type = %q, want image/jpeg", ct)
+		}
+		if got := r.Header.Get("X-Device-Id"); got != "device-1" {
+			t.Errorf("X-Device-Id = %q", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer cred-1" {
+			t.Errorf("Authorization = %q", got)
+		}
+		if got := r.Header.Get("X-Candidate-Key"); got != "cam-1" {
+			t.Errorf("X-Candidate-Key = %q", got)
+		}
+		if got := r.Header.Get("X-Frame-Seq"); got != "7" {
+			t.Errorf("X-Frame-Seq = %q, want 7", got)
+		}
+		if got := r.Header.Get("X-Frame-Timestamp"); got != capturedAt.Format(time.RFC3339Nano) {
+			t.Errorf("X-Frame-Timestamp = %q", got)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if string(body) != string(frameBody) {
+			t.Errorf("body = %v, want %v", body, frameBody)
+		}
+		w.WriteHeader(http.StatusAccepted)
+	})
+
+	c, err := New(srv.URL, true, 2*time.Second, "test")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := c.PostFrame(context.Background(), "device-1", "cred-1", "cam-1", 7, capturedAt, frameBody); err != nil {
+		t.Fatalf("PostFrame() error = %v", err)
+	}
+}
+
+func TestPostFrameUnauthorized(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	c, _ := New(srv.URL, true, 2*time.Second, "test")
+
+	err := c.PostFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{1})
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("PostFrame() error = %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestPostFrameUnexpectedStatus(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	c, _ := New(srv.URL, true, 2*time.Second, "test")
+
+	err := c.PostFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{1})
+	if !errors.Is(err, ErrUnexpectedStatus) {
+		t.Fatalf("PostFrame() error = %v, want ErrUnexpectedStatus", err)
+	}
+}
+
+func TestPostFrameSaaSUnavailable(t *testing.T) {
+	// A closed connection (no listener) makes the client's Do() fail before
+	// any status code exists.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	c, err := New("http://"+addr, true, 500*time.Millisecond, "test")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = c.PostFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{1})
+	if !errors.Is(err, ErrSaaSUnavailable) {
+		t.Fatalf("PostFrame() error = %v, want ErrSaaSUnavailable", err)
+	}
+}

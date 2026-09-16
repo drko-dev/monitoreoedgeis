@@ -113,7 +113,12 @@ func New(cfg *config.Config) *Agent {
 				FFmpegPath:             cfg.VideoFFmpegPath,
 				DecodeTimeout:          cfg.VideoDecodeTimeout,
 			}
-			videoMgr := processing.NewManager(procCfg, rtspMgr, reporter, logging.Component(log, "video-pipeline"))
+			var extraSinks []processing.Sink
+			if cs := newCloudSink(cfg, creds, log); cs != nil {
+				extraSinks = append(extraSinks, cs)
+			}
+
+			videoMgr := processing.NewManager(procCfg, rtspMgr, reporter, logging.Component(log, "video-pipeline"), extraSinks...)
 			mods = append(mods, videoMgr)
 			a.videoManager = videoMgr
 		}

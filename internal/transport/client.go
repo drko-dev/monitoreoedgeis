@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -201,6 +202,48 @@ func (c *Client) RotateKey(ctx context.Context, deviceID, credential string, req
 		return resp, fmt.Errorf("%w: decoding rotate-key response: %v", ErrUnexpectedStatus, err)
 	}
 	return resp, nil
+}
+
+// PostFrame uploads one sampled video frame to FramesPath (Milestone I).
+// Unlike do(), the body is the raw JPEG (Content-Type: image/jpeg), not
+// JSON — frame metadata travels as headers instead, since there is no JSON
+// envelope to put it in. capturedAt is the pipeline's best-effort decode
+// timestamp (processing.Frame.Timestamp), not a true camera capture time.
+func (c *Client) PostFrame(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+FramesPath, bytes.NewReader(jpeg))
+	if err != nil {
+		return fmt.Errorf("transport: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "image/jpeg")
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("X-Device-Id", deviceID)
+	req.Header.Set("Authorization", "Bearer "+credential)
+	req.Header.Set("X-Candidate-Key", candidateKey)
+	req.Header.Set("X-Frame-Seq", strconv.FormatUint(seq, 10))
+	req.Header.Set("X-Frame-Timestamp", capturedAt.UTC().Format(time.RFC3339Nano))
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("%w: POST %s", ErrTimeout, FramesPath)
+		}
+		var netErr interface{ Timeout() bool }
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return fmt.Errorf("%w: POST %s", ErrTimeout, FramesPath)
+		}
+		return fmt.Errorf("%w: POST %s: %v", ErrSaaSUnavailable, FramesPath, err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+
+	switch resp.StatusCode {
+	case http.StatusAccepted, http.StatusOK:
+		return nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return fmt.Errorf("%w (status %d)", ErrUnauthorized, resp.StatusCode)
+	default:
+		return fmt.Errorf("%w: status %d", ErrUnexpectedStatus, resp.StatusCode)
+	}
 }
 
 // do issues one HTTP request and returns the raw status, response headers and

@@ -36,4 +36,12 @@ const (
 	DiscoveryNextPath = "/api/v1/gateway/discovery/next"
 	// DiscoveryReportPath is used to report completion or failure of a claimed run.
 	DiscoveryReportPath = "/api/v1/gateway/discovery/runs/%d/report"
+	// FramesPath ingests one sampled JPEG video frame per request (Milestone
+	// I), forwarded by the SaaS to its Cloud Vision Worker over its own
+	// internal loopback IPC. The body is the raw JPEG (Content-Type:
+	// image/jpeg), not JSON — frame metadata travels as headers instead (see
+	// Client.PostFrame). The SaaS resolves organization_id from the
+	// authenticated device and camera_id from X-Candidate-Key server-side;
+	// neither is ever sent directly by the Edge.
+	FramesPath = "/api/v1/edge/frames"
 )

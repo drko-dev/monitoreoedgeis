@@ -7,8 +7,8 @@ import (
 )
 
 // Sink is a routing destination for frames (H8). Hito H ships only
-// DebugSink; Cloud/Hybrid/Edge-YOLO sinks are later milestones (I/J/K) that
-// will implement this same interface.
+// DebugSink; Milestone I adds internal/cloudsink.CloudSink as a second
+// implementation. Hybrid/Edge-YOLO sinks remain later milestones (J/K).
 type Sink interface {
 	Name() string
 	// Route delivers a frame. Implementations must return quickly — a slow
