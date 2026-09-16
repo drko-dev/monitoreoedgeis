@@ -79,6 +79,18 @@ All configuration comes from environment variables:
 | `GEOCAM_DISCOVERY_INTERVAL`| `5m`                    | Interval between periodic background discovery scans (1m–24h) |
 | `GEOCAM_DISCOVERY_TIMEOUT` | `4s`                    | Probe timeout per interface during WS-Discovery (1s–30s) |
 | `GEOCAM_DISCOVERY_INTERFACES` | *(empty)*            | Comma-separated interface names to scan (defaults to auto-private RFC 1918/3927) |
+| `GEOCAM_CONNECTIVITY_ENABLED` | `true`               | Enables RTSP camera connectivity (Milestone G) |
+| `GEOCAM_STREAM_ROLE`       | `sub`                   | `sub` \| `main` — which ONVIF profile's stream to connect to |
+| `GEOCAM_STREAM_TIMEOUT`    | `5s`                    | RTSP packet silence threshold before reconnecting (1s–60s) |
+| `GEOCAM_VIDEO_PIPELINE_ENABLED` | `false`            | Enables the video pipeline (Milestone H). No effect unless `GEOCAM_CONNECTIVITY_ENABLED=true` too |
+| `GEOCAM_VIDEO_TARGET_FPS`  | `5`                     | Sampled output FPS (0.1–30) |
+| `GEOCAM_VIDEO_OUTPUT_WIDTH` / `_HEIGHT` | `640` / `360` | Resize output dimensions. Both `0` disables resize; otherwise both must be even |
+| `GEOCAM_VIDEO_RINGBUFFER_SIZE` | `30`                 | Bounded ring buffer capacity, in frames (1–300) |
+| `GEOCAM_VIDEO_QUEUE_DEPTH` | `64`                    | Bounded queue depth for packet/access-unit stages (4–512) |
+| `GEOCAM_VIDEO_DECODE_QUEUE_DEPTH` | `4`               | Bounded queue depth for raw decoded frames — deliberately small (1–16) |
+| `GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES` | `4`         | Max concurrent ffmpeg decode subprocesses (1–16) |
+| `GEOCAM_VIDEO_FFMPEG_PATH` | `ffmpeg`                | ffmpeg binary path, resolved via `PATH` lookup |
+| `GEOCAM_VIDEO_DECODE_TIMEOUT` | `10s`                | Decoder-related timeout bound (1s–60s) |
 
 No secrets or credentials are ever logged. The enrollment token and the
 device credential only ever touch: the request to the SaaS, and

@@ -218,3 +218,144 @@ func TestParseProcessingMode(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadVideoPipelineDefaults(t *testing.T) {
+	for _, k := range []string{
+		"GEOCAM_VIDEO_PIPELINE_ENABLED", "GEOCAM_VIDEO_TARGET_FPS",
+		"GEOCAM_VIDEO_OUTPUT_WIDTH", "GEOCAM_VIDEO_OUTPUT_HEIGHT",
+		"GEOCAM_VIDEO_RINGBUFFER_SIZE", "GEOCAM_VIDEO_QUEUE_DEPTH",
+		"GEOCAM_VIDEO_DECODE_QUEUE_DEPTH", "GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES",
+		"GEOCAM_VIDEO_FFMPEG_PATH", "GEOCAM_VIDEO_DECODE_TIMEOUT",
+	} {
+		t.Setenv(k, "")
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.VideoPipelineEnabled {
+		t.Error("VideoPipelineEnabled = true, want false by default (opt-in)")
+	}
+	if cfg.VideoTargetFPS != DefaultVideoTargetFPS {
+		t.Errorf("VideoTargetFPS = %v, want %v", cfg.VideoTargetFPS, DefaultVideoTargetFPS)
+	}
+	if cfg.VideoOutputWidth != DefaultVideoOutputWidth || cfg.VideoOutputHeight != DefaultVideoOutputHeight {
+		t.Errorf("output dims = %dx%d, want %dx%d", cfg.VideoOutputWidth, cfg.VideoOutputHeight,
+			DefaultVideoOutputWidth, DefaultVideoOutputHeight)
+	}
+	if cfg.VideoRingBufferSize != DefaultVideoRingBufferSize {
+		t.Errorf("VideoRingBufferSize = %d, want %d", cfg.VideoRingBufferSize, DefaultVideoRingBufferSize)
+	}
+	if cfg.VideoQueueDepth != DefaultVideoQueueDepth {
+		t.Errorf("VideoQueueDepth = %d, want %d", cfg.VideoQueueDepth, DefaultVideoQueueDepth)
+	}
+	if cfg.VideoDecodeQueueDepth != DefaultVideoDecodeQueueDepth {
+		t.Errorf("VideoDecodeQueueDepth = %d, want %d", cfg.VideoDecodeQueueDepth, DefaultVideoDecodeQueueDepth)
+	}
+	if cfg.VideoMaxConcurrentPipelines != DefaultVideoMaxConcurrentPipelines {
+		t.Errorf("VideoMaxConcurrentPipelines = %d, want %d", cfg.VideoMaxConcurrentPipelines, DefaultVideoMaxConcurrentPipelines)
+	}
+	if cfg.VideoFFmpegPath != DefaultVideoFFmpegPath {
+		t.Errorf("VideoFFmpegPath = %q, want %q", cfg.VideoFFmpegPath, DefaultVideoFFmpegPath)
+	}
+	if cfg.VideoDecodeTimeout != DefaultVideoDecodeTimeout {
+		t.Errorf("VideoDecodeTimeout = %v, want %v", cfg.VideoDecodeTimeout, DefaultVideoDecodeTimeout)
+	}
+}
+
+func TestLoadVideoPipelineOverrides(t *testing.T) {
+	t.Setenv("GEOCAM_VIDEO_PIPELINE_ENABLED", "true")
+	t.Setenv("GEOCAM_VIDEO_TARGET_FPS", "2")
+	t.Setenv("GEOCAM_VIDEO_OUTPUT_WIDTH", "320")
+	t.Setenv("GEOCAM_VIDEO_OUTPUT_HEIGHT", "180")
+	t.Setenv("GEOCAM_VIDEO_RINGBUFFER_SIZE", "10")
+	t.Setenv("GEOCAM_VIDEO_QUEUE_DEPTH", "128")
+	t.Setenv("GEOCAM_VIDEO_DECODE_QUEUE_DEPTH", "2")
+	t.Setenv("GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES", "2")
+	t.Setenv("GEOCAM_VIDEO_FFMPEG_PATH", "/usr/local/bin/ffmpeg")
+	t.Setenv("GEOCAM_VIDEO_DECODE_TIMEOUT", "5s")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.VideoPipelineEnabled {
+		t.Error("VideoPipelineEnabled = false, want true")
+	}
+	if cfg.VideoTargetFPS != 2 {
+		t.Errorf("VideoTargetFPS = %v, want 2", cfg.VideoTargetFPS)
+	}
+	if cfg.VideoOutputWidth != 320 || cfg.VideoOutputHeight != 180 {
+		t.Errorf("output dims = %dx%d, want 320x180", cfg.VideoOutputWidth, cfg.VideoOutputHeight)
+	}
+	if cfg.VideoRingBufferSize != 10 {
+		t.Errorf("VideoRingBufferSize = %d, want 10", cfg.VideoRingBufferSize)
+	}
+	if cfg.VideoQueueDepth != 128 {
+		t.Errorf("VideoQueueDepth = %d, want 128", cfg.VideoQueueDepth)
+	}
+	if cfg.VideoDecodeQueueDepth != 2 {
+		t.Errorf("VideoDecodeQueueDepth = %d, want 2", cfg.VideoDecodeQueueDepth)
+	}
+	if cfg.VideoMaxConcurrentPipelines != 2 {
+		t.Errorf("VideoMaxConcurrentPipelines = %d, want 2", cfg.VideoMaxConcurrentPipelines)
+	}
+	if cfg.VideoFFmpegPath != "/usr/local/bin/ffmpeg" {
+		t.Errorf("VideoFFmpegPath = %q, want /usr/local/bin/ffmpeg", cfg.VideoFFmpegPath)
+	}
+	if cfg.VideoDecodeTimeout != 5*time.Second {
+		t.Errorf("VideoDecodeTimeout = %v, want 5s", cfg.VideoDecodeTimeout)
+	}
+}
+
+func TestLoadVideoOutputDimensionsValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		width   string
+		height  string
+		wantErr bool
+	}{
+		{"both unset (defaults, valid)", "", "", false},
+		{"both zero disables resize", "0", "0", false},
+		{"both even positive", "640", "360", false},
+		{"width set, height unset matches valid default", "640", "", false},
+		{"width positive, height explicitly zero", "640", "0", true},
+		{"height positive, width explicitly zero", "0", "360", true},
+		{"odd width", "641", "360", true},
+		{"odd height", "640", "361", true},
+		{"exceeds max width", "1921", "1080", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GEOCAM_VIDEO_OUTPUT_WIDTH", tc.width)
+			t.Setenv("GEOCAM_VIDEO_OUTPUT_HEIGHT", tc.height)
+			_, err := Load()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Load() error = %v, wantErr = %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadVideoTargetFPSOutOfRange(t *testing.T) {
+	t.Setenv("GEOCAM_VIDEO_TARGET_FPS", "0")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for GEOCAM_VIDEO_TARGET_FPS=0 (below MinVideoTargetFPS)")
+	}
+	t.Setenv("GEOCAM_VIDEO_TARGET_FPS", "31")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for GEOCAM_VIDEO_TARGET_FPS=31 (above MaxVideoTargetFPS)")
+	}
+}
+
+func TestLoadVideoMaxConcurrentPipelinesOutOfRange(t *testing.T) {
+	t.Setenv("GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES", "0")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES=0")
+	}
+	t.Setenv("GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES", "17")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES=17")
+	}
+}

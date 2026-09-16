@@ -20,6 +20,7 @@ type Manager struct {
 
 	mu          sync.Mutex
 	supervisors map[string]*Supervisor
+	packetSink  PacketSink
 	ctx         context.Context
 	cancel      context.CancelFunc
 	stopped     chan struct{}
@@ -75,6 +76,32 @@ func (m *Manager) Stop(ctx context.Context) error {
 	return nil
 }
 
+// SetPacketSink registers sink to receive video RTP payloads from every
+// camera supervisor, applying it atomically to every supervisor that
+// currently exists and to every one created afterward by SetTargets. Passing
+// nil deregisters it everywhere. Safe for concurrent use.
+func (m *Manager) SetPacketSink(sink PacketSink) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.packetSink = sink
+	for _, sup := range m.supervisors {
+		sup.SetPacketSink(sink)
+	}
+}
+
+// DescriptorFor returns the non-sensitive stream metadata for the given
+// camera, once its supervisor has completed a connection, and whether it is
+// available yet.
+func (m *Manager) DescriptorFor(candidateKey string) (StreamDescriptor, bool) {
+	m.mu.Lock()
+	sup, ok := m.supervisors[candidateKey]
+	m.mu.Unlock()
+	if !ok {
+		return StreamDescriptor{}, false
+	}
+	return sup.Descriptor()
+}
+
 // SetTargets synchronizes the set of active supervisors to match desired targets.
 func (m *Manager) SetTargets(targets []CameraTarget) {
 	m.mu.Lock()
@@ -101,6 +128,7 @@ func (m *Manager) SetTargets(targets []CameraTarget) {
 		existing, ok := m.supervisors[key]
 		if !ok {
 			sup := NewSupervisor(target, m.cfg, m.logger)
+			sup.SetPacketSink(m.packetSink)
 			m.supervisors[key] = sup
 			if m.ctx != nil {
 				sup.Start(m.ctx)
@@ -111,6 +139,7 @@ func (m *Manager) SetTargets(targets []CameraTarget) {
 			// Configuration changed, restart supervisor
 			existing.Stop()
 			sup := NewSupervisor(target, m.cfg, m.logger)
+			sup.SetPacketSink(m.packetSink)
 			m.supervisors[key] = sup
 			if m.ctx != nil {
 				sup.Start(m.ctx)

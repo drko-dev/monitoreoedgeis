@@ -17,6 +17,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/logging"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
+	"github.com/drko-dev/monitoreoedgeis/internal/processing"
 	"github.com/drko-dev/monitoreoedgeis/internal/rtsp"
 )
 
@@ -33,6 +34,7 @@ type Agent struct {
 	heartbeatErr   error
 	discoveryErr   error
 	rtspManager    *rtsp.Manager
+	videoManager   *processing.Manager
 	modules        *moduleManager
 }
 
@@ -92,6 +94,29 @@ func New(cfg *config.Config) *Agent {
 		rtspMgr := rtsp.NewManager(rtspCfg, reporter, logging.Component(log, "rtsp"))
 		mods = append(mods, rtspMgr)
 		a.rtspManager = rtspMgr
+
+		// Video pipeline (Milestone H) is meaningless without RTSP
+		// connectivity, so it only exists inside this same gate. It is
+		// appended after rtspMgr: moduleManager starts modules in order and
+		// stops them in reverse, so the video pipeline starts after RTSP
+		// connectivity exists and stops before it is torn down.
+		if cfg.VideoPipelineEnabled {
+			procCfg := processing.Config{
+				Enabled:                true,
+				TargetFPS:              cfg.VideoTargetFPS,
+				OutputWidth:            cfg.VideoOutputWidth,
+				OutputHeight:           cfg.VideoOutputHeight,
+				RingBufferSize:         cfg.VideoRingBufferSize,
+				QueueDepth:             cfg.VideoQueueDepth,
+				DecodeQueueDepth:       cfg.VideoDecodeQueueDepth,
+				MaxConcurrentPipelines: cfg.VideoMaxConcurrentPipelines,
+				FFmpegPath:             cfg.VideoFFmpegPath,
+				DecodeTimeout:          cfg.VideoDecodeTimeout,
+			}
+			videoMgr := processing.NewManager(procCfg, rtspMgr, reporter, logging.Component(log, "video-pipeline"))
+			mods = append(mods, videoMgr)
+			a.videoManager = videoMgr
+		}
 	}
 
 	a.heartbeatErr = hbErr
@@ -105,6 +130,10 @@ func (a *Agent) Health() *health.Reporter { return a.health }
 
 // RTSPManager exposes the RTSP connectivity manager (nil if connectivity disabled).
 func (a *Agent) RTSPManager() *rtsp.Manager { return a.rtspManager }
+
+// VideoManager exposes the video pipeline manager (nil if the video
+// pipeline or RTSP connectivity is disabled).
+func (a *Agent) VideoManager() *processing.Manager { return a.videoManager }
 
 // Run starts the agent and blocks until ctx is cancelled, then shuts down
 // gracefully. A cancelled context is a clean stop, not an error.
