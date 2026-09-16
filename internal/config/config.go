@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -34,6 +35,19 @@ type Config struct {
 	ConnectivityEnabled bool
 	StreamRole          string
 	StreamTimeout       time.Duration
+	// Video pipeline settings (Milestone H). Meaningless without RTSP
+	// connectivity, so it is only actually wired up when both
+	// ConnectivityEnabled and VideoPipelineEnabled are true.
+	VideoPipelineEnabled        bool
+	VideoTargetFPS              float64
+	VideoOutputWidth            int
+	VideoOutputHeight           int
+	VideoRingBufferSize         int
+	VideoQueueDepth             int
+	VideoDecodeQueueDepth       int
+	VideoMaxConcurrentPipelines int
+	VideoFFmpegPath             string
+	VideoDecodeTimeout          time.Duration
 }
 
 // Defaults. No secrets, no credentials.
@@ -68,6 +82,31 @@ const (
 	DefaultStreamTimeout       = 5 * time.Second
 	MinStreamTimeout           = 1 * time.Second
 	MaxStreamTimeout           = 60 * time.Second
+	// Video pipeline defaults and bounds (Milestone H).
+	DefaultVideoPipelineEnabled        = false
+	DefaultVideoTargetFPS              = 5.0
+	MinVideoTargetFPS                  = 0.1
+	MaxVideoTargetFPS                  = 30.0
+	DefaultVideoOutputWidth            = 640
+	DefaultVideoOutputHeight           = 360
+	MaxVideoOutputWidth                = 1920
+	MaxVideoOutputHeight               = 1080
+	DefaultVideoRingBufferSize         = 30
+	MinVideoRingBufferSize             = 1
+	MaxVideoRingBufferSize             = 300
+	DefaultVideoQueueDepth             = 64
+	MinVideoQueueDepth                 = 4
+	MaxVideoQueueDepth                 = 512
+	DefaultVideoDecodeQueueDepth       = 4
+	MinVideoDecodeQueueDepth           = 1
+	MaxVideoDecodeQueueDepth           = 16
+	DefaultVideoMaxConcurrentPipelines = 4
+	MinVideoMaxConcurrentPipelines     = 1
+	MaxVideoMaxConcurrentPipelines     = 16
+	DefaultVideoFFmpegPath             = "ffmpeg"
+	DefaultVideoDecodeTimeout          = 10 * time.Second
+	MinVideoDecodeTimeout              = 1 * time.Second
+	MaxVideoDecodeTimeout              = 60 * time.Second
 )
 
 var validLogLevels = []string{"debug", "info", "warn", "error"}
@@ -90,6 +129,17 @@ func Load() (*Config, error) {
 		ConnectivityEnabled: DefaultConnectivityEnabled,
 		StreamRole:          DefaultStreamRole,
 		StreamTimeout:       DefaultStreamTimeout,
+
+		VideoPipelineEnabled:        DefaultVideoPipelineEnabled,
+		VideoTargetFPS:              DefaultVideoTargetFPS,
+		VideoOutputWidth:            DefaultVideoOutputWidth,
+		VideoOutputHeight:           DefaultVideoOutputHeight,
+		VideoRingBufferSize:         DefaultVideoRingBufferSize,
+		VideoQueueDepth:             DefaultVideoQueueDepth,
+		VideoDecodeQueueDepth:       DefaultVideoDecodeQueueDepth,
+		VideoMaxConcurrentPipelines: DefaultVideoMaxConcurrentPipelines,
+		VideoFFmpegPath:             DefaultVideoFFmpegPath,
+		VideoDecodeTimeout:          DefaultVideoDecodeTimeout,
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_PROCESSING_MODE")); raw != "" {
@@ -210,6 +260,109 @@ func Load() (*Config, error) {
 		cfg.StreamTimeout = d
 	}
 
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_PIPELINE_ENABLED")); raw != "" {
+		cfg.VideoPipelineEnabled = strings.ToLower(raw) == "true" || raw == "1"
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_TARGET_FPS")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid video target FPS %q: %w", raw, err)
+		}
+		if v < MinVideoTargetFPS || v > MaxVideoTargetFPS {
+			return nil, fmt.Errorf("invalid video target FPS %q: must be between %g and %g",
+				raw, MinVideoTargetFPS, MaxVideoTargetFPS)
+		}
+		cfg.VideoTargetFPS = v
+	}
+
+	widthSet, heightSet := false, false
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_OUTPUT_WIDTH")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid video output width %q: %w", raw, err)
+		}
+		cfg.VideoOutputWidth = v
+		widthSet = true
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_OUTPUT_HEIGHT")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid video output height %q: %w", raw, err)
+		}
+		cfg.VideoOutputHeight = v
+		heightSet = true
+	}
+	if widthSet || heightSet {
+		if err := validateVideoOutputDimensions(cfg.VideoOutputWidth, cfg.VideoOutputHeight); err != nil {
+			return nil, err
+		}
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_RINGBUFFER_SIZE")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid video ring buffer size %q: %w", raw, err)
+		}
+		if v < MinVideoRingBufferSize || v > MaxVideoRingBufferSize {
+			return nil, fmt.Errorf("invalid video ring buffer size %q: must be between %d and %d",
+				raw, MinVideoRingBufferSize, MaxVideoRingBufferSize)
+		}
+		cfg.VideoRingBufferSize = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_QUEUE_DEPTH")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid video queue depth %q: %w", raw, err)
+		}
+		if v < MinVideoQueueDepth || v > MaxVideoQueueDepth {
+			return nil, fmt.Errorf("invalid video queue depth %q: must be between %d and %d",
+				raw, MinVideoQueueDepth, MaxVideoQueueDepth)
+		}
+		cfg.VideoQueueDepth = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_DECODE_QUEUE_DEPTH")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid video decode queue depth %q: %w", raw, err)
+		}
+		if v < MinVideoDecodeQueueDepth || v > MaxVideoDecodeQueueDepth {
+			return nil, fmt.Errorf("invalid video decode queue depth %q: must be between %d and %d",
+				raw, MinVideoDecodeQueueDepth, MaxVideoDecodeQueueDepth)
+		}
+		cfg.VideoDecodeQueueDepth = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid video max concurrent pipelines %q: %w", raw, err)
+		}
+		if v < MinVideoMaxConcurrentPipelines || v > MaxVideoMaxConcurrentPipelines {
+			return nil, fmt.Errorf("invalid video max concurrent pipelines %q: must be between %d and %d",
+				raw, MinVideoMaxConcurrentPipelines, MaxVideoMaxConcurrentPipelines)
+		}
+		cfg.VideoMaxConcurrentPipelines = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_FFMPEG_PATH")); raw != "" {
+		cfg.VideoFFmpegPath = raw
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_DECODE_TIMEOUT")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid video decode timeout %q: %w", raw, err)
+		}
+		if d < MinVideoDecodeTimeout || d > MaxVideoDecodeTimeout {
+			return nil, fmt.Errorf("invalid video decode timeout %q: must be between %s and %s",
+				raw, MinVideoDecodeTimeout, MaxVideoDecodeTimeout)
+		}
+		cfg.VideoDecodeTimeout = d
+	}
+
 	// Fail-fast: reject an insecure http:// SaaS URL here, before any
 	// request is ever attempted, unless explicitly allowed for development.
 	if cfg.SaaSURL != "" && strings.HasPrefix(strings.ToLower(cfg.SaaSURL), "http://") && !cfg.AllowInsecureHTTP {
@@ -218,4 +371,28 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// validateVideoOutputDimensions enforces the only two valid shapes for
+// GEOCAM_VIDEO_OUTPUT_WIDTH/HEIGHT: both zero (resize disabled) or both
+// positive and even (required for yuv420p's half-resolution chroma
+// planes). This duplicates internal/processing.ValidateOutputDimensions'
+// rule rather than importing that package from here, keeping config the
+// lowest-level package with no dependency on the feature packages it
+// configures.
+func validateVideoOutputDimensions(width, height int) error {
+	if width == 0 && height == 0 {
+		return nil
+	}
+	if width <= 0 || height <= 0 {
+		return fmt.Errorf("invalid video output dimensions %dx%d: width and height must both be zero or both be positive", width, height)
+	}
+	if width > MaxVideoOutputWidth || height > MaxVideoOutputHeight {
+		return fmt.Errorf("invalid video output dimensions %dx%d: must not exceed %dx%d",
+			width, height, MaxVideoOutputWidth, MaxVideoOutputHeight)
+	}
+	if width%2 != 0 || height%2 != 0 {
+		return fmt.Errorf("invalid video output dimensions %dx%d: must be even (yuv420p)", width, height)
+	}
+	return nil
 }

@@ -3,6 +3,7 @@ package rtsp
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -25,7 +26,44 @@ type Session struct {
 	sessionID  string
 	cseq       int
 	authParams map[string]string
+
+	// videoChannel/rtcpChannel are the interleaved channel numbers actually
+	// negotiated in the SETUP response (RFC 2326 §12.39 Transport header),
+	// not assumed from what was requested. A camera that echoes a different
+	// interleaved range than requested must still be filtered correctly.
+	videoChannel int
+	rtcpChannel  int
+
+	// spropParameterSets holds H.264 SPS/PPS NAL units (raw, no Annex-B
+	// start code) parsed from the SDP's a=fmtp sprop-parameter-sets
+	// attribute for the video track, if present. Empty if the camera does
+	// not publish them there (decoder then depends on in-band repetition).
+	spropParameterSets [][]byte
+
+	// sdpCodec is the video track's codec name parsed from the SDP's
+	// a=rtpmap attribute (RFC 4566 §6, e.g. "H264" from "a=rtpmap:96
+	// H264/90000") — the RFC-mandated, on-the-wire source of truth for
+	// what codec is actually being sent, independent of whatever a
+	// separate ONVIF GetProfiles response might (mis)report. Empty if SDP
+	// doesn't declare it for the video payload type.
+	sdpCodec string
 }
+
+// Codec returns the video track's codec name as declared by the SDP's
+// a=rtpmap attribute (e.g. "H264"), or "" if SDP didn't declare one.
+func (s *Session) Codec() string { return s.sdpCodec }
+
+// VideoChannel returns the interleaved channel number carrying video RTP,
+// as negotiated in SETUP (not a hardcoded assumption).
+func (s *Session) VideoChannel() int { return s.videoChannel }
+
+// RTCPChannel returns the interleaved channel number carrying RTCP for the
+// video track, as negotiated in SETUP.
+func (s *Session) RTCPChannel() int { return s.rtcpChannel }
+
+// SpropParameterSets returns the H.264 SPS/PPS NAL units parsed from SDP, if
+// any. The returned slices are not copied; callers must not mutate them.
+func (s *Session) SpropParameterSets() [][]byte { return s.spropParameterSets }
 
 // Dial establishes a TCP connection, completes DESCRIBE -> SETUP -> PLAY over
 // interleaved TCP, and returns an active Session ready to read RTP/RTCP packets.
@@ -67,8 +105,11 @@ func (s *Session) handshake(timeout time.Duration) error {
 		return fmt.Errorf("rtsp: describe: %w", err)
 	}
 
-	// 2. Extract video control track from SDP
+	// 2. Extract video control track, codec, and H.264 SPS/PPS (if
+	// published) from SDP
 	setupURI := s.extractVideoSetupURI(sdpBody)
+	s.spropParameterSets = extractH264SpropParameterSets(sdpBody)
+	s.sdpCodec = extractVideoRTPMapCodec(sdpBody)
 
 	// 3. SETUP
 	if err := s.setup(setupURI, timeout); err != nil {
@@ -148,6 +189,96 @@ func (s *Session) setup(setupURI string, timeout time.Duration) error {
 	}
 	// Session value might be "12345678;timeout=60"
 	s.sessionID = strings.TrimSpace(strings.Split(rawSession, ";")[0])
+
+	// Use the interleaved channels actually echoed by the camera, falling
+	// back to what was requested only if the response omits them (some
+	// devices are non-compliant here).
+	videoCh, rtcpCh, ok := parseInterleavedChannels(headers["transport"])
+	if !ok {
+		videoCh, rtcpCh = 0, 1
+	}
+	s.videoChannel = videoCh
+	s.rtcpChannel = rtcpCh
+	return nil
+}
+
+// parseInterleavedChannels extracts the "interleaved=<video>-<rtcp>" range
+// from a Transport header value. Returns ok=false if the parameter is
+// absent or malformed.
+func parseInterleavedChannels(transport string) (videoCh, rtcpCh int, ok bool) {
+	for _, part := range strings.Split(transport, ";") {
+		part = strings.TrimSpace(part)
+		if !strings.HasPrefix(part, "interleaved=") {
+			continue
+		}
+		val := strings.TrimPrefix(part, "interleaved=")
+		bounds := strings.SplitN(val, "-", 2)
+		v, err := strconv.Atoi(strings.TrimSpace(bounds[0]))
+		if err != nil {
+			return 0, 0, false
+		}
+		r := v + 1
+		if len(bounds) == 2 {
+			if parsed, perr := strconv.Atoi(strings.TrimSpace(bounds[1])); perr == nil {
+				r = parsed
+			}
+		}
+		return v, r, true
+	}
+	return 0, 0, false
+}
+
+// extractH264SpropParameterSets parses the SDP's a=fmtp attribute for the
+// video track's payload type and decodes its sprop-parameter-sets value
+// (comma-separated base64 SPS/PPS NAL units, RFC 6184 §8.1) into raw NAL
+// bytes with no Annex-B start code. Returns nil if the camera does not
+// publish SPS/PPS in SDP (decoder then depends on in-band repetition).
+func extractH264SpropParameterSets(sdp string) [][]byte {
+	lines := strings.Split(sdp, "\n")
+	inVideo := false
+	videoPT := ""
+
+	for _, rawLine := range lines {
+		line := strings.TrimRight(rawLine, "\r\n")
+		switch {
+		case strings.HasPrefix(line, "m=video"):
+			inVideo = true
+			if fields := strings.Fields(line); len(fields) >= 4 {
+				videoPT = fields[3]
+			}
+			continue
+		case strings.HasPrefix(line, "m="):
+			inVideo = false
+			continue
+		}
+
+		if !inVideo || videoPT == "" || !strings.HasPrefix(line, "a=fmtp:"+videoPT) {
+			continue
+		}
+
+		idx := strings.Index(line, "sprop-parameter-sets=")
+		if idx == -1 {
+			continue
+		}
+		val := line[idx+len("sprop-parameter-sets="):]
+		if semi := strings.Index(val, ";"); semi != -1 {
+			val = val[:semi]
+		}
+
+		var nalus [][]byte
+		for _, b64 := range strings.Split(val, ",") {
+			b64 = strings.TrimSpace(b64)
+			if b64 == "" {
+				continue
+			}
+			raw, err := base64.StdEncoding.DecodeString(b64)
+			if err != nil {
+				continue
+			}
+			nalus = append(nalus, raw)
+		}
+		return nalus
+	}
 	return nil
 }
 
@@ -375,6 +506,45 @@ func (s *Session) extractVideoSetupURI(sdp string) string {
 	base := strings.TrimRight(s.baseURI, "/")
 	control := strings.TrimLeft(controlURI, "/")
 	return base + "/" + control
+}
+
+// extractVideoRTPMapCodec parses the SDP's a=rtpmap attribute for the video
+// track's payload type (RFC 4566 §6: "a=rtpmap:<pt> <name>/<clock-rate>")
+// and returns the codec name (e.g. "H264"), uppercased. Returns "" if the
+// video payload type has no rtpmap line.
+func extractVideoRTPMapCodec(sdp string) string {
+	lines := strings.Split(sdp, "\n")
+	inVideo := false
+	videoPT := ""
+
+	for _, rawLine := range lines {
+		line := strings.TrimRight(rawLine, "\r\n")
+		switch {
+		case strings.HasPrefix(line, "m=video"):
+			inVideo = true
+			if fields := strings.Fields(line); len(fields) >= 4 {
+				videoPT = fields[3]
+			}
+			continue
+		case strings.HasPrefix(line, "m="):
+			inVideo = false
+			continue
+		}
+
+		if !inVideo || videoPT == "" || !strings.HasPrefix(line, "a=rtpmap:"+videoPT+" ") {
+			continue
+		}
+		val := strings.TrimSpace(strings.TrimPrefix(line, "a=rtpmap:"+videoPT+" "))
+		name := val
+		if slash := strings.Index(val, "/"); slash != -1 {
+			name = val[:slash]
+		}
+		if name == "" {
+			return ""
+		}
+		return strings.ToUpper(name)
+	}
+	return ""
 }
 
 func isTimeout(err error) bool {

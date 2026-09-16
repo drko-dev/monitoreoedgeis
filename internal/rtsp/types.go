@@ -29,6 +29,32 @@ var (
 	ErrNoVideoTrack = errors.New("rtsp: no video track in sdp")
 )
 
+// PacketSink receives raw RTP payloads for the VIDEO channel of a camera
+// stream only — RTCP is filtered out in Supervisor.streamLoop before this
+// interface is ever called, using the interleaved channel actually
+// negotiated in SETUP (see Session.VideoChannel), never a hardcoded number.
+//
+// OnPacket must not block: enqueuing non-blockingly is the sink's own
+// responsibility, and it must be safe to call concurrently with a
+// SetPacketSink(nil) deregistering it (no send-on-closed-channel).
+type PacketSink interface {
+	OnPacket(candidateKey string, payload []byte, recvAt time.Time)
+}
+
+// StreamDescriptor is the minimal, non-sensitive metadata a video pipeline
+// needs to decode a camera's stream. It deliberately excludes Username,
+// Password, and any RTSP URI — only CameraTarget's safe fields plus SDP-
+// derived codec parameters.
+type StreamDescriptor struct {
+	CandidateKey       string
+	Codec              string
+	Width              int
+	Height             int
+	FPS                float64
+	StreamRole         string
+	SpropParameterSets [][]byte
+}
+
 // CameraStreamStatus captures the live connectivity state and network metrics
 // for a single camera (G4, G10, G11). It is strictly sanitized: NO secrets.
 type CameraStreamStatus struct {

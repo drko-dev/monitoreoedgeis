@@ -285,13 +285,124 @@ carry real code:
 | ---------------------- | ------------------------------------------------------------- |
 | `internal/cameras`     | Camera inventory, credentials, per-camera state               |
 | `internal/telemetry`   | Metrics and operational telemetry to the SaaS                 |
-| `internal/processing`  | Video pipeline and mode-specific behavior                      |
 | *(separate process)*   | **Vision Worker** — Python + YOLO/Ultralytics, `edge` mode only |
+
+`internal/processing` (Milestone H — Video Pipeline) is no longer reserved;
+it exists and is documented in its own section below.
+
+## Video pipeline (`internal/processing`, Milestone H)
+
+Downstream of Hito G's existing RTSP/RTP transport (`internal/rtsp`), never a
+second RTSP client. Chain: `rtsp.PacketSink` (video RTP only, RTCP filtered
+out in `internal/rtsp`) → H.264 depacketize (single NALU/FU-A/STAP-A,
+whole-access-unit drop on packet loss) → decode → FPS sampling → resize →
+bounded ring buffer → `Router`/`Sink` (only `DebugSink` in this milestone —
+Cloud/Hybrid/Edge-YOLO sinks are I/J/K).
+
+**Hook-in.** `internal/rtsp/supervisor.go`'s `streamLoop()` now calls
+`session.VideoChannel()` — the interleaved channel actually negotiated in
+SETUP (RFC 2326 Transport header), not a hardcoded `0` — to decide whether a
+packet is video RTP before it ever reaches a `PacketSink`. RTCP on the
+sibling channel never crosses this boundary. `rtsp.Manager.SetPacketSink`
+applies atomically to every existing `Supervisor` and to any created
+afterward, and `processing.Manager.Stop()` deregisters the sink and flips a
+`stopped` flag *before* cancelling any pipeline — no in-flight `OnPacket`
+call can ever land on a closed channel (see
+`internal/processing/manager_test.go`'s `-race` lifecycle test).
+
+**Decoder: FFmpeg as a subprocess, not cgo.** `internal/processing.FFmpegDecoder`
+runs one `ffmpeg` OS process per camera (`os/exec`, Annex-B via stdin,
+`rawvideo`/`yuv420p` via stdout) — never linked, never `import "C"`.
+Alternatives considered and rejected:
+- **cgo ffmpeg bindings** — would require `CGO_ENABLED=1` and libav* dev
+  headers, breaking the current static `CGO_ENABLED=0` build.
+- **Pure-Go H.264 decoder** — no production-grade implementation exists for
+  main/high profile.
+- **Hand-written decoder** — explicitly out of scope for this milestone.
+
+This makes ffmpeg a **runtime** dependency (a binary must exist in the
+container/host), not a build-time/Go-module one: `go.mod` gains nothing,
+`CGO_ENABLED` stays `0`, and `make build-linux`'s pure-Go cross-compile is
+unaffected. SPS/PPS are parsed from the SDP `a=fmtp sprop-parameter-sets`
+attribute (`internal/rtsp/client.go`) and injected (Annex-B) at decoder
+start/restart, since some cameras don't repeat them in-band.
+
+**Codec ground truth: SDP over ONVIF.** Real TC70 validation surfaced a bug
+in this repo's ONVIF `GetProfiles` handling (`internal/discovery/onvif`,
+Milestone E): it mismaps video/audio encoder metadata for this camera
+model, reporting `G711` (an audio codec) for the video profile regardless
+of the actual video codec. Rather than patch Milestone E's ONVIF client
+(out of this milestone's scope) or trust a field known to be wrong, the
+video pipeline uses the codec SDP itself declares for the video payload
+type (`a=rtpmap`, RFC 4566 §6) — the on-the-wire, RFC-mandated source of
+truth — parsed in `internal/rtsp/client.go` and preferred by `Supervisor`
+when building a `StreamDescriptor`. `CameraStreamStatus.Codec` (surfaced
+elsewhere, e.g. existing health output) is untouched, keeping this a
+minimal, scoped fix rather than a behavior change to Hito G's status
+reporting.
+
+**Timestamps are honest about what they are.** `rawvideo` over an ffmpeg
+pipe carries no RTP timestamp. `DecodedFrame` has no `RTPTime` field —
+`SourceReceivedAt` is a documented best-effort FIFO correlation with the
+ingest time of the access unit presumed to have produced that frame
+(accurate for baseline/no-B-frame streams like the TC70's, degrades with
+B-frame reordering), and `DecodedAt` is the real wall-clock read time.
+Real TC70 runs showed ~1.1-1.4s of `SourceReceivedAt`→`DecodedAt` latency,
+consistent with ffmpeg's own internal one-frame buffering (confirmed
+separately: it does not flush a decoded frame to stdout until either the
+next frame's data arrives or stdin closes) — an inherent property of a
+live, non-terminating stream, not a pipeline bug.
+
+**Backpressure (H9).** Every stage boundary is a fixed-capacity channel or
+ring buffer, never unbounded: the packet queue (drop-*new*, since FU-A
+reassembly needs strict order), the access-unit queue, the decoder's own
+small output queue (raw yuv420p frames are large — kept deliberately
+smaller than the general queue depth via `GEOCAM_VIDEO_DECODE_QUEUE_DEPTH`),
+the ring buffer (drop-oldest), and each `Sink`'s own queue in `Router`
+(one queue + one worker per sink, so a slow sink never blocks the others).
+`GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES` bounds the number of concurrent
+ffmpeg subprocesses.
+
+**`/status`.** A small `video_pipeline` block (`camera_count` +
+`PipelineStatus` per camera: state, codec, input/decoded/output FPS,
+frames received/decoded/sampled/dropped, queue depth, buffer usage, decode
+latency) — no frame bytes, no per-frame history. No `video probe` CLI
+subcommand: the pipeline runs inside the daemon, so polling `/status` is a
+strictly better validation path than a separate short-lived CLI probe that
+would have to reimplement pipeline startup.
+
+## Docker image: ffmpeg dependency and its license (Milestone H)
+
+The final image (`gcr.io/distroless/static-debian12:nonroot`) gains one
+additional layer: a static, multi-arch `ffmpeg` binary copied from
+`mwader/static-ffmpeg`, pinned by digest
+(`sha256:415a41fa3167b890b9703d20bd0f00bf1e9dab8a4b6c27fef1445b2bf5f1ab4a`),
+verified via `docker buildx imagetools inspect` to cover both
+`linux/amd64` and `linux/arm64`. `go.mod` gains nothing — this is a
+container-layer addition, not a Go dependency.
+
+**License — reported, not hidden.** This image's ffmpeg is built with
+`libx264`/`libx265` enabled (confirmed against
+`github.com/wader/static-ffmpeg`'s own Dockerfile, which always builds both,
+not behind an opt-in flag the way it gates `libfdk-aac`/`--enable-nonfree`).
+Enabling those requires ffmpeg's `--enable-gpl` — **this is a GPL-licensed
+binary, not an LGPL-only one**, even though this project only uses it for
+H.264 *decode* (ffmpeg's native decoder, not the GPL-licensed encoders).
+Bundling it means the shipped image contains GPL-licensed code. This was
+not assumed to be LGPL-safe and silently shipped; it is an open decision:
+either accept GPL distribution (with whatever source-availability
+obligations that implies for this image), or replace this layer with a
+Dockerfile stage that builds ffmpeg from source with `--disable-gpl
+--disable-nonfree` (decode-only, no libx264/libx265, LGPL-compliant) —
+not implemented in this milestone, since it is a licensing/business
+decision, not an engineering one.
 
 ## Deployment
 
 - **Targets:** `linux/amd64`, `linux/arm64`. Static, `CGO_ENABLED=0`.
-- **Image:** multi-stage build onto distroless/static, non-root, binary only.
+- **Image:** multi-stage build onto distroless/static, non-root, binary only,
+  plus a pinned static `ffmpeg` binary (Milestone H — see above; a runtime
+  dependency, not a build-time/cgo one).
 - **Local dev:** Rancher Desktop + containerd + K3s. Images are built with
   `nerdctl --namespace k8s.io` — Docker Engine is not used. Chart deploys into
   the `geocam-edge-dev` namespace with its own Helm release.

@@ -160,19 +160,21 @@ completa y `docs/PROJECT_STATUS.md` para el detalle de validación.
 
 **G — DONE / VALIDATED LOCAL.** Pure stdlib Go, `CGO_ENABLED=0`, cross-compiles to `linux/amd64` and `linux/arm64`, 100% tests passing with race detector, live Tapo TC70 camera streaming validated on LAN (`192.168.0.6:554/stream2`), 20+ packets received in 1.47s. Zero FFmpeg, zero video decoding, zero video frames. Ready for PR.
 
-## H — Video Pipeline
+## H — Video Pipeline (IMPLEMENTED / TESTED / VALIDATED LOCAL — real TC70 — `feature/video-pipeline`, not merged)
 
-- H1. Ingest RTSP.
-- H2. Decode.
-- H3. Sampling.
-- H4. Reducción FPS.
-- H5. Resize.
-- H6. Main/substream.
-- H7. Buffer circular.
-- H8. Frame routing.
-- H9. Backpressure.
-- H10. Límites CPU/RAM.
-- H11. Independiente de YOLO.
+- H1. Ingest RTSP. **DONE** — reuses Hito G's `Supervisor.streamLoop()` via `rtsp.PacketSink`, no second RTSP client.
+- H2. Decode. **DONE** — H.264 via FFmpeg subprocess (`internal/processing.FFmpegDecoder`), SPS/PPS from SDP.
+- H3. Sampling. **DONE** — `GEOCAM_VIDEO_TARGET_FPS`, `Sampler.ShouldEmit`.
+- H4. Reducción FPS. **DONE** — validated real: TC70 ~15 FPS → 2 FPS target.
+- H5. Resize. **DONE** — `GEOCAM_VIDEO_OUTPUT_WIDTH/HEIGHT`, validated real: 640x360 → 320x180.
+- H6. Main/substream. **DONE** — reuses `GEOCAM_STREAM_ROLE`, no second logic.
+- H7. Buffer circular. **DONE** — `RingBuffer`, drop-oldest on full, `-race`-tested.
+- H8. Frame routing. **DONE** (interface + `DebugSink` only, per scope — Cloud/Hybrid/Edge-YOLO sinks are I/J/K).
+- H9. Backpressure. **DONE** — bounded channels/ring buffer at every hop, drop policy documented per hop.
+- H10. Límites CPU/RAM. **DONE** — `GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES`, small decode queue, `/status` `video_pipeline` summary.
+- H11. Independiente de YOLO. **DONE** — `pipeline_test.go`'s fake-decoder acceptance test + real TC70 run, zero YOLO/Vision-Worker/Cloud involvement.
+
+Not done / deliberately out of scope: `video probe` CLI (justified, `/status` covers it), H.265 decode, Docker image smoke build (container runtime wasn't running locally), the ffmpeg-image GPL-vs-LGPL licensing decision (flagged, not resolved). See `docs/PROJECT_STATUS.md` for full detail, the two real bugs found (ONVIF codec mismap, ffmpeg GPL license) and how they were handled.
 
 ## I — Modo Cloud
 

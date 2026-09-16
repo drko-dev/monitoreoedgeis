@@ -28,8 +28,11 @@ type Supervisor struct {
 	cfg    Config
 	logger *slog.Logger
 
-	mu     sync.RWMutex
-	status CameraStreamStatus
+	mu         sync.RWMutex
+	status     CameraStreamStatus
+	sink       PacketSink
+	descriptor StreamDescriptor
+	descReady  bool
 
 	stopFunc context.CancelFunc
 	doneChan chan struct{}
@@ -80,6 +83,24 @@ func (s *Supervisor) Stop() {
 		s.stopFunc()
 	}
 	<-s.doneChan
+}
+
+// SetPacketSink registers sink to receive this supervisor's video RTP
+// payloads. Passing nil deregisters it. Safe for concurrent use with the
+// read loop delivering packets.
+func (s *Supervisor) SetPacketSink(sink PacketSink) {
+	s.mu.Lock()
+	s.sink = sink
+	s.mu.Unlock()
+}
+
+// Descriptor returns the stream's non-sensitive metadata (codec, dimensions,
+// SPS/PPS, ...) once resolved from a successful connection, and whether it
+// is ready yet.
+func (s *Supervisor) Descriptor() (StreamDescriptor, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.descriptor, s.descReady
 }
 
 // Snapshot returns a copy of the current camera stream status.
@@ -142,6 +163,27 @@ func (s *Supervisor) run(ctx context.Context) {
 		s.mu.Lock()
 		s.status.Status = StateOnline
 		s.status.LastErrorSafe = ""
+		// Prefer the codec SDP actually declares for the video payload
+		// type (RFC 4566 a=rtpmap) over the ONVIF-reported one: SDP is the
+		// on-the-wire source of truth, and ONVIF GetProfiles responses can
+		// mismap video/audio encoder metadata on some devices. This only
+		// affects what the video pipeline (Hito H) selects a decoder for
+		// — CameraStreamStatus.Codec (surfaced elsewhere) keeps the
+		// ONVIF-reported value unchanged.
+		codec := s.status.Codec
+		if sdpCodec := session.Codec(); sdpCodec != "" {
+			codec = sdpCodec
+		}
+		s.descriptor = StreamDescriptor{
+			CandidateKey:       s.target.CandidateKey,
+			Codec:              codec,
+			Width:              s.status.Width,
+			Height:             s.status.Height,
+			FPS:                s.status.FPS,
+			StreamRole:         s.status.StreamRole,
+			SpropParameterSets: session.SpropParameterSets(),
+		}
+		s.descReady = true
 		s.mu.Unlock()
 
 		s.logger.Info("camera stream connected and playing", "addr", s.target.Addr)
@@ -168,6 +210,11 @@ func (s *Supervisor) run(ctx context.Context) {
 }
 
 func (s *Supervisor) streamLoop(ctx context.Context, session *Session) error {
+	// The video channel is whatever SETUP actually negotiated for this
+	// session (session.VideoChannel()), never a hardcoded number — RTCP on
+	// the sibling channel must never reach PacketSink.
+	videoChannel := session.VideoChannel()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -175,7 +222,7 @@ func (s *Supervisor) streamLoop(ctx context.Context, session *Session) error {
 		default:
 		}
 
-		_, payload, err := session.ReadPacket(s.cfg.PacketTimeout)
+		channel, payload, err := session.ReadPacket(s.cfg.PacketTimeout)
 		if err != nil {
 			return err
 		}
@@ -186,7 +233,12 @@ func (s *Supervisor) streamLoop(ctx context.Context, session *Session) error {
 		s.status.BytesReceived += int64(len(payload))
 		s.status.LastPacketAt = &now
 		s.status.Status = StateOnline
+		sink := s.sink
 		s.mu.Unlock()
+
+		if channel == videoChannel && sink != nil {
+			sink.OnPacket(s.target.CandidateKey, payload, now)
+		}
 	}
 }
 

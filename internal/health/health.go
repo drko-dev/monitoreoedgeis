@@ -19,6 +19,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/heartbeat"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
+	"github.com/drko-dev/monitoreoedgeis/internal/processing"
 	"github.com/drko-dev/monitoreoedgeis/internal/rtsp"
 )
 
@@ -55,6 +56,10 @@ type Snapshot struct {
 	Heartbeat *heartbeat.Status         `json:"heartbeat,omitempty"`
 	Discovery *discovery.ModuleStatus   `json:"discovery,omitempty"`
 	Cameras   []rtsp.CameraStreamStatus `json:"cameras,omitempty"`
+	// VideoPipeline is the Hito H video pipeline's small per-camera summary
+	// (camera_count + one PipelineStatus per camera). Omitted when the
+	// video pipeline is disabled. Never carries frame bytes.
+	VideoPipeline *processing.VideoPipelineSummary `json:"video_pipeline,omitempty"`
 }
 
 // Reporter holds the mutable health state of the agent, including per-module
@@ -69,6 +74,7 @@ type Reporter struct {
 	heartbeat        *heartbeat.Status
 	discovery        *discovery.ModuleStatus
 	cameras          []rtsp.CameraStreamStatus
+	videoPipeline    *processing.VideoPipelineSummary
 
 	version string
 	cfg     *config.Config
@@ -182,6 +188,11 @@ func (r *Reporter) Snapshot() Snapshot {
 		cams = make([]rtsp.CameraStreamStatus, len(r.cameras))
 		copy(cams, r.cameras)
 	}
+	var vp *processing.VideoPipelineSummary
+	if r.videoPipeline != nil {
+		copied := *r.videoPipeline
+		vp = &copied
+	}
 
 	return Snapshot{
 		Status:           r.state,
@@ -199,5 +210,14 @@ func (r *Reporter) Snapshot() Snapshot {
 		Heartbeat:        hb,
 		Discovery:        disc,
 		Cameras:          cams,
+		VideoPipeline:    vp,
 	}
+}
+
+// SetVideoPipeline records the latest video pipeline status summary
+// (implements processing.HealthSink).
+func (r *Reporter) SetVideoPipeline(summary processing.VideoPipelineSummary) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.videoPipeline = &summary
 }

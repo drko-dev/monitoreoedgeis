@@ -9,14 +9,20 @@
 | Field             | Value                                                     |
 | ----------------- | ----------------------------------------------------------- |
 | **PROJECT**       | GEO CAM Edge                                              |
-| **CURRENT HITO**  | G — Camera Connectivity                                   |
-| **STATE**         | DONE / VALIDATED LOCAL                                    |
-| **MERGED**        | **NO** — PR open on `feature/camera-connectivity`          |
-| **Branch**        | `feature/camera-connectivity`                              |
+| **CURRENT HITO**  | H — Video Pipeline (Geo Cam Edge)                         |
+| **STATE**         | IMPLEMENTED / TESTED — see per-item status below           |
+| **MERGED**        | Hito G: **YES** (PRs #7/#8/#9, `main` @ `50c7de7`). Hito H: **NO** — PR open on `feature/video-pipeline` |
+| **Branch**        | `feature/video-pipeline`                                    |
 | **DEPLOYED PROD** | **NO** — VPS/production untouched                         |
 | **Go version**    | 1.26.2                                                    |
 
-Hitos A, B, C, D, E, F are merged into `main`. Hito G is validated locally. Next is Hito H.
+Hitos A through G are merged into `main` (Hito G's connectivity + operational
+CLI landed via PRs #7/#8/#9). This snapshot previously said Hito G's PR was
+still open on `feature/camera-connectivity` — that was stale; corrected here
+as part of Hito H per AGENTS.md's "keep PROJECT_STATUS accurate" rule. Hito H
+(this branch) is implemented and unit/race/vet/fmt/build-tested; see its
+section below for exact item-by-item status and what real-camera validation
+was/wasn't completed.
 
 ## Hito A — what was implemented (MERGED)
 
@@ -392,10 +398,169 @@ credential is the one SaaS-side condition that degrades the whole agent.
 - **Strict Credential Privacy**: No secrets, tokens, or plaintext passwords logged or returned in status payloads.
 - **LAN Live Camera Validation**: Verified against physical Tapo TC70 camera (`192.168.0.6:554/stream2`), reading 20+ live interleaved packets in 1.47s.
 
+## Hito H — Video Pipeline (THIS BRANCH, `feature/video-pipeline`)
+
+Independent video pipeline downstream of Hito G's existing RTSP/RTP
+transport — no second RTSP client, no duplicated credentials/reconnect/health.
+New package `internal/processing`.
+
+**Architecture decisions:**
+- **Decoder: FFmpeg run as an OS subprocess** (`os/exec`, one process per
+  camera, Annex-B via stdin, raw yuv420p via stdout) — not cgo bindings
+  (would require `CGO_ENABLED=1`, breaking the static build), not a pure-Go
+  decoder (none production-grade for H.264 main/high exists), not a
+  hand-written decoder (explicitly out of scope). `go.mod` gains zero
+  dependencies; this is a runtime dependency only.
+- **Docker image**: added a pinned, multi-arch-verified (`linux/amd64` +
+  `linux/arm64`, confirmed via `docker buildx imagetools inspect`) static
+  ffmpeg layer from `mwader/static-ffmpeg@sha256:415a41f...` on top of the
+  existing `distroless/static-debian12:nonroot` final stage.
+  **License finding, reported explicitly per review requirement, not
+  assumed**: this image's ffmpeg is built with `libx264`/`libx265` enabled
+  (confirmed against `github.com/wader/static-ffmpeg`'s own Dockerfile),
+  which requires ffmpeg's `--enable-gpl` — **this is a GPL-licensed ffmpeg
+  binary, not LGPL-only**, even though only H.264 *decode* (ffmpeg's native
+  decoder, not the GPL encoders) is used. Bundling it means the shipped
+  image contains GPL-licensed code. See `docs/ARCHITECTURE.md` for the full
+  writeup and the "build our own LGPL-only ffmpeg" alternative if GPL
+  distribution turns out to be unacceptable — not resolved in this branch,
+  flagged for a business/licensing decision.
+- **Codec ground truth bug found during real validation**: this repo's TC70
+  ONVIF `GetProfiles` response mismaps video/audio encoder metadata,
+  reporting `G711` for both the main and sub profiles regardless of actual
+  video codec (pre-existing Hito E concern, not introduced here). Fixed
+  *for the video pipeline's own decisions* by parsing the codec SDP itself
+  declares (`a=rtpmap`, RFC 4566) in `internal/rtsp/client.go` and having
+  `Supervisor` prefer it over the ONVIF-reported value when building the
+  `StreamDescriptor` used to select a decoder — `CameraStreamStatus.Codec`
+  (surfaced elsewhere) is untouched. `internal/discovery/onvif`'s own
+  parsing bug itself was not touched (out of Hito H's scope).
+
+**H1 — Ingest RTSP: DONE.** Reuses Hito G's `Supervisor.streamLoop()` via a
+new `PacketSink` interface + `Session.VideoChannel()` (the interleaved
+channel actually negotiated in SETUP, not a hardcoded `0` — RTCP on the
+sibling channel is filtered out before `PacketSink.OnPacket` is ever
+called). No second RTSP connection, no duplicated reconnect/health.
+
+**H2 — Decode: DONE.** `VideoDecoder` interface + `FFmpegDecoder`
+subprocess implementation. SPS/PPS parsed from SDP `sprop-parameter-sets`
+and injected at decoder start/restart. Validated against both a synthetic
+ffmpeg-generated clip (`decoder_test.go`, ffmpeg-gated) and the real TC70.
+
+**RTP depacketization — DONE for H.264** (single NALU, FU-A, STAP-A).
+Access-unit-wide sequence-gap handling: any packet loss detected while an
+AU is open discards the whole AU, never a partial frame to the decoder.
+H.265 explicitly unsupported (`ErrUnsupportedCodec`), not a silent no-op.
+
+**H3/H4 — Sampling/FPS reduction: DONE.** `GEOCAM_VIDEO_TARGET_FPS`, no
+duplicate frames, intentional drop via `Sampler.ShouldEmit`. Real TC70 run:
+~15 FPS source sampled down to 2 FPS target, 9 frames sampled over 8s.
+
+**H5 — Resize: DONE.** `GEOCAM_VIDEO_OUTPUT_WIDTH/HEIGHT`, validated
+combination (both zero or both even+positive) at config load. Metadata
+(source/output dims, codec, role, timestamps) preserved on every `Frame`.
+Real TC70 run: 640x360 source resized to 320x180 output, confirmed.
+
+**H6 — Main/substream: DONE.** Reuses `GEOCAM_STREAM_ROLE`/G's existing
+selection, no second logic. Substream remains the default recommendation.
+
+**H7 — Bounded ring buffer: DONE.** `RingBuffer`, fixed capacity, drop-oldest
+on full, `-race`-tested concurrent pushes.
+
+**H8 — Frame routing: DONE (interface + debug sink only, as scoped).**
+`Sink` interface + `Router` (one bounded queue + one worker per sink) +
+`DebugSink`. No Cloud/Hybrid/Edge-YOLO sinks built — that's I/J/K.
+
+**H9 — Backpressure: DONE.** Every hop between stages is a fixed-capacity
+channel or ring buffer; a full queue drops (never blocks) except the
+depacketizer's input queue, which is drop-*new* (not drop-oldest) because
+FU-A reassembly needs strict packet order. Real TC70 run: 0 dropped frames
+at the configured queue depths.
+
+**H10 — CPU/RAM bounds + metrics: DONE.** `GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES`
+caps concurrent ffmpeg processes; the raw-decoded-frame queue
+(`GEOCAM_VIDEO_DECODE_QUEUE_DEPTH`) is deliberately small and separate from
+the general queue depth. `/status` exposes a small `video_pipeline` summary
+(see exact JSON contract below) — no frame bytes, no per-frame history.
+
+**H11 — Independent of YOLO: DONE.** `pipeline_test.go`'s
+`TestPipeline_EndToEndWithFakeDecoder_H11` is the acceptance test: full
+chain with a fake decoder, zero YOLO/PyTorch/Vision-Worker/Cloud
+involvement. The real TC70 run (below) proves the same end-to-end with a
+real ffmpeg decoder.
+
+**CLI decision: no new subcommand.** `/status`'s `video_pipeline` block
+(exact contract, as specified) covers operator validation; the pipeline
+runs inside the daemon, unlike `discovery scan`'s pre-enrollment one-shot
+checks. See `docs/ARCHITECTURE.md`.
+
+```json
+"video_pipeline": {
+  "camera_count": 1,
+  "cameras": [{
+    "candidate_key": "...", "state": "running", "codec": "H264",
+    "input_fps": 15, "decoded_fps": 0, "output_fps": 0,
+    "frames_received": 129, "frames_decoded": 104, "frames_sampled": 9,
+    "frames_dropped": 0, "queue_depth": 0, "buffer_usage": 9,
+    "decode_latency_ms": 1397.8
+  }]
+}
+```
+
+**Tests:** `internal/processing` — `rtp_test.go`, `depacketizer_test.go`,
+`decoder_test.go` (ffmpeg-gated), `sampler_test.go`, `resizer_test.go`,
+`ringbuffer_test.go`, `router_test.go`, `pipeline_test.go` (H11 gate),
+`manager_test.go` (lifecycle + `-race` `Stop()`-vs-`OnPacket()` concurrency
+test). `internal/rtsp` extended: RTCP-never-reaches-`PacketSink` test,
+`SetPacketSink` applies to existing+future supervisors, SDP
+`sprop-parameter-sets`/`a=rtpmap` extraction, SDP-codec-overrides-ONVIF
+regression test. `internal/config` extended: new env var parsing + combined
+width/height validation.
+
+`go build ./...`, `go vet ./...`, `gofmt -l .` (clean), `go test ./...`,
+`go test -race ./...` — all pass. Cross-compiled `linux/amd64` and
+`linux/arm64` via existing `make build-linux` (pure Go, `CGO_ENABLED=0`
+unaffected).
+
+**Real TC70 validation — PASS** (`internal/cameratest/video_pipeline_integration_test.go`,
+gated by the `integration` build tag + `TAPO_ONVIF_USER`/`TAPO_ONVIF_PASS`,
+same convention as Hito F/G's hardware tests): RTSP connected
+(`192.168.0.6:554/stream2`), codec resolved as H264 via the SDP fix, 104
+frames decoded in ~8s (≥100 frame acceptance met), sampling 15fps→2fps
+confirmed (9 sampled), resize 640x360→320x180 confirmed, 0 dropped frames,
+0 reconnects, heap RSS delta small and stable (737KB→3.5MB over the run, no
+runaway growth), zero secrets in logs (verified), one diagnostic YUV frame
+saved to `os.TempDir()` (outside the repo, never committed).
+**Decode latency observed ~1.1-1.4s** — consistent with the documented FIFO
+correlation approximation (`DecodedFrame.SourceReceivedAt`) plus ffmpeg's
+own internal buffering (manually confirmed separately: ffmpeg does not
+flush a decoded frame until either the next frame's data arrives or stdin
+closes — an inherent ~1-frame latency for a live H.264-without-B-frames
+stream, not a bug in this pipeline).
+
+**Not done / deliberately out of scope (per ticket):** Cloud upload,
+video WebSocket, Vision Worker, YOLO, detection, IA events, motion
+detection, ROI, Hybrid, Full Edge, GPU/NPU, long-term video storage —
+Hitos I/J/K. `video probe` CLI subcommand (justified above). H.265
+depacketization/decode (interface designed for it, not implemented).
+Docker image smoke build/run (`make image` + `ffmpeg -version` inside the
+container) — **not done**: this dev machine's Rancher Desktop/containerd
+VM was not running and starting it was left for explicit confirmation
+rather than done unprompted; the Dockerfile change itself and its
+multi-arch digest were verified via `docker manifest inspect`/
+`buildx imagetools inspect` without needing the daemon running.
+
 ## NEXT
 
-Hito G is DONE / VALIDATED LOCAL. PR is open on `feature/camera-connectivity`.
-Next is Hito H (Video Pipeline: decode, sampling, frame routing). Do NOT start Hito H until authorized.
+Hito H (this branch) is implemented, tested (unit + `-race`), and validated
+against the real TC70 — see its section above for exact per-item status and
+the two real bugs found/fixed along the way (ONVIF codec mismap, ffmpeg
+GPL licensing). PR is open on `feature/video-pipeline`, **not merged**.
+Pending before merge: the licensing decision on the ffmpeg image (GPL
+bundled vs. build LGPL-only), and a Docker image smoke build (blocked on
+this dev machine's container runtime not running — do not start it without
+asking first, it consumes real machine resources).
+Next is Hito I. Do NOT start Hito I until authorized.
 
 ## HOW ANOTHER AI SHOULD CONTINUE
 
@@ -411,6 +576,9 @@ Next is Hito H (Video Pipeline: decode, sampling, frame routing). Do NOT start H
 10. Update the documentation when finishing.
 
 Always distinguish, and never collapse these into each other:
+
+
+---
 
 **IMPLEMENTED** — code exists in the repo.
 **TESTED** — automated tests pass.
