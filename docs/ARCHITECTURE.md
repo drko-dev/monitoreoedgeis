@@ -374,32 +374,80 @@ would have to reimplement pipeline startup.
 ## Docker image: ffmpeg dependency and its license (Milestone H)
 
 The final image (`gcr.io/distroless/static-debian12:nonroot`) gains one
-additional layer: a static, multi-arch `ffmpeg` binary copied from
-`mwader/static-ffmpeg`, pinned by digest
-(`sha256:415a41fa3167b890b9703d20bd0f00bf1e9dab8a4b6c27fef1445b2bf5f1ab4a`),
-verified via `docker buildx imagetools inspect` to cover both
-`linux/amd64` and `linux/arm64`. `go.mod` gains nothing — this is a
-container-layer addition, not a Go dependency.
+additional layer: a static `ffmpeg` binary. `go.mod` gains nothing — this
+is a container-layer addition, not a Go dependency.
 
-**License — reported, not hidden.** This image's ffmpeg is built with
-`libx264`/`libx265` enabled — confirmed two ways: against
-`github.com/wader/static-ffmpeg`'s own Dockerfile (which always builds both,
-not behind an opt-in flag the way it gates `libfdk-aac`/`--enable-nonfree`),
-and directly from the shipped binary itself (`nerdctl run --entrypoint
-/usr/local/bin/ffmpeg geocam-edge:dev -version` during the pre-merge image
-smoke test reports `--enable-gpl --enable-libx264 --enable-libx265` in its
-own configure flags — not just inferred from upstream's source).
-Enabling those requires ffmpeg's `--enable-gpl` — **this is a GPL-licensed
-binary, not an LGPL-only one**, even though this project only uses it for
-H.264 *decode* (ffmpeg's native decoder, not the GPL-licensed encoders).
-Bundling it means the shipped image contains GPL-licensed code. This was
-not assumed to be LGPL-safe and silently shipped; it is an open decision:
-either accept GPL distribution (with whatever source-availability
-obligations that implies for this image), or replace this layer with a
-Dockerfile stage that builds ffmpeg from source with `--disable-gpl
---disable-nonfree` (decode-only, no libx264/libx265, LGPL-compliant) —
-not implemented in this milestone, since it is a licensing/business
-decision, not an engineering one.
+**Built from official source, LGPL-only — not a third-party prebuilt
+image.** An earlier version of this Dockerfile used `mwader/static-ffmpeg`,
+a prebuilt image confirmed (via its own Dockerfile source, and directly
+from the shipped binary's `-version` output) to be GPL-licensed
+(`--enable-gpl --enable-libx264 --enable-libx265`) — that finding was
+reported explicitly rather than assumed away, and it prompted this
+replacement. The `ffmpeg-build` stage in `Dockerfile` now compiles ffmpeg
+itself from the official source tarball
+(`https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz`, pinned by the SHA256
+computed from that HTTPS fetch — ffmpeg.org's plain release listing
+doesn't publish a separate checksum file to cross-verify against), with
+`--disable-everything` and only the exact components this pipeline's one
+command needs re-enabled:
+
+```
+ffmpeg -f h264 -i pipe:0 -f rawvideo -pix_fmt yuv420p -an -sn pipe:1
+```
+
+`--enable-decoder=h264 --enable-parser=h264 --enable-demuxer=h264
+--enable-muxer=rawvideo --enable-encoder=rawvideo --enable-protocol=pipe`
+— each individually verified to exist and be necessary against the actual
+FFmpeg 7.1.5 source (not assumed from a snippet): the parser is required
+because a raw demuxer has no container-level frame boundaries; the
+`rawvideo` *encoder* (not just muxer) is required because ffmpeg always
+runs frames through an encoder before muxing, even for nominally-raw
+output. No `--enable-gpl`, no `--enable-nonfree`, no
+`libx264`/`libx265`/`libxvid` — confirmed absent both from the configure
+invocation itself and from the built binary's own `-version` output.
+`avfilter`/`swscale` are left at their default-enabled state (both LGPL;
+`--disable-everything` only zeroes their filter components, not the
+libraries) since modern ffmpeg.c can route even implicit pixel-format
+conversion through the filtergraph path, and stripping that was not
+validated to be safe.
+
+Full recipe, flag-by-flag rationale, and the exact source/checksum are in
+`Dockerfile`'s `ffmpeg-build` stage — that stage **is** the build recipe
+LGPL compliance requires being able to point to.
+
+**LGPL compliance — factual, not a legal opinion.** Shipping this binary
+under LGPLv2.1+ requires making the corresponding source (this exact
+version, unmodified upstream release) and this build recipe available to
+recipients, and preserving FFmpeg's copyright/license notices somewhere
+reachable from the distributed image/product. This document and the
+Dockerfile satisfy the "available" part by linking directly to the pinned
+upstream tarball and to the full configure invocation; actually attaching
+notices to whatever distribution channel ships this image (e.g. a
+NOTICES file or README section in the deployed artifact) has not been
+done as part of this milestone and should not be assumed complete without
+that review — this is not legal advice.
+
+Binary/image size, measured (`linux/arm64`, this LGPL-only decode-only
+build vs. the previously-evaluated `mwader/static-ffmpeg` GPL prebuilt):
+final `geocam-edge:dev` image **55.69MB → 5MB compressed** (119.9MB →
+15.26MB uncompressed); the ffmpeg binary itself is **2.82MB** static.
+Smaller because dozens of unused codecs/formats/filters (including
+libx264/libx265 themselves) are compiled out entirely at build time, not
+just left unlinked in a general-purpose build.
+
+**Architecture coverage note:** built and fully verified on `linux/arm64`
+(this repo's native dev/CI-adjacent architecture) — build PASS, decode
+PASS against a synthetic H.264 clip inside the actual container, `-version`
+confirms no GPL/nonfree/libx264/libx265, nonroot startup confirmed. The
+`linux/amd64` build was **not completed** as part of this change: it uses
+the identical `Dockerfile` stage (no arch-specific flags — `./configure`
+auto-detects the target triple under `docker buildx build
+--platform linux/amd64,linux/arm64`), but compiling FFmpeg from source
+under this dev machine's QEMU emulation (Apple Silicon host, no native
+amd64 hardware available) was taking 30-60+ minutes and was cut short by
+explicit decision rather than left to finish unattended. The amd64 path
+should be verified for real — same checks as arm64 above — on a real
+amd64 machine or in CI before this image is actually published/deployed.
 
 ## Deployment
 

@@ -174,7 +174,7 @@ completa y `docs/PROJECT_STATUS.md` para el detalle de validación.
 - H10. Límites CPU/RAM. **DONE** — `GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES`, small decode queue, `/status` `video_pipeline` summary.
 - H11. Independiente de YOLO. **DONE** — `pipeline_test.go`'s fake-decoder acceptance test + real TC70 run, zero YOLO/Vision-Worker/Cloud involvement.
 
-Not done / deliberately out of scope: `video probe` CLI (justified, `/status` covers it), H.265 decode, the ffmpeg-image GPL-vs-LGPL licensing decision (flagged, not resolved — the only remaining pre-merge item). Docker image smoke build: **done, PASS** (see `docs/PROJECT_STATUS.md`). See `docs/PROJECT_STATUS.md` for full detail, the real bugs found (ONVIF codec mismap, ffmpeg GPL license confirmed directly from the running binary, decode queue depth not wired, missing stall watchdog, unbounded buffers, metrics semantics) and how they were handled.
+Not done / deliberately out of scope: `video probe` CLI (justified, `/status` covers it), H.265 decode. FFmpeg GPL-vs-LGPL licensing: **resolved** — migrated to a from-source, LGPL-only ffmpeg build (`Dockerfile`'s `ffmpeg-build` stage), verified on `linux/arm64` (image 55.69MB→5MB compressed, no GPL/nonfree flags, decode PASS). `linux/amd64` uses the identical recipe but was **not built/verified locally** (QEMU emulation on this dev machine was cut short by explicit decision) — the one remaining pre-merge gap. Docker image smoke build: **done, PASS** on arm64 (see `docs/PROJECT_STATUS.md`). See `docs/PROJECT_STATUS.md` for full detail, the real bugs found (ONVIF codec mismap, decode queue depth not wired, missing stall watchdog, unbounded buffers, metrics semantics, a shutdown deadlock) and how they were handled.
 
 ## I — Modo Cloud
 

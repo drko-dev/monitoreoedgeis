@@ -415,16 +415,23 @@ New package `internal/processing`.
   `linux/arm64`, confirmed via `docker buildx imagetools inspect`) static
   ffmpeg layer from `mwader/static-ffmpeg@sha256:415a41f...` on top of the
   existing `distroless/static-debian12:nonroot` final stage.
-  **License finding, reported explicitly per review requirement, not
-  assumed**: this image's ffmpeg is built with `libx264`/`libx265` enabled
-  (confirmed against `github.com/wader/static-ffmpeg`'s own Dockerfile),
-  which requires ffmpeg's `--enable-gpl` — **this is a GPL-licensed ffmpeg
-  binary, not LGPL-only**, even though only H.264 *decode* (ffmpeg's native
-  decoder, not the GPL encoders) is used. Bundling it means the shipped
-  image contains GPL-licensed code. See `docs/ARCHITECTURE.md` for the full
-  writeup and the "build our own LGPL-only ffmpeg" alternative if GPL
-  distribution turns out to be unacceptable — not resolved in this branch,
-  flagged for a business/licensing decision.
+  **License finding (initial) and resolution**: the originally-used
+  `mwader/static-ffmpeg` prebuilt image was found to be GPL-licensed
+  (`libx264`/`libx265` enabled, confirmed both from its own Dockerfile
+  source and directly from the running binary's `-version` output) —
+  reported explicitly rather than assumed LGPL-safe. **Resolved**: the
+  Dockerfile's `ffmpeg-build` stage now compiles ffmpeg 7.1.5 from the
+  official source with `--disable-everything` plus only the six components
+  this pipeline's exact command needs, no `--enable-gpl`/`--enable-nonfree`/
+  libx264/libx265 — verified on `linux/arm64` (build PASS, decode PASS
+  against a synthetic clip inside the actual container, `-version` confirms
+  no GPL/nonfree flags, image shrank 55.69MB→5MB compressed). **`linux/amd64`
+  uses the identical Dockerfile stage but was not built/verified locally**
+  (QEMU-emulated FFmpeg compile on this Apple Silicon dev machine was cut
+  short after 30+ min by explicit decision — should be verified on real
+  amd64 hardware or in CI before production use). See `docs/ARCHITECTURE.md`
+  for the full recipe, component-by-component rationale, and the factual
+  (non-legal-opinion) LGPL compliance notes.
 - **Codec ground truth bug found during real validation**: this repo's TC70
   ONVIF `GetProfiles` response mismaps video/audio encoder metadata,
   reporting `G711` for both the main and sub profiles regardless of actual
@@ -592,25 +599,78 @@ static binaries ran inside distroless with no dynamic-linker errors).
 **Technical: PASS. Licensing/distribution decision: still PENDING — not
 resolved by this smoke test, see the GPL note above.**
 
+**FFmpeg migrated to LGPL-only, built from source — GPL question resolved
+on `linux/arm64` (DONE), `linux/amd64` still pending real verification.**
+Replaced the GPL `mwader/static-ffmpeg` prebuilt image with a
+`Dockerfile` stage that compiles ffmpeg 7.1.5 from official source
+(`--disable-everything` + exactly the 6 components
+`ffmpeg -f h264 -i pipe:0 -f rawvideo -pix_fmt yuv420p -an -sn pipe:1`
+needs, each individually confirmed to exist and be required against the
+real FFmpeg source — not assumed from a snippet). Rebuilt the real image
+(`make image`) on `linux/arm64`:
+- Build PASS, image shrank **55.69MB → 5MB compressed** (119.9MB →
+  15.26MB uncompressed); ffmpeg binary itself **2.82MB** static.
+- `ffmpeg -version` inside the container: no `--enable-gpl`, no
+  `--enable-nonfree`, no `libx264`/`libx265` — confirmed directly from the
+  shipped binary, not inferred.
+- Decode PASS: the exact pipeline command run inside the container against
+  a synthetic H.264 clip produced the exact expected byte count.
+- `geocam-edge` binary present/runs (arm64, correct commit); container
+  starts and stays up as `nonroot:nonroot`, same (expected, unrelated)
+  `permission denied` on the unmounted data dir as before; no missing
+  libs/runtime.
+
+`linux/amd64` uses the **identical** Dockerfile stage (`./configure`
+auto-detects the target triple, no arch-specific flags) but was **not
+built/verified locally**: compiling FFmpeg from source under this Apple
+Silicon dev machine's QEMU emulation was cut short (30+ min, not close to
+done) by explicit decision rather than run to completion unattended. This
+is the one remaining real gap — the recipe is unchanged between
+architectures, but "the recipe should work" is not the same as "verified,"
+and that distinction is kept explicit rather than glossed over.
+
+Live-camera note: the real TC70 tests below use the **macOS host's**
+`ffmpeg` (full-featured Homebrew build) via `go test`, not the new minimal
+Linux binary — the minimal build's decode correctness is what the
+container smoke test above validates (same libavcodec H.264 decoder
+algorithm, architecture-independent), while the TC70 tests validate the
+Go-side pipeline logic (RTP, depacketizing, sampling, resize, metrics)
+end-to-end against a real camera. Together they cover the full picture;
+neither alone claims to be the other.
+
+Compliance note (factual): shipping this binary under LGPLv2.1+ requires
+making the corresponding source and build recipe available and preserving
+FFmpeg's notices — `docs/ARCHITECTURE.md` links directly to the pinned
+upstream source and the exact configure invocation for this. Attaching
+those notices to whatever channel actually distributes the built image has
+not been done as part of this milestone; this is not legal advice.
+
 **Not done / deliberately out of scope (per ticket):** Cloud upload,
 video WebSocket, Vision Worker, YOLO, detection, IA events, motion
 detection, ROI, Hybrid, Full Edge, GPU/NPU, long-term video storage —
 Hitos I/J/K. `video probe` CLI subcommand (justified above). H.265
 depacketization/decode (interface designed for it, not implemented).
+`linux/amd64` build/verification of the new LGPL-only ffmpeg stage
+(configuration identical to the verified `linux/arm64` build, not run to
+completion locally — see above).
 
 ## NEXT
 
 Hito H (this branch) is implemented, tested (unit + `-race`), validated
-against the real TC70 twice (before and after an independent PR review's
-fixes), and Docker-image-smoke-tested — see its section above for exact
-per-item status and the real bugs found/fixed along the way (ONVIF codec
-mismap, decode queue depth not wired, no stall watchdog, unbounded
-pendingTimes/stderr buffers, frames_received metric semantics, cumulative
-metrics across decoder restart). PR is open on `feature/video-pipeline`,
-**not merged**.
-Pending before merge: **only** the licensing decision on the ffmpeg image
-(GPL bundled vs. build LGPL-only from source) — a business/licensing call,
-not a technical blocker. No other technical blockers remain.
+against the real TC70 three times across fix iterations, and
+Docker-image-smoke-tested twice (once with the original GPL ffmpeg, once
+after migrating to the LGPL-only from-source build) — see its section
+above for exact per-item status and every real bug found/fixed along the
+way (ONVIF codec mismap, decode queue depth not wired, no stall watchdog,
+unbounded pendingTimes/stderr buffers, frames_received metric semantics,
+cumulative metrics across decoder restart, a shutdown deadlock, and the
+GPL→LGPL ffmpeg migration). PR is open on `feature/video-pipeline`, **not
+merged**.
+Pending before merge: `linux/amd64` build/verification of the LGPL-only
+ffmpeg stage on real hardware or CI (the `linux/arm64` build is fully
+verified; the Dockerfile recipe is identical for both architectures, only
+untested on amd64 specifically). No other technical blockers, and no
+remaining licensing/business decision — that question is resolved.
 Next is Hito I. Do NOT start Hito I until authorized.
 
 ## HOW ANOTHER AI SHOULD CONTINUE
