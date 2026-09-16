@@ -261,6 +261,52 @@ func TestPipeline_MetricsCumulativeAcrossDecoderRestart(t *testing.T) {
 	p.Wait()
 }
 
+// TestPipeline_ShutdownDoesNotDeadlockOnBlockedPush is the regression test
+// for the shutdown-ordering deadlock found in review: if feedLoop is
+// blocked inside dec.Push() (as it would be for a real FFmpegDecoder whose
+// stdin Write blocks because ffmpeg stopped consuming input), shutdown
+// must still complete — closing the decoder is what unblocks Push, and
+// that must happen before waiting on the goroutine stuck inside it, not
+// after. With the old ordering (wait, then close) this test would hang
+// until its own timeout and fail; with the fix it returns quickly.
+func TestPipeline_ShutdownDoesNotDeadlockOnBlockedPush(t *testing.T) {
+	cfg := Config{RingBufferSize: 5, QueueDepth: 16}
+	desc := rtsp.StreamDescriptor{CandidateKey: "cam1", Codec: "H264", Width: 4, Height: 4}
+
+	router := NewRouter([]Sink{NewDebugSink()}, 8, nil)
+	defer router.Stop()
+
+	p := newCameraPipeline("cam1", desc, cfg, router, nil)
+	bd := newBlockingPushDecoder()
+	p.decoderFactory = func() (VideoDecoder, error) { return bd, nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p.Start(ctx)
+
+	// Feed one packet so feedLoop pulls it and calls dec.Push(), which
+	// blocks (by construction) until Close() releases it.
+	pkt := buildRTPPacket(true, 96, 1, 1000, 1, nil, 0, 0, []byte{0x65, 0x01})
+	p.OnPacket(pkt, time.Now())
+
+	// Give feedLoop a moment to actually reach the blocking call.
+	time.Sleep(100 * time.Millisecond)
+
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		p.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Shutdown completed even though Push() was blocked — correct.
+	case <-time.After(2 * time.Second):
+		t.Fatal("pipeline shutdown deadlocked: feedLoop was blocked in Push() and the decoder was never closed to release it")
+	}
+}
+
 func TestPipeline_RestartsDecoderAfterCrash(t *testing.T) {
 	cfg := Config{RingBufferSize: 5, QueueDepth: 16}
 	desc := rtsp.StreamDescriptor{CandidateKey: "cam1", Codec: "H264", Width: 4, Height: 4}

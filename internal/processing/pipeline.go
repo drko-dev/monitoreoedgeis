@@ -106,7 +106,21 @@ func newCameraPipeline(candidateKey string, desc rtsp.StreamDescriptor, cfg Conf
 func (p *cameraPipeline) Start(ctx context.Context) { go p.run(ctx) }
 
 // Wait blocks until the pipeline has fully stopped (all goroutines exited).
+// Unbounded — callers on a shutdown path that must respect a deadline
+// should use WaitContext instead.
 func (p *cameraPipeline) Wait() { <-p.doneCh }
+
+// WaitContext blocks until the pipeline has fully stopped or ctx is done,
+// whichever comes first, returning ctx.Err() in the latter case. Used by
+// Manager.Stop() so a stuck pipeline can never make shutdown unbounded.
+func (p *cameraPipeline) WaitContext(ctx context.Context) error {
+	select {
+	case <-p.doneCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 // OnPacket enqueues one video RTP payload for depacketization. Never
 // blocks: a full queue drops the packet and counts it. This counts raw RTP
@@ -169,16 +183,25 @@ func (p *cameraPipeline) run(ctx context.Context) {
 
 		select {
 		case <-ctx.Done():
+			// dec.Close() MUST run before subWG.Wait(): feedLoop can be
+			// blocked inside dec.Push()'s synchronous stdin Write if
+			// ffmpeg is alive but has stopped consuming input, and
+			// cancelling subCtx cannot interrupt a syscall already in
+			// flight. Closing dec first closes that pipe (os.File.Close
+			// on Unix unblocks a concurrent blocked Write/Read on the
+			// same fd), which is what actually lets feedLoop's Push
+			// return and the goroutine exit — waiting first would risk
+			// hanging forever. See TestPipeline_ShutdownDoesNotDeadlockOnBlockedPush.
 			subCancel()
-			subWG.Wait()
 			_ = dec.Close()
+			subWG.Wait()
 			p.foldDecoderCounts(dec)
 			p.wg.Wait()
 			return
 		case <-dec.Done():
 			subCancel()
-			subWG.Wait()
 			_ = dec.Close()
+			subWG.Wait()
 			p.foldDecoderCounts(dec)
 			p.decoderRestarts.Add(1)
 			p.setState("error")

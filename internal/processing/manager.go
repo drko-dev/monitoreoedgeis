@@ -113,7 +113,13 @@ func (m *Manager) Stop(ctx context.Context) error {
 	m.mu.Unlock()
 
 	for _, p := range pipelines {
-		p.Wait()
+		// Bounded by ctx: a stuck pipeline (e.g. a decoder subprocess
+		// refusing to die) must never make the whole agent's shutdown
+		// hang indefinitely.
+		if err := p.WaitContext(ctx); err != nil {
+			m.logger.Warn("video pipeline did not stop within the shutdown deadline",
+				"candidate_key", p.candidateKey, "error", err)
+		}
 	}
 	if router != nil {
 		router.Stop()

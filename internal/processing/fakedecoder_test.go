@@ -79,3 +79,45 @@ func (f *fakeDecoder) crash() {
 	f.failPush.Store(true)
 	f.closeOnce.Do(func() { close(f.done) })
 }
+
+// blockingPushDecoder simulates a decoder whose Push() is stuck in
+// synchronous I/O — the same failure shape as FFmpegDecoder.Push()'s stdin
+// Write blocking because ffmpeg is alive but has stopped consuming input.
+// Push only returns once Close() is called, mirroring how closing the
+// underlying pipe is what actually unblocks a real blocked Write. This is
+// the regression fixture for the shutdown-ordering deadlock: cancelling a
+// context cannot interrupt a syscall already in flight, so shutdown must
+// close the decoder before waiting on goroutines that might be blocked
+// inside it.
+type blockingPushDecoder struct {
+	frames    chan DecodedFrame
+	done      chan struct{}
+	release   chan struct{}
+	closeOnce sync.Once
+}
+
+func newBlockingPushDecoder() *blockingPushDecoder {
+	return &blockingPushDecoder{
+		frames:  make(chan DecodedFrame),
+		done:    make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (d *blockingPushDecoder) Push(au AccessUnit) error {
+	<-d.release
+	return errDecoderClosed
+}
+
+func (d *blockingPushDecoder) Frames() <-chan DecodedFrame { return d.frames }
+func (d *blockingPushDecoder) Done() <-chan struct{}       { return d.done }
+func (d *blockingPushDecoder) DecodedCount() int64         { return 0 }
+func (d *blockingPushDecoder) DroppedCount() int64         { return 0 }
+
+func (d *blockingPushDecoder) Close() error {
+	d.closeOnce.Do(func() {
+		close(d.release)
+		close(d.done)
+	})
+	return nil
+}
