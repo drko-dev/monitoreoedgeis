@@ -165,6 +165,50 @@ func TestFFmpegDecoder_DonesOnProcessDeath(t *testing.T) {
 	}
 }
 
+func TestFFmpegDecoder_QueueDepthConfigured(t *testing.T) {
+	requireFFmpeg(t)
+	dec, err := NewFFmpegDecoder(FFmpegDecoderConfig{QueueDepth: 7}, 32, 32, nil, nil)
+	if err != nil {
+		t.Fatalf("NewFFmpegDecoder: %v", err)
+	}
+	defer dec.Close()
+	if cap(dec.frames) != 7 {
+		t.Fatalf("frames channel capacity = %d, want the configured 7 (GEOCAM_VIDEO_DECODE_QUEUE_DEPTH must actually control this)", cap(dec.frames))
+	}
+}
+
+func TestFFmpegDecoder_QueueDepthDefaultsWhenUnset(t *testing.T) {
+	requireFFmpeg(t)
+	dec, err := NewFFmpegDecoder(FFmpegDecoderConfig{}, 32, 32, nil, nil)
+	if err != nil {
+		t.Fatalf("NewFFmpegDecoder: %v", err)
+	}
+	defer dec.Close()
+	if cap(dec.frames) != 4 {
+		t.Fatalf("frames channel capacity = %d, want default 4", cap(dec.frames))
+	}
+}
+
+func TestFFmpegDecoder_PendingTimesBounded(t *testing.T) {
+	requireFFmpeg(t)
+	dec, err := NewFFmpegDecoder(FFmpegDecoderConfig{}, 32, 32, nil, nil)
+	if err != nil {
+		t.Fatalf("NewFFmpegDecoder: %v", err)
+	}
+	defer dec.Close()
+
+	for i := 0; i < maxPendingTimes*3; i++ {
+		_ = dec.Push(AccessUnit{NALUs: [][]byte{{0x01, 0xAA}}, ReceivedAt: time.Now()})
+	}
+
+	dec.mu.Lock()
+	n := len(dec.pendingTimes)
+	dec.mu.Unlock()
+	if n > maxPendingTimes {
+		t.Fatalf("pendingTimes len = %d, want <= %d (must never grow unbounded)", n, maxPendingTimes)
+	}
+}
+
 func TestFFmpegDecoder_RejectsInvalidDimensions(t *testing.T) {
 	requireFFmpeg(t)
 

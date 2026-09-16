@@ -1,7 +1,6 @@
 package processing
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,10 +16,65 @@ type FFmpegDecoderConfig struct {
 	// BinaryPath is the ffmpeg executable, resolved via exec.LookPath.
 	// Empty defaults to "ffmpeg" (PATH lookup).
 	BinaryPath string
+	// QueueDepth bounds the raw decoded-frame output channel
+	// (GEOCAM_VIDEO_DECODE_QUEUE_DEPTH) — deliberately small, since each
+	// yuv420p frame is large. <=0 defaults to 4.
+	QueueDepth int
 }
 
 // annexBPrefix is the Annex-B NAL unit start code.
 var annexBPrefix = []byte{0, 0, 0, 1}
+
+// maxPendingTimes bounds FFmpegDecoder.pendingTimes: if Push keeps being
+// called while the decoder produces no output (e.g. it's stalled or being
+// force-fed faster than it can decode), the FIFO used for the best-effort
+// SourceReceivedAt correlation must never grow unbounded. On overflow the
+// oldest entry is dropped — losing correlation accuracy for it, which is
+// already a documented approximation, not a memory-safety concern.
+const maxPendingTimes = 64
+
+// stderrTailMax bounds how much of ffmpeg's stderr is retained for
+// diagnostics — the last stderrTailMax bytes only, never the full process
+// lifetime output. ffmpeg's stdout (the decoded video) is a completely
+// separate pipe, never captured here, and no RTSP URL or credential is ever
+// passed to this process (only pipe:0/pipe:1), so nothing secret reaches
+// this buffer.
+const stderrTailMax = 4 * 1024
+
+// tailBuffer is an io.Writer that keeps only the most recent max bytes
+// written to it.
+type tailBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+	max int
+}
+
+func newTailBuffer(max int) *tailBuffer { return &tailBuffer{max: max} }
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > t.max {
+		t.buf = t.buf[len(t.buf)-t.max:]
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return string(t.buf)
+}
+
+// decodeQueueDepth normalizes a configured queue depth, defaulting to 4
+// when unset/invalid.
+func decodeQueueDepth(configured int) int {
+	if configured <= 0 {
+		return 4
+	}
+	return configured
+}
 
 // FFmpegDecoder decodes one camera's H.264 access units by running ffmpeg as
 // an OS subprocess (os/exec, no cgo): Annex-B access units are written to
@@ -99,8 +153,8 @@ func NewFFmpegDecoder(cfg FFmpegDecoderConfig, width, height int, spropParameter
 	if err != nil {
 		return nil, fmt.Errorf("processing: ffmpeg stdout pipe: %w", err)
 	}
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
+	stderrBuf := newTailBuffer(stderrTailMax)
+	cmd.Stderr = stderrBuf
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("processing: ffmpeg start: %w", err)
@@ -109,7 +163,7 @@ func NewFFmpegDecoder(cfg FFmpegDecoderConfig, width, height int, spropParameter
 	d := &FFmpegDecoder{
 		cmd:    cmd,
 		stdin:  stdin,
-		frames: make(chan DecodedFrame, 4), // deliberately small — see doc comment
+		frames: make(chan DecodedFrame, decodeQueueDepth(cfg.QueueDepth)), // deliberately small — see doc comment
 		done:   make(chan struct{}),
 		logger: logger,
 		width:  width,
@@ -127,7 +181,7 @@ func NewFFmpegDecoder(cfg FFmpegDecoderConfig, width, height int, spropParameter
 	}
 
 	go d.readLoop(stdout)
-	go d.waitLoop(&stderrBuf)
+	go d.waitLoop(stderrBuf)
 
 	return d, nil
 }
@@ -145,6 +199,9 @@ func (d *FFmpegDecoder) Push(au AccessUnit) error {
 	if d.closed {
 		d.mu.Unlock()
 		return errDecoderClosed
+	}
+	if len(d.pendingTimes) >= maxPendingTimes {
+		d.pendingTimes = d.pendingTimes[1:] // drop oldest, bounded
 	}
 	d.pendingTimes = append(d.pendingTimes, au.ReceivedAt)
 	d.mu.Unlock()
@@ -213,7 +270,7 @@ func (d *FFmpegDecoder) readLoop(stdout io.Reader) {
 	}
 }
 
-func (d *FFmpegDecoder) waitLoop(stderrBuf *bytes.Buffer) {
+func (d *FFmpegDecoder) waitLoop(stderrBuf *tailBuffer) {
 	err := d.cmd.Wait()
 
 	d.mu.Lock()

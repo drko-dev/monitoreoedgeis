@@ -382,9 +382,13 @@ verified via `docker buildx imagetools inspect` to cover both
 container-layer addition, not a Go dependency.
 
 **License — reported, not hidden.** This image's ffmpeg is built with
-`libx264`/`libx265` enabled (confirmed against
-`github.com/wader/static-ffmpeg`'s own Dockerfile, which always builds both,
-not behind an opt-in flag the way it gates `libfdk-aac`/`--enable-nonfree`).
+`libx264`/`libx265` enabled — confirmed two ways: against
+`github.com/wader/static-ffmpeg`'s own Dockerfile (which always builds both,
+not behind an opt-in flag the way it gates `libfdk-aac`/`--enable-nonfree`),
+and directly from the shipped binary itself (`nerdctl run --entrypoint
+/usr/local/bin/ffmpeg geocam-edge:dev -version` during the pre-merge image
+smoke test reports `--enable-gpl --enable-libx264 --enable-libx265` in its
+own configure flags — not just inferred from upstream's source).
 Enabling those requires ffmpeg's `--enable-gpl` — **this is a GPL-licensed
 binary, not an LGPL-only one**, even though this project only uses it for
 H.264 *decode* (ffmpeg's native decoder, not the GPL-licensed encoders).

@@ -44,8 +44,18 @@ type cameraPipeline struct {
 	mu                sync.Mutex
 	state             string
 	decoder           VideoDecoder
-	lastFrameAt       *time.Time
+	lastFrameAt       *time.Time // reset to nil at the start of each decoder generation
 	lastDecodeLatency time.Duration
+	lastAUPushedAt    time.Time // NOT reset per generation: reflects upstream (camera) flow
+	decoderStartedAt  time.Time // reset at the start of each decoder generation
+
+	// decodedBase/droppedBase accumulate the final counts of every PRIOR
+	// decoder instance, so FramesDecoded/FramesDropped in Status() are
+	// cumulative across restarts and never reset to zero (and therefore
+	// DecodedFPS/OutputFPS, a delta between two Status() calls, never goes
+	// negative right after a restart). See foldDecoderCounts.
+	decodedBase int64
+	droppedBase int64
 
 	// statusMu-guarded rate-computation state: the delta between two
 	// Status() calls, not a true instantaneous rate.
@@ -54,12 +64,13 @@ type cameraPipeline struct {
 	lastDecodedCount int64
 	lastSampledCount int64
 
-	framesReceived   atomic.Int64
-	framesSampled    atomic.Int64
-	framesDropped    atomic.Int64 // packet-queue + AU-queue drops
-	decoderRestarts  atomic.Int64
-	depackIncomplete atomic.Int64
-	depackErrors     atomic.Int64
+	rtpPacketsReceived atomic.Int64 // raw RTP packets (OnPacket calls)
+	framesReceived     atomic.Int64 // completed access units (depacketizer output)
+	framesSampled      atomic.Int64
+	framesDropped      atomic.Int64 // packet-queue + AU-queue drops
+	decoderRestarts    atomic.Int64
+	depackIncomplete   atomic.Int64
+	depackErrors       atomic.Int64
 }
 
 func newCameraPipeline(candidateKey string, desc rtsp.StreamDescriptor, cfg Config, router *Router, logger *slog.Logger) *cameraPipeline {
@@ -82,7 +93,7 @@ func newCameraPipeline(candidateKey string, desc rtsp.StreamDescriptor, cfg Conf
 	}
 	p.decoderFactory = func() (VideoDecoder, error) {
 		return NewFFmpegDecoder(
-			FFmpegDecoderConfig{BinaryPath: cfg.FFmpegPath},
+			FFmpegDecoderConfig{BinaryPath: cfg.FFmpegPath, QueueDepth: cfg.DecodeQueueDepth},
 			desc.Width, desc.Height,
 			desc.SpropParameterSets,
 			logger,
@@ -98,9 +109,11 @@ func (p *cameraPipeline) Start(ctx context.Context) { go p.run(ctx) }
 func (p *cameraPipeline) Wait() { <-p.doneCh }
 
 // OnPacket enqueues one video RTP payload for depacketization. Never
-// blocks: a full queue drops the packet and counts it.
+// blocks: a full queue drops the packet and counts it. This counts raw RTP
+// packets (RTPPacketsReceived) — FramesReceived is incremented separately,
+// in depacketizeLoop, only for completed access units.
 func (p *cameraPipeline) OnPacket(payload []byte, recvAt time.Time) {
-	p.framesReceived.Add(1)
+	p.rtpPacketsReceived.Add(1)
 	select {
 	case p.packetCh <- packetItem{payload: payload, recvAt: recvAt}:
 	default:
@@ -140,26 +153,33 @@ func (p *cameraPipeline) run(ctx context.Context) {
 			continue
 		}
 		backoff = 500 * time.Millisecond
-		p.setDecoder(dec)
+		p.mu.Lock()
+		p.decoder = dec
+		p.decoderStartedAt = time.Now()
+		p.lastFrameAt = nil
+		p.mu.Unlock()
 		p.setState("running")
 
 		subCtx, subCancel := context.WithCancel(ctx)
 		var subWG sync.WaitGroup
-		subWG.Add(2)
+		subWG.Add(3)
 		go func() { defer subWG.Done(); p.feedLoop(subCtx, dec) }()
 		go func() { defer subWG.Done(); p.readLoop(subCtx, dec) }()
+		go func() { defer subWG.Done(); p.watchdogLoop(subCtx, dec) }()
 
 		select {
 		case <-ctx.Done():
 			subCancel()
 			subWG.Wait()
 			_ = dec.Close()
+			p.foldDecoderCounts(dec)
 			p.wg.Wait()
 			return
 		case <-dec.Done():
 			subCancel()
 			subWG.Wait()
 			_ = dec.Close()
+			p.foldDecoderCounts(dec)
 			p.decoderRestarts.Add(1)
 			p.setState("error")
 			p.logger.Warn("video decoder exited, restarting", "candidate_key", p.candidateKey)
@@ -171,6 +191,22 @@ func (p *cameraPipeline) run(ctx context.Context) {
 		}
 		backoff = min(backoff*2, maxBackoff)
 	}
+}
+
+// foldDecoderCounts accumulates dec's final decoded/dropped counts into the
+// pipeline's cumulative base before it is discarded, so Status() never
+// reports a count that drops back toward zero across a decoder restart.
+func (p *cameraPipeline) foldDecoderCounts(dec VideoDecoder) {
+	if dec == nil {
+		return
+	}
+	p.mu.Lock()
+	p.decodedBase += dec.DecodedCount()
+	p.droppedBase += dec.DroppedCount()
+	if p.decoder == dec {
+		p.decoder = nil
+	}
+	p.mu.Unlock()
 }
 
 // depacketizeLoop runs for the pipeline's entire lifetime, independent of
@@ -196,6 +232,7 @@ func (p *cameraPipeline) depacketizeLoop(ctx context.Context) {
 			if au == nil {
 				continue
 			}
+			p.framesReceived.Add(1) // one completed access unit
 			select {
 			case p.auCh <- *au:
 			default:
@@ -214,6 +251,9 @@ func (p *cameraPipeline) feedLoop(ctx context.Context, dec VideoDecoder) {
 			if err := dec.Push(au); err != nil {
 				return // decoder is dead; the outer loop detects it via Done()
 			}
+			p.mu.Lock()
+			p.lastAUPushedAt = time.Now()
+			p.mu.Unlock()
 		}
 	}
 }
@@ -263,6 +303,60 @@ func (p *cameraPipeline) readLoop(ctx context.Context, dec VideoDecoder) {
 	}
 }
 
+// watchdogLoop detects a stalled decoder — access units are still arriving
+// from the camera (lastAUPushedAt is recent) but no frame has come out for
+// cfg.DecodeTimeout — and distinguishes that from the camera simply not
+// sending RTP right now (in which case it does nothing: restarting a
+// decoder starved of input would accomplish nothing). On a detected stall
+// it sets state "stalled" and closes dec; the outer run() loop's existing
+// <-dec.Done() branch does the actual restart, backoff, and metric
+// increment — this only ever triggers that one existing path, it never
+// duplicates it.
+func (p *cameraPipeline) watchdogLoop(ctx context.Context, dec VideoDecoder) {
+	if p.cfg.DecodeTimeout <= 0 {
+		return
+	}
+	interval := p.cfg.DecodeTimeout / 2
+	if interval <= 0 {
+		interval = p.cfg.DecodeTimeout
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.mu.Lock()
+			lastAU := p.lastAUPushedAt
+			lastFrame := p.lastFrameAt
+			startedAt := p.decoderStartedAt
+			p.mu.Unlock()
+
+			if lastAU.IsZero() {
+				continue // this decoder generation has never received an AU yet
+			}
+			now := time.Now()
+			if now.Sub(lastAU) >= p.cfg.DecodeTimeout {
+				continue // upstream isn't sending — not a decoder stall
+			}
+
+			baseline := startedAt
+			if lastFrame != nil && lastFrame.After(baseline) {
+				baseline = *lastFrame
+			}
+			if now.Sub(baseline) >= p.cfg.DecodeTimeout {
+				p.logger.Warn("video decoder stalled: access units flowing but no frames produced",
+					"candidate_key", p.candidateKey, "since", now.Sub(baseline))
+				p.setState("stalled")
+				_ = dec.Close()
+				return
+			}
+		}
+	}
+}
+
 func (p *cameraPipeline) sleepBackoff(ctx context.Context, d time.Duration) bool {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
@@ -280,27 +374,25 @@ func (p *cameraPipeline) setState(s string) {
 	p.mu.Unlock()
 }
 
-func (p *cameraPipeline) setDecoder(d VideoDecoder) {
-	p.mu.Lock()
-	p.decoder = d
-	p.mu.Unlock()
-}
-
 // Status returns a point-in-time snapshot for /status. It never includes
 // frame bytes or per-frame history. DecodedFPS/OutputFPS are the delta
-// between this call and the previous one, not a true instantaneous rate.
+// between this call and the previous one, not a true instantaneous rate —
+// and, because FramesDecoded is cumulative across decoder restarts (see
+// foldDecoderCounts), that delta never goes negative right after one.
 func (p *cameraPipeline) Status() PipelineStatus {
 	p.mu.Lock()
 	state := p.state
 	dec := p.decoder
+	decodedBase := p.decodedBase
+	droppedBase := p.droppedBase
 	lastFrameAt := p.lastFrameAt
 	latencyMs := float64(p.lastDecodeLatency) / float64(time.Millisecond)
 	p.mu.Unlock()
 
-	var decoded, decoderDropped int64
+	decoded, decoderDropped := decodedBase, droppedBase
 	if dec != nil {
-		decoded = dec.DecodedCount()
-		decoderDropped = dec.DroppedCount()
+		decoded += dec.DecodedCount()
+		decoderDropped += dec.DroppedCount()
 	}
 	sampled := p.framesSampled.Load()
 
@@ -321,15 +413,16 @@ func (p *cameraPipeline) Status() PipelineStatus {
 	bufUsage, _ := p.ring.Usage()
 
 	return PipelineStatus{
-		CandidateKey:   p.candidateKey,
-		State:          state,
-		Codec:          p.descriptor.Codec,
-		InputFPS:       p.descriptor.FPS,
-		DecodedFPS:     decodedFPS,
-		OutputFPS:      outputFPS,
-		FramesReceived: p.framesReceived.Load(),
-		FramesDecoded:  decoded,
-		FramesSampled:  sampled,
+		CandidateKey:       p.candidateKey,
+		State:              state,
+		Codec:              p.descriptor.Codec,
+		InputFPS:           p.descriptor.FPS,
+		DecodedFPS:         decodedFPS,
+		OutputFPS:          outputFPS,
+		RTPPacketsReceived: p.rtpPacketsReceived.Load(),
+		FramesReceived:     p.framesReceived.Load(),
+		FramesDecoded:      decoded,
+		FramesSampled:      sampled,
 		FramesDropped: p.framesDropped.Load() + decoderDropped +
 			p.depackIncomplete.Load() + p.depackErrors.Load(),
 		QueueDepth:      len(p.packetCh) + len(p.auCh),

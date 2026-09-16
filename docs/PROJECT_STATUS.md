@@ -478,10 +478,40 @@ FU-A reassembly needs strict packet order. Real TC70 run: 0 dropped frames
 at the configured queue depths.
 
 **H10 — CPU/RAM bounds + metrics: DONE.** `GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES`
-caps concurrent ffmpeg processes; the raw-decoded-frame queue
-(`GEOCAM_VIDEO_DECODE_QUEUE_DEPTH`) is deliberately small and separate from
-the general queue depth. `/status` exposes a small `video_pipeline` summary
-(see exact JSON contract below) — no frame bytes, no per-frame history.
+caps concurrent ffmpeg processes. `GEOCAM_VIDEO_DECODE_QUEUE_DEPTH` now
+actually controls the raw-decoded-frame channel's capacity end to end
+(`FFmpegDecoderConfig.QueueDepth` → `make(chan DecodedFrame, ...)` —
+previously hardcoded to 4, fixed after an independent PR review caught it;
+`decoder_test.go`'s `TestFFmpegDecoder_QueueDepthConfigured` asserts it).
+`GEOCAM_VIDEO_DECODE_TIMEOUT` now drives a real stall watchdog
+(`cameraPipeline.watchdogLoop`): if access units keep arriving from the
+camera but the decoder produces no frame for that long, state → `stalled`,
+the decoder subprocess is closed (the existing crash-handling path in
+`run()` does the actual restart/backoff/metric-increment — the watchdog
+never duplicates that logic, it only triggers it), and it recovers to
+`running` on the next successful decode. A camera that simply isn't sending
+RTP is explicitly NOT treated as a stall (`TestPipeline_NoWatchdogRestartWhenUpstreamIdle`).
+`FFmpegDecoder.pendingTimes` (the FIFO used for the best-effort
+`SourceReceivedAt` correlation) is now bounded (`maxPendingTimes = 64`,
+drop-oldest on overflow) instead of growing unboundedly if Push keeps being
+called without frames coming out. ffmpeg's stderr is captured in a bounded
+4KB tail buffer (`tailBuffer`) instead of an unbounded `bytes.Buffer` kept
+for the process's whole lifetime — stdout/video is a separate pipe, never
+captured there, and no RTSP URL or credential is ever passed to ffmpeg, so
+nothing secret reaches it. `/status` exposes a small `video_pipeline`
+summary (see exact JSON contract below) — no frame bytes, no per-frame
+history.
+
+**Metrics semantics (corrected after review):** `frames_received` now means
+completed access units produced by the depacketizer, not raw RTP packets —
+raw packets are `rtp_packets_received`, a separate field, rather than
+silently redefining what "frames" meant. `frames_decoded`/`frames_dropped`
+are cumulative across decoder subprocess restarts
+(`cameraPipeline.foldDecoderCounts` folds an outgoing decoder's final
+counts into a running base before a new one starts), so they never drop
+back toward zero and `decoded_fps`/`output_fps` (a delta between two
+`/status` reads) never goes negative right after a restart —
+`TestPipeline_MetricsCumulativeAcrossDecoderRestart` is the regression test.
 
 **H11 — Independent of YOLO: DONE.** `pipeline_test.go`'s
 `TestPipeline_EndToEndWithFakeDecoder_H11` is the acceptance test: full
@@ -500,12 +530,18 @@ checks. See `docs/ARCHITECTURE.md`.
   "cameras": [{
     "candidate_key": "...", "state": "running", "codec": "H264",
     "input_fps": 15, "decoded_fps": 0, "output_fps": 0,
-    "frames_received": 129, "frames_decoded": 104, "frames_sampled": 9,
+    "rtp_packets_received": 640, "frames_received": 129,
+    "frames_decoded": 104, "frames_sampled": 9,
     "frames_dropped": 0, "queue_depth": 0, "buffer_usage": 9,
     "decode_latency_ms": 1397.8
   }]
 }
 ```
+
+`rtp_packets_received` is raw RTP packets; `frames_received` is completed
+access units produced by the depacketizer (an access unit is typically
+several RTP packets, e.g. one FU-A fragmentation run) — see the metrics
+semantics note above.
 
 **Tests:** `internal/processing` — `rtp_test.go`, `depacketizer_test.go`,
 `decoder_test.go` (ffmpeg-gated), `sampler_test.go`, `resizer_test.go`,
@@ -538,28 +574,43 @@ flush a decoded frame until either the next frame's data arrives or stdin
 closes — an inherent ~1-frame latency for a live H.264-without-B-frames
 stream, not a bug in this pipeline).
 
+**Docker image smoke test — DONE (PASS).** Started this dev machine's
+Rancher Desktop/containerd runtime with explicit authorization, then
+`make image` (nerdctl, the repo's real build path, not a substitute).
+Verified: image build PASS; `/usr/local/bin/geocam-edge` present and runs
+(`version` subcommand: `arm64`, correct commit); `/usr/local/bin/ffmpeg`
+present and runs (`-version`: **directly confirms the GPL finding from the
+running binary itself** — `--enable-gpl --enable-libx264 --enable-libx265`
+in its own reported configure flags, not just inferred from reading
+upstream's Dockerfile source as before); image architecture `arm64/linux`
+(matches host); container starts and stays up running as `nonroot:nonroot`
+(`Config.User` inspected + a live run confirmed no crash — the only error
+logged was an expected `permission denied` writing `/var/lib/geocam-edge`,
+because an ad-hoc `nerdctl run` mounts no volume, unlike the real Helm
+deployment's PVC; unrelated to Hito H); no missing libs/runtime (both
+static binaries ran inside distroless with no dynamic-linker errors).
+**Technical: PASS. Licensing/distribution decision: still PENDING — not
+resolved by this smoke test, see the GPL note above.**
+
 **Not done / deliberately out of scope (per ticket):** Cloud upload,
 video WebSocket, Vision Worker, YOLO, detection, IA events, motion
 detection, ROI, Hybrid, Full Edge, GPU/NPU, long-term video storage —
 Hitos I/J/K. `video probe` CLI subcommand (justified above). H.265
 depacketization/decode (interface designed for it, not implemented).
-Docker image smoke build/run (`make image` + `ffmpeg -version` inside the
-container) — **not done**: this dev machine's Rancher Desktop/containerd
-VM was not running and starting it was left for explicit confirmation
-rather than done unprompted; the Dockerfile change itself and its
-multi-arch digest were verified via `docker manifest inspect`/
-`buildx imagetools inspect` without needing the daemon running.
 
 ## NEXT
 
-Hito H (this branch) is implemented, tested (unit + `-race`), and validated
-against the real TC70 — see its section above for exact per-item status and
-the two real bugs found/fixed along the way (ONVIF codec mismap, ffmpeg
-GPL licensing). PR is open on `feature/video-pipeline`, **not merged**.
-Pending before merge: the licensing decision on the ffmpeg image (GPL
-bundled vs. build LGPL-only), and a Docker image smoke build (blocked on
-this dev machine's container runtime not running — do not start it without
-asking first, it consumes real machine resources).
+Hito H (this branch) is implemented, tested (unit + `-race`), validated
+against the real TC70 twice (before and after an independent PR review's
+fixes), and Docker-image-smoke-tested — see its section above for exact
+per-item status and the real bugs found/fixed along the way (ONVIF codec
+mismap, decode queue depth not wired, no stall watchdog, unbounded
+pendingTimes/stderr buffers, frames_received metric semantics, cumulative
+metrics across decoder restart). PR is open on `feature/video-pipeline`,
+**not merged**.
+Pending before merge: **only** the licensing decision on the ffmpeg image
+(GPL bundled vs. build LGPL-only from source) — a business/licensing call,
+not a technical blocker. No other technical blockers remain.
 Next is Hito I. Do NOT start Hito I until authorized.
 
 ## HOW ANOTHER AI SHOULD CONTINUE

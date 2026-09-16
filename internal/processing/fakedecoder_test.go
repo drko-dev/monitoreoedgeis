@@ -24,6 +24,10 @@ type fakeDecoder struct {
 	// dead decoder) without closing done itself — the caller is expected
 	// to trigger Done() separately if needed.
 	failPush atomic.Bool
+	// stalled, if set, makes Push accept access units (no error, counted)
+	// without ever emitting a frame — simulating a decoder that is alive
+	// and receiving input but stuck, for the watchdog test.
+	stalled atomic.Bool
 }
 
 func newFakeDecoder(width, height int) *fakeDecoder {
@@ -38,6 +42,9 @@ func newFakeDecoder(width, height int) *fakeDecoder {
 func (f *fakeDecoder) Push(au AccessUnit) error {
 	if f.failPush.Load() {
 		return errDecoderClosed
+	}
+	if f.stalled.Load() {
+		return nil // accepted, but deliberately never produces a frame
 	}
 	f.decoded.Add(1)
 	frame := DecodedFrame{

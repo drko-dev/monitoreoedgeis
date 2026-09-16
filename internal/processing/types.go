@@ -69,21 +69,33 @@ type Frame struct {
 
 // PipelineStatus is the small, per-camera summary published to /status. It
 // never carries frame bytes or any per-frame history.
+//
+// FramesReceived counts completed access units produced by the depacketizer
+// — not raw RTP packets (an access unit is typically several packets, e.g.
+// one FU-A run). RTPPacketsReceived is the raw-packet counter, kept
+// separate rather than silently redefining "frames" to mean "packets".
+//
+// FramesDecoded/FramesDropped are cumulative across decoder subprocess
+// restarts (they fold in the outgoing decoder's final counts before a new
+// one starts, see cameraPipeline.foldDecoderCounts) — they never reset to
+// zero mid-pipeline-lifetime, so DecodedFPS/OutputFPS (computed as a delta
+// between two Status() calls) never goes negative across a restart.
 type PipelineStatus struct {
-	CandidateKey    string     `json:"candidate_key"`
-	State           string     `json:"state"` // starting|running|stalled|error|skipped_limit
-	Codec           string     `json:"codec"`
-	InputFPS        float64    `json:"input_fps"`
-	DecodedFPS      float64    `json:"decoded_fps"`
-	OutputFPS       float64    `json:"output_fps"`
-	FramesReceived  int64      `json:"frames_received"`
-	FramesDecoded   int64      `json:"frames_decoded"`
-	FramesSampled   int64      `json:"frames_sampled"`
-	FramesDropped   int64      `json:"frames_dropped"`
-	QueueDepth      int        `json:"queue_depth"`
-	BufferUsage     int        `json:"buffer_usage"`
-	DecodeLatencyMs float64    `json:"decode_latency_ms"`
-	LastFrameAt     *time.Time `json:"last_frame_at,omitempty"`
+	CandidateKey       string     `json:"candidate_key"`
+	State              string     `json:"state"` // starting|running|stalled|error|skipped_limit
+	Codec              string     `json:"codec"`
+	InputFPS           float64    `json:"input_fps"`
+	DecodedFPS         float64    `json:"decoded_fps"`
+	OutputFPS          float64    `json:"output_fps"`
+	RTPPacketsReceived int64      `json:"rtp_packets_received"`
+	FramesReceived     int64      `json:"frames_received"`
+	FramesDecoded      int64      `json:"frames_decoded"`
+	FramesSampled      int64      `json:"frames_sampled"`
+	FramesDropped      int64      `json:"frames_dropped"`
+	QueueDepth         int        `json:"queue_depth"`
+	BufferUsage        int        `json:"buffer_usage"`
+	DecodeLatencyMs    float64    `json:"decode_latency_ms"`
+	LastFrameAt        *time.Time `json:"last_frame_at,omitempty"`
 }
 
 // VideoPipelineSummary is the small block published to /status under
