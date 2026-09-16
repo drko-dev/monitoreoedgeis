@@ -435,19 +435,27 @@ Smaller because dozens of unused codecs/formats/filters (including
 libx264/libx265 themselves) are compiled out entirely at build time, not
 just left unlinked in a general-purpose build.
 
-**Architecture coverage note:** built and fully verified on `linux/arm64`
-(this repo's native dev/CI-adjacent architecture) — build PASS, decode
-PASS against a synthetic H.264 clip inside the actual container, `-version`
-confirms no GPL/nonfree/libx264/libx265, nonroot startup confirmed. The
-`linux/amd64` build was **not completed** as part of this change: it uses
-the identical `Dockerfile` stage (no arch-specific flags — `./configure`
-auto-detects the target triple under `docker buildx build
---platform linux/amd64,linux/arm64`), but compiling FFmpeg from source
-under this dev machine's QEMU emulation (Apple Silicon host, no native
-amd64 hardware available) was taking 30-60+ minutes and was cut short by
-explicit decision rather than left to finish unattended. The amd64 path
-should be verified for real — same checks as arm64 above — on a real
-amd64 machine or in CI before this image is actually published/deployed.
+**Architecture coverage — verified on both `linux/arm64` and `linux/amd64`.**
+`linux/arm64` was built and verified locally (this dev machine's native
+architecture) — build PASS, decode PASS against a synthetic H.264 clip
+inside the actual container, `-version` confirms no
+GPL/nonfree/libx264/libx265, nonroot startup confirmed.
+
+`linux/amd64` uses the identical `Dockerfile` stage (no arch-specific
+flags — `./configure` auto-detects the target triple), but compiling
+FFmpeg from source under this Apple Silicon dev machine's local QEMU
+emulation was taking 30-60+ minutes and was cut short by explicit decision
+rather than left to finish unattended. Instead, `.github/workflows/ci.yml`
+gained a `docker-amd64-smoke` job that builds and checks this exact image
+on a real amd64 GitHub-hosted runner — no emulation. That job ran the same
+checks as the arm64 verification above and **passed in ~2 minutes**
+([run 35092394083](https://github.com/drko-dev/monitoreoedgeis/actions/runs/35092394083)):
+architecture confirmed `amd64`, `nonroot:nonroot` confirmed, `-version`
+confirmed free of the four disallowed flags, the exact production decode
+command produced exactly the expected byte count, `geocam-edge` started
+and the container stayed running. The ~2min-on-real-hardware vs.
+30+min-and-counting-under-emulation gap confirms the slowness was purely
+emulation overhead, not a recipe problem specific to one architecture.
 
 ## Deployment
 
