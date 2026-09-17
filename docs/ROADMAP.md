@@ -254,16 +254,16 @@ Done this slice (code, not yet real-hardware validated end to end): offline buff
 
 ## P — Packaging multi-plataforma
 
-- P1. Linux AMD64.
-- P2. Linux ARM64.
-- P3. OCI multi-arch.
-- P4. Build reproducible.
-- P5. Tags.
-- P6. Releases.
-- P7. Instalación.
-- P8. systemd.
-- P9. Persistencia.
-- P10. Upgrade seguro.
+- P1. Linux AMD64. **DONE** — `make build-linux` (pre-existing, Hito A).
+- P2. Linux ARM64. **DONE** — `make build-linux` (pre-existing, Hito A).
+- P3. OCI multi-arch. **DONE (K3s only)** — root `Dockerfile` (pre-existing, Hito H); not the appliance's install path (see P7).
+- P4. Build reproducible. **PARTIAL (pre-existing)** — `-trimpath` + version/commit/date `ldflags`; not otherwise revisited here.
+- P5. Tags. **NOT DONE.**
+- P6. Releases. **NOT DONE.**
+- P7. Instalación. **CODE DONE, NOT VALIDATED ON REAL HARDWARE** — `deploy/appliance/scripts/install.sh` (+`update.sh`/`rollback.sh`/`uninstall.sh`/`package.sh`): idempotent directory/user/permission setup, dedicated non-root `geocam-edge` system user, versioned `releases/<version>` + atomic `current` symlink, never overwrites existing config/identity/credentials. Validated via `go test ./deploy/appliance/...` against a staged root (`GEOCAM_INSTALL_ROOT`) on this sandbox (no Linux/systemd available here) — see `docs/deployment/appliance.md` for exactly what that does and does not prove.
+- P8. systemd. **CODE DONE, NOT VALIDATED AGAINST REAL systemd** — `deploy/appliance/systemd/geocam-edge.service.in`: `Restart=on-failure`, `After=network-online.target`, `EnvironmentFile`, dedicated `User=`/`Group=`, `KillSignal=SIGTERM` (the agent's own `signal.NotifyContext(SIGINT, SIGTERM)` in `cmd/geocam-edge/main.go` already does graceful in-process shutdown — confirmed by reading the code, not by a live systemd stop). Structure checked by a Go test (`TestSystemdUnitTemplateStructure`); `systemd-analyze verify` was NOT run (no systemd in this sandbox).
+- P9. Persistencia. **DONE (documented, not newly built)** — `GEOCAM_DATA_DIR` (identity/credentials/offline buffer) already persists via the pre-existing atomic-write code in `internal/identity`/`internal/credentials`/`internal/cloudsink`; the appliance layout keeps it outside the versioned release tree so install/update/uninstall never touch it (enforced by tests: `TestInstallIsIdempotentAndPreservesData`, `TestUninstallPreservesDataByDefault`).
+- P10. Upgrade seguro. **CODE DONE, NOT VALIDATED ON REAL HARDWARE** — `update.sh`: checksum + architecture validation before touching anything installed, versioned releases kept for rollback, atomic `current` symlink swap, restart + `/readyz` verification, automatic `rollback.sh` invocation on verification failure. `rollback.sh` restores the prior release and restarts. Both covered by `go test ./deploy/appliance/...` (round-trip, bad-arch rejection, bad-checksum rejection) against a staged root — no real systemd restart/health cycle was exercised.
 
 ## Q — Appliance residencial
 
