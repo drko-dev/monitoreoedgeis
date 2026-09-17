@@ -75,7 +75,7 @@ func solidYUV420p(width, height int, y, cb, cr byte) []byte {
 }
 
 func TestCloudSink_Name(t *testing.T) {
-	s := New(&fakeSender{}, "dev-1", "cred-1", slog.Default())
+	s := New(&fakeSender{}, "dev-1", "cred-1", Config{}, slog.Default(), nil)
 	if s.Name() != "cloud" {
 		t.Fatalf("Name() = %q, want %q", s.Name(), "cloud")
 	}
@@ -83,7 +83,7 @@ func TestCloudSink_Name(t *testing.T) {
 
 func TestCloudSink_Route_EncodesAndUploads(t *testing.T) {
 	sender := &fakeSender{}
-	s := New(sender, "dev-1", "cred-1", slog.Default())
+	s := New(sender, "dev-1", "cred-1", Config{}, slog.Default(), nil)
 
 	frame := processing.Frame{
 		CandidateKey: "cam-1",
@@ -126,7 +126,7 @@ func TestCloudSink_Route_EncodesAndUploads(t *testing.T) {
 func TestCloudSink_Route_PropagatesSenderError(t *testing.T) {
 	wantErr := errors.New("saas unreachable")
 	sender := &fakeSender{err: wantErr}
-	s := New(sender, "dev-1", "cred-1", slog.Default())
+	s := New(sender, "dev-1", "cred-1", Config{}, slog.Default(), nil)
 
 	frame := processing.Frame{
 		CandidateKey: "cam-1",
@@ -142,7 +142,7 @@ func TestCloudSink_Route_PropagatesSenderError(t *testing.T) {
 }
 
 func TestCloudSink_Route_RejectsMismatchedFrameData(t *testing.T) {
-	s := New(&fakeSender{}, "dev-1", "cred-1", slog.Default())
+	s := New(&fakeSender{}, "dev-1", "cred-1", Config{}, slog.Default(), nil)
 
 	frame := processing.Frame{
 		OutputWidth:  16,
@@ -156,7 +156,7 @@ func TestCloudSink_Route_RejectsMismatchedFrameData(t *testing.T) {
 }
 
 func TestCloudSink_Route_RejectsOddDimensions(t *testing.T) {
-	s := New(&fakeSender{}, "dev-1", "cred-1", slog.Default())
+	s := New(&fakeSender{}, "dev-1", "cred-1", Config{}, slog.Default(), nil)
 
 	frame := processing.Frame{
 		OutputWidth:  15,
@@ -189,7 +189,269 @@ func TestYUV420pToImage_RejectsZeroDimensions(t *testing.T) {
 	}
 }
 
-// --- Milestone I6: offline buffer integration --------------------------
+// --- Milestone I10: real resource-usage metrics -------------------------
+
+func TestCloudSink_Status_CountsSuccessAndBytes(t *testing.T) {
+	sender := &fakeSender{}
+	s := New(sender, "dev-1", "cred-1", Config{}, slog.Default(), nil)
+
+	if err := s.Route(testFrame("cam-1", 1)); err != nil {
+		t.Fatalf("Route() error = %v", err)
+	}
+
+	got := s.Status()
+	if got.FramesEncoded != 1 || got.FramesUploadAttempted != 1 || got.FramesUploadSucceeded != 1 || got.FramesUploadFailed != 0 {
+		t.Fatalf("counters = %+v, want 1 encoded/attempted/succeeded, 0 failed", got)
+	}
+	if got.JPEGBytesGenerated == 0 || got.JPEGBytesGenerated != uint64(len(sender.gotJPEG)) {
+		t.Fatalf("JPEGBytesGenerated = %d, want exactly uploaded len %d", got.JPEGBytesGenerated, len(sender.gotJPEG))
+	}
+	if got.JPEGBytesUploaded != got.JPEGBytesGenerated {
+		t.Fatalf("JPEGBytesUploaded = %d, want == JPEGBytesGenerated %d (single successful upload)", got.JPEGBytesUploaded, got.JPEGBytesGenerated)
+	}
+	if got.EncodeLatencyAvgMs < 0 || got.UploadLatencyAvgMs < 0 {
+		t.Fatalf("negative latency: encode=%v upload=%v", got.EncodeLatencyAvgMs, got.UploadLatencyAvgMs)
+	}
+}
+
+func TestCloudSink_Status_SeparatesFailedFromSucceeded(t *testing.T) {
+	wantErr := errors.New("saas unreachable")
+	sender := &fakeSender{err: wantErr}
+	s := New(sender, "dev-1", "cred-1", Config{}, slog.Default(), nil)
+
+	if err := s.Route(testFrame("cam-1", 1)); err == nil {
+		t.Fatal("Route(): want error, got nil")
+	}
+
+	got := s.Status()
+	if got.FramesUploadAttempted != 1 || got.FramesUploadFailed != 1 || got.FramesUploadSucceeded != 0 {
+		t.Fatalf("counters = %+v, want 1 attempted, 1 failed, 0 succeeded", got)
+	}
+	if got.JPEGBytesUploaded != 0 {
+		t.Fatalf("JPEGBytesUploaded = %d, want 0 on failed upload", got.JPEGBytesUploaded)
+	}
+	if got.JPEGBytesGenerated == 0 {
+		t.Fatal("JPEGBytesGenerated = 0, want > 0: encode succeeds even when upload fails")
+	}
+}
+
+type fakeHealth struct {
+	mu   sync.Mutex
+	last Status
+	n    int
+}
+
+func (h *fakeHealth) SetCloudStatus(s Status) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.last = s
+	h.n++
+}
+
+func TestCloudSink_Route_PublishesToHealthSink(t *testing.T) {
+	sender := &fakeSender{}
+	hs := &fakeHealth{}
+	s := New(sender, "dev-1", "cred-1", Config{}, slog.Default(), hs)
+
+	if err := s.Route(testFrame("cam-1", 1)); err != nil {
+		t.Fatalf("Route() error = %v", err)
+	}
+
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	if hs.n == 0 {
+		t.Fatal("SetCloudStatus was never called")
+	}
+	if hs.last.FramesUploadSucceeded != 1 {
+		t.Fatalf("published status FramesUploadSucceeded = %d, want 1", hs.last.FramesUploadSucceeded)
+	}
+}
+
+func TestCloudSink_Route_ConcurrentWithStatusRead(t *testing.T) {
+	sender := &fakeSender{}
+	hs := &fakeHealth{}
+	s := New(sender, "dev-1", "cred-1", Config{}, slog.Default(), hs)
+
+	const iterations = 200
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			if err := s.Route(testFrame("cam-1", uint64(i))); err != nil {
+				t.Errorf("Route() error = %v", err)
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			_ = s.Status()
+		}
+	}()
+	wg.Wait()
+
+	got := s.Status()
+	if got.FramesUploadSucceeded != iterations {
+		t.Fatalf("FramesUploadSucceeded = %d, want %d", got.FramesUploadSucceeded, iterations)
+	}
+}
+
+// --- Milestone I7: configurable JPEG quality and bandwidth control ------
+
+func TestCloudSink_ConfigurableJPEGQuality(t *testing.T) {
+	senderLow := &fakeSender{}
+	sLow := New(senderLow, "dev-1", "cred-1", Config{JPEGQuality: 10}, slog.Default(), nil)
+
+	senderHigh := &fakeSender{}
+	sHigh := New(senderHigh, "dev-1", "cred-1", Config{JPEGQuality: 95}, slog.Default(), nil)
+
+	frame := processing.Frame{
+		CandidateKey: "cam-1",
+		Timestamp:    time.Now(),
+		Seq:          1,
+		OutputWidth:  64,
+		OutputHeight: 64,
+		Data:         solidYUV420p(64, 64, 120, 100, 150),
+	}
+
+	if err := sLow.Route(frame); err != nil {
+		t.Fatalf("sLow.Route() error = %v", err)
+	}
+	if err := sHigh.Route(frame); err != nil {
+		t.Fatalf("sHigh.Route() error = %v", err)
+	}
+
+	if len(senderLow.gotJPEG) >= len(senderHigh.gotJPEG) {
+		t.Fatalf("Quality 10 JPEG (%d bytes) should be smaller than Quality 95 JPEG (%d bytes)",
+			len(senderLow.gotJPEG), len(senderHigh.gotJPEG))
+	}
+
+	// Verify fallback for out-of-range quality.
+	sFallback := New(&fakeSender{}, "dev-1", "cred-1", Config{JPEGQuality: 150}, slog.Default(), nil)
+	if sFallback.cfg.JPEGQuality != DefaultJPEGQuality {
+		t.Fatalf("expected fallback to %d for quality 150, got %d", DefaultJPEGQuality, sFallback.cfg.JPEGQuality)
+	}
+}
+
+func TestCloudSink_PrePostThrottling(t *testing.T) {
+	sender := &fakeSender{}
+	// Strict limit: burst only 10 bytes -> any realistic frame exceeds this and gets throttled.
+	cfg := Config{JPEGQuality: 85, MaxBytesPerSec: 100, BurstBytes: 10}
+	s := New(sender, "dev-1", "cred-1", cfg, slog.Default(), nil)
+
+	frame := processing.Frame{
+		CandidateKey: "cam-test",
+		Timestamp:    time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC),
+		Seq:          99,
+		OutputWidth:  16,
+		OutputHeight: 8,
+		Data:         solidYUV420p(16, 8, 128, 128, 128),
+	}
+
+	err := s.Route(frame)
+	if err == nil {
+		t.Fatal("expected Route() to fail due to rate limit, got nil")
+	}
+	if !errors.Is(err, ErrThrottled) {
+		t.Fatalf("expected errors.Is(err, ErrThrottled) = true, got %v", err)
+	}
+
+	// CRITICAL: Ensure POST was never called (pre-POST throttling) and it
+	// never counts as an upload attempt.
+	if sender.calls != 0 {
+		t.Fatalf("sender.calls = %d, want 0 (frame must be throttled BEFORE POST)", sender.calls)
+	}
+
+	status := s.Status()
+	if status.ThrottledFrames != 1 {
+		t.Fatalf("status.ThrottledFrames = %d, want 1", status.ThrottledFrames)
+	}
+	if status.ThrottledBytes == 0 {
+		t.Fatal("status.ThrottledBytes = 0, want > 0")
+	}
+	if status.FramesUploadAttempted != 0 {
+		t.Fatalf("status.FramesUploadAttempted = %d, want 0 (throttle must not count as an attempt)", status.FramesUploadAttempted)
+	}
+	if status.FramesUploadSucceeded != 0 {
+		t.Fatalf("status.FramesUploadSucceeded = %d, want 0", status.FramesUploadSucceeded)
+	}
+	if status.ConfiguredBytesPerSec != 100 {
+		t.Fatalf("status.ConfiguredBytesPerSec = %d, want 100", status.ConfiguredBytesPerSec)
+	}
+}
+
+func TestCloudSink_ErrorDistinction(t *testing.T) {
+	// 1. Throttling error.
+	sThrottled := New(&fakeSender{}, "dev-1", "cred-1", Config{MaxBytesPerSec: 10, BurstBytes: 10}, slog.Default(), nil)
+	frame := processing.Frame{
+		CandidateKey: "cam-1",
+		Timestamp:    time.Now(),
+		Seq:          1,
+		OutputWidth:  16,
+		OutputHeight: 8,
+		Data:         solidYUV420p(16, 8, 100, 100, 100),
+	}
+	errThrottled := sThrottled.Route(frame)
+	if !errors.Is(errThrottled, ErrThrottled) {
+		t.Fatalf("expected ErrThrottled, got %v", errThrottled)
+	}
+
+	// 2. Transport error.
+	netErr := errors.New("connection reset by peer")
+	sTransport := New(&fakeSender{err: netErr}, "dev-1", "cred-1", Config{}, slog.Default(), nil)
+	errTransport := sTransport.Route(frame)
+	if !errors.Is(errTransport, netErr) {
+		t.Fatalf("expected wrapped netErr, got %v", errTransport)
+	}
+	if errors.Is(errTransport, ErrThrottled) {
+		t.Fatal("transport error must not match ErrThrottled")
+	}
+
+	// 3. Dimension error.
+	badFrame := processing.Frame{OutputWidth: 0, OutputHeight: 0}
+	errDim := sTransport.Route(badFrame)
+	if errors.Is(errDim, ErrThrottled) || errors.Is(errDim, netErr) {
+		t.Fatalf("dimension error should be distinct, got %v", errDim)
+	}
+}
+
+func TestCloudSink_DefaultBackwardCompatibility(t *testing.T) {
+	sender := &fakeSender{}
+	s := New(sender, "dev-1", "cred-1", Config{}, slog.Default(), nil)
+
+	frame := processing.Frame{
+		CandidateKey: "cam-1",
+		Timestamp:    time.Now(),
+		Seq:          10,
+		OutputWidth:  16,
+		OutputHeight: 8,
+		Data:         solidYUV420p(16, 8, 100, 100, 100),
+	}
+
+	if err := s.Route(frame); err != nil {
+		t.Fatalf("Route() failed: %v", err)
+	}
+	if sender.calls != 1 {
+		t.Fatalf("sender.calls = %d, want 1", sender.calls)
+	}
+	status := s.Status()
+	if status.ThrottledFrames != 0 {
+		t.Fatalf("ThrottledFrames = %d, want 0", status.ThrottledFrames)
+	}
+	if status.FramesUploadSucceeded != 1 {
+		t.Fatalf("FramesUploadSucceeded = %d, want 1", status.FramesUploadSucceeded)
+	}
+	if status.ConfiguredBytesPerSec != 0 {
+		t.Fatalf("ConfiguredBytesPerSec = %d, want 0", status.ConfiguredBytesPerSec)
+	}
+	if status.JPEGQuality != DefaultJPEGQuality {
+		t.Fatalf("JPEGQuality = %d, want default %d", status.JPEGQuality, DefaultJPEGQuality)
+	}
+}
+
+// --- Milestone I6: offline buffer integration ----------------------------
 
 func testFrame(candidateKey string, seq uint64) processing.Frame {
 	return processing.Frame{
@@ -205,7 +467,7 @@ func testFrame(candidateKey string, seq uint64) processing.Frame {
 func newBufferedSink(t *testing.T, sender FrameSender, maxFrames int) (*CloudSink, string) {
 	t.Helper()
 	dir := t.TempDir()
-	s := New(sender, "dev-1", "cred-1", slog.Default(),
+	s := New(sender, "dev-1", "cred-1", Config{}, slog.Default(), nil,
 		WithBuffer(dir, 1<<20, maxFrames, 0))
 	t.Cleanup(s.Close)
 	return s, dir
@@ -234,6 +496,9 @@ func TestCloudSink_Route_RecoverableError_Buffers(t *testing.T) {
 	if stats.BufferedFrames != 1 {
 		t.Fatalf("BufferedFrames = %d, want 1", stats.BufferedFrames)
 	}
+	if status := s.Status(); status.FramesUploadFailed != 1 {
+		t.Fatalf("FramesUploadFailed = %d, want 1 (the direct attempt still failed before buffering)", status.FramesUploadFailed)
+	}
 }
 
 func TestCloudSink_Route_NonRecoverableError_NeverBuffers(t *testing.T) {
@@ -246,6 +511,44 @@ func TestCloudSink_Route_NonRecoverableError_NeverBuffers(t *testing.T) {
 	}
 	if got := s.CloudBufferStats().BufferedFrames; got != 0 {
 		t.Fatalf("BufferedFrames = %d, want 0 (unauthorized must never be buffered)", got)
+	}
+}
+
+func TestCloudSink_Route_PermanentError_CountsFailedNoBuffer(t *testing.T) {
+	sender := &fakeSender{err: fmt.Errorf("nope: %w", transport.ErrInvalidRequest)}
+	s, _ := newBufferedSink(t, sender, 10)
+
+	if err := s.Route(testFrame("cam-1", 1)); err == nil {
+		t.Fatal("Route(): want error for a permanent 4xx, got nil")
+	}
+	status := s.Status()
+	if status.FramesUploadFailed != 1 {
+		t.Fatalf("FramesUploadFailed = %d, want 1", status.FramesUploadFailed)
+	}
+	if got := s.CloudBufferStats().BufferedFrames; got != 0 {
+		t.Fatalf("BufferedFrames = %d, want 0 (permanent 4xx must never spool)", got)
+	}
+}
+
+func TestCloudSink_Route_ThrottledFrame_NeverEntersBuffer(t *testing.T) {
+	sender := &fakeSender{}
+	dir := t.TempDir()
+	cfg := Config{MaxBytesPerSec: 1, BurstBytes: 1}
+	s := New(sender, "dev-1", "cred-1", cfg, slog.Default(), nil, WithBuffer(dir, 1<<20, 10, 0))
+	t.Cleanup(s.Close)
+
+	err := s.Route(testFrame("cam-1", 1))
+	if !errors.Is(err, ErrThrottled) {
+		t.Fatalf("Route() error = %v, want ErrThrottled", err)
+	}
+	if sender.calls != 0 {
+		t.Fatalf("sender.calls = %d, want 0 (throttled before POST)", sender.calls)
+	}
+	if status := s.Status(); status.FramesUploadAttempted != 0 {
+		t.Fatalf("FramesUploadAttempted = %d, want 0", status.FramesUploadAttempted)
+	}
+	if got := s.CloudBufferStats().BufferedFrames; got != 0 {
+		t.Fatalf("BufferedFrames = %d, want 0 (ErrThrottled must never enter the I6 buffer)", got)
 	}
 }
 
@@ -434,10 +737,156 @@ func TestCloudSink_Replay_UploadsBufferedFramesInOrder(t *testing.T) {
 	}
 }
 
+// TestCloudSink_Replay_CountsUploadNotEncode pins the I6+I10 integration
+// contract: a replay is a real PostFrame attempt (counted in
+// frames_upload_attempted/succeeded and jpeg_bytes_uploaded) but never
+// re-encodes the frame (frames_encoded/jpeg_bytes_generated stay put — the
+// JPEG was already generated once, before it ever entered the buffer).
+func TestCloudSink_Replay_CountsUploadNotEncode(t *testing.T) {
+	drainPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { drainPollInterval = 2 * time.Second })
+
+	sender := &fakeSender{err: transport.ErrSaaSUnavailable}
+	s, _ := newBufferedSink(t, sender, 10)
+
+	if err := s.Route(testFrame("cam-1", 1)); err != nil {
+		t.Fatalf("Route() error = %v", err)
+	}
+	afterRoute := s.Status()
+	if afterRoute.FramesEncoded != 1 {
+		t.Fatalf("FramesEncoded after Route = %d, want 1", afterRoute.FramesEncoded)
+	}
+	if afterRoute.FramesUploadAttempted != 1 {
+		t.Fatalf("FramesUploadAttempted after Route = %d, want 1 (the failed direct attempt)", afterRoute.FramesUploadAttempted)
+	}
+
+	sender.mu.Lock()
+	sender.err = nil
+	sender.mu.Unlock()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && s.CloudBufferStats().BufferedFrames != 0 {
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	final := s.Status()
+	if final.FramesEncoded != 1 {
+		t.Fatalf("FramesEncoded after replay = %d, want still 1 (replay must not re-encode)", final.FramesEncoded)
+	}
+	if final.FramesUploadAttempted != 2 {
+		t.Fatalf("FramesUploadAttempted after replay = %d, want 2 (direct attempt + replay attempt)", final.FramesUploadAttempted)
+	}
+	if final.FramesUploadSucceeded != 1 {
+		t.Fatalf("FramesUploadSucceeded = %d, want 1 (the replay succeeded)", final.FramesUploadSucceeded)
+	}
+	if final.JPEGBytesUploaded != afterRoute.JPEGBytesGenerated {
+		t.Fatalf("JPEGBytesUploaded = %d, want == JPEGBytesGenerated %d", final.JPEGBytesUploaded, afterRoute.JPEGBytesGenerated)
+	}
+	if got := s.CloudBufferStats().ReplayedFrames; got != 1 {
+		t.Fatalf("ReplayedFrames = %d, want 1", got)
+	}
+}
+
+// TestCloudSink_Replay_WaitsForLimiterInsteadOfDropping is the CRITICAL I6+I7
+// integration case: a frame already durable in the offline buffer must
+// never be dropped just because the bandwidth limiter is temporarily out of
+// tokens — replay paces itself against the limiter (limiter.Wait) instead.
+func TestCloudSink_Replay_WaitsForLimiterInsteadOfDropping(t *testing.T) {
+	drainPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { drainPollInterval = 2 * time.Second })
+
+	f := testFrame("cam-1", 1)
+
+	// Measure the real JPEG size this frame encodes to, so the limiter's
+	// burst can be set just large enough to admit exactly one frame
+	// directly — draining it, so replay must wait for a refill.
+	probe := New(&fakeSender{}, "dev-1", "cred-1", Config{}, slog.Default(), nil)
+	if err := probe.Route(f); err != nil {
+		t.Fatalf("probe Route() error = %v", err)
+	}
+	frameBytes := int64(probe.Status().JPEGBytesGenerated)
+
+	sender := &fakeSender{err: transport.ErrSaaSUnavailable}
+	dir := t.TempDir()
+	cfg := Config{MaxBytesPerSec: 200, BurstBytes: frameBytes}
+	s := New(sender, "dev-1", "cred-1", cfg, slog.Default(), nil, WithBuffer(dir, 1<<20, 10, 0))
+	t.Cleanup(s.Close)
+
+	if err := s.Route(f); err != nil {
+		t.Fatalf("Route() error = %v", err)
+	}
+	if got := s.CloudBufferStats().BufferedFrames; got != 1 {
+		t.Fatalf("BufferedFrames = %d, want 1", got)
+	}
+
+	// The burst is now drained (Route's own limiter check consumed it), so
+	// replay must wait for it to refill rather than dropping the frame.
+	sender.mu.Lock()
+	sender.err = nil
+	sender.mu.Unlock()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && s.CloudBufferStats().BufferedFrames != 0 {
+		time.Sleep(20 * time.Millisecond)
+	}
+	stats := s.CloudBufferStats()
+	if stats.BufferedFrames != 0 {
+		t.Fatal("frame was never replayed: the limiter must have waited, not dropped it")
+	}
+	if stats.ReplayedFrames != 1 {
+		t.Fatalf("ReplayedFrames = %d, want 1", stats.ReplayedFrames)
+	}
+}
+
+// TestCloudSink_Close_DuringLimiterWait_TerminatesCleanly ensures shutdown
+// cancels a replay that is blocked inside limiter.Wait immediately, instead
+// of waiting out the full refill.
+func TestCloudSink_Close_DuringLimiterWait_TerminatesCleanly(t *testing.T) {
+	drainPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { drainPollInterval = 2 * time.Second })
+
+	f := testFrame("cam-1", 1)
+	probe := New(&fakeSender{}, "dev-1", "cred-1", Config{}, slog.Default(), nil)
+	if err := probe.Route(f); err != nil {
+		t.Fatalf("probe Route() error = %v", err)
+	}
+	frameBytes := int64(probe.Status().JPEGBytesGenerated)
+
+	sender := &fakeSender{err: transport.ErrSaaSUnavailable}
+	dir := t.TempDir()
+	// bytesPerSec=1 with burst exactly one frame: after Route drains the
+	// burst, a real refill would take ~frameBytes seconds — far longer
+	// than this test should ever wait, so Close() must cancel the wait.
+	cfg := Config{MaxBytesPerSec: 1, BurstBytes: frameBytes}
+	s := New(sender, "dev-1", "cred-1", cfg, slog.Default(), nil, WithBuffer(dir, 1<<20, 10, 0))
+
+	if err := s.Route(f); err != nil {
+		t.Fatalf("Route() error = %v", err)
+	}
+
+	sender.mu.Lock()
+	sender.err = nil
+	sender.mu.Unlock()
+
+	// Give the drain loop a moment to pick the frame up and start waiting.
+	time.Sleep(50 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		s.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close() did not return: limiter.Wait did not observe cancellation")
+	}
+}
+
 func TestCloudSink_RestartRecoversSpool_AndReplays(t *testing.T) {
 	dir := t.TempDir()
 	sender := &fakeSender{err: transport.ErrSaaSUnavailable}
-	s1 := New(sender, "dev-1", "cred-1", slog.Default(), WithBuffer(dir, 1<<20, 10, 0))
+	s1 := New(sender, "dev-1", "cred-1", Config{}, slog.Default(), nil, WithBuffer(dir, 1<<20, 10, 0))
 	if err := s1.Route(testFrame("cam-1", 1)); err != nil {
 		t.Fatalf("Route() error = %v", err)
 	}
@@ -453,7 +902,7 @@ func TestCloudSink_RestartRecoversSpool_AndReplays(t *testing.T) {
 	sender.err = nil
 	sender.mu.Unlock()
 
-	s2 := New(sender, "dev-1", "cred-1", slog.Default(), WithBuffer(dir, 1<<20, 10, 0))
+	s2 := New(sender, "dev-1", "cred-1", Config{}, slog.Default(), nil, WithBuffer(dir, 1<<20, 10, 0))
 	t.Cleanup(s2.Close)
 
 	if got := s2.CloudBufferStats().BufferedFrames; got != 1 {
@@ -475,7 +924,7 @@ func TestCloudSink_Close_ShutsDownDrainLoopCleanly(t *testing.T) {
 
 	sender := &fakeSender{err: transport.ErrSaaSUnavailable}
 	dir := t.TempDir()
-	s := New(sender, "dev-1", "cred-1", slog.Default(), WithBuffer(dir, 1<<20, 10, 0))
+	s := New(sender, "dev-1", "cred-1", Config{}, slog.Default(), nil, WithBuffer(dir, 1<<20, 10, 0))
 
 	if err := s.Route(testFrame("cam-1", 1)); err != nil {
 		t.Fatalf("Route() error = %v", err)
@@ -495,7 +944,7 @@ func TestCloudSink_Close_ShutsDownDrainLoopCleanly(t *testing.T) {
 }
 
 func TestCloudSink_Close_WithoutBuffer_IsNoop(t *testing.T) {
-	s := New(&fakeSender{}, "dev-1", "cred-1", slog.Default())
+	s := New(&fakeSender{}, "dev-1", "cred-1", Config{}, slog.Default(), nil)
 	s.Close() // must not panic or block
 }
 
@@ -503,7 +952,7 @@ func TestCloudSink_DisabledBuffer_BehavesLikePreI6(t *testing.T) {
 	sender := &fakeSender{err: fmt.Errorf("down: %w", transport.ErrSaaSUnavailable)}
 	// No WithBuffer option: buffering stays off, exactly the original
 	// (pre-I6) drop-on-failure behavior.
-	s := New(sender, "dev-1", "cred-1", slog.Default())
+	s := New(sender, "dev-1", "cred-1", Config{}, slog.Default(), nil)
 
 	err := s.Route(testFrame("cam-1", 1))
 	if err == nil {

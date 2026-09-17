@@ -7,6 +7,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/cloudsink"
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
+	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/logging"
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
@@ -26,7 +27,7 @@ const cloudBufferDirName = "cloud-buffer"
 // has linked to this device (edge_device_cameras) only receives Edge-push
 // frames while this Edge itself is configured for cloud processing — never
 // both RTSP-pull (SaaS-side, legacy) and Edge-push for the same camera.
-func newCloudSink(cfg *config.Config, creds credentials.Credentials, log *slog.Logger) processing.Sink {
+func newCloudSink(cfg *config.Config, creds credentials.Credentials, reporter *health.Reporter, log *slog.Logger) processing.Sink {
 	if cfg.ProcessingMode != config.ModeCloud {
 		return nil
 	}
@@ -55,5 +56,11 @@ func newCloudSink(cfg *config.Config, creds credentials.Credentials, log *slog.L
 		log.Info("cloud offline buffer disabled: GEOCAM_CLOUD_BUFFER_MAX_BYTES/GEOCAM_CLOUD_BUFFER_MAX_FRAMES not set")
 	}
 
-	return cloudsink.New(client, creds.DeviceID, creds.Credential, logging.Component(log, "cloud-sink"), opts...)
+	sinkCfg := cloudsink.Config{
+		JPEGQuality:    cfg.CloudJPEGQuality,
+		MaxBytesPerSec: cfg.CloudMaxBytesPerSec,
+		BurstBytes:     cfg.CloudBurstBytes,
+		MaxFPS:         cfg.CloudMaxFPS,
+	}
+	return cloudsink.New(client, creds.DeviceID, creds.Credential, sinkCfg, logging.Component(log, "cloud-sink"), reporter, opts...)
 }

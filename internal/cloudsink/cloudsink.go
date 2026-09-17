@@ -15,6 +15,7 @@ import (
 	"image/jpeg"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
@@ -27,10 +28,12 @@ type FrameSender interface {
 	PostFrame(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte) error
 }
 
-// JPEGQuality is fixed, not configurable: the frame is already
-// sampled/resized by the Hito H pipeline, so quality tuning belongs to a
-// later bandwidth-control milestone (I7), not this first slice.
-const JPEGQuality = 85
+// DefaultJPEGQuality is the standard compression quality for Cloud upload
+// (Milestone I; configurable per Milestone I7 via Config.JPEGQuality).
+const DefaultJPEGQuality = 85
+
+// JPEGQuality is kept for callers that referenced the pre-I7 fixed value.
+const JPEGQuality = DefaultJPEGQuality
 
 // RequestTimeout bounds a single frame upload. Router runs exactly one
 // worker goroutine per sink (see internal/processing/router.go), so a stuck
@@ -52,16 +55,153 @@ const (
 	maxDrainBackoff = 60 * time.Second
 )
 
+// ErrThrottled is returned by Route when a frame is dropped before POST
+// because upload bandwidth or frame rate limits are exceeded (Milestone
+// I7). It is a policy drop, never a transport failure: it never counts as
+// an upload attempt and never enters the Milestone I6 offline buffer.
+var ErrThrottled = errors.New("cloudsink: frame throttled by rate limit")
+
+// Config holds tunables for CloudSink bandwidth control (Milestone I7). The
+// zero value is the pre-I7, PR #11-compatible behavior: quality 85, no
+// rate limiting.
+type Config struct {
+	JPEGQuality    int     // 1-100; <= 0 defaults to DefaultJPEGQuality
+	MaxBytesPerSec int64   // > 0 enables byte rate limiting, 0 = unlimited
+	BurstBytes     int64   // > 0 sets explicit burst capacity in bytes, 0 = auto
+	MaxFPS         float64 // > 0 enables frame rate limiting towards Cloud, 0 = unlimited
+}
+
+// DefaultConfig returns the backward-compatible configuration matching PR #11.
+func DefaultConfig() Config {
+	return Config{JPEGQuality: DefaultJPEGQuality}
+}
+
+// HealthSink accepts periodic cloud-transport status updates (e.g.
+// *health.Reporter). cloudsink never imports internal/health — same
+// one-way dependency direction as processing.HealthSink (see
+// docs/ARCHITECTURE.md).
+type HealthSink interface {
+	SetCloudStatus(s Status)
+}
+
+// Status is a point-in-time snapshot of real resources consumed by the
+// Cloud transport (Hito I10), plus Milestone I7's configured limits and
+// throttle counters. It measures actual encode/upload activity — never an
+// estimated or priced cost. Counters are cumulative since process start
+// and reset only on process restart.
+//
+// frames_upload_attempted can be greater than frames_encoded: a Milestone
+// I6 replay re-attempts the upload of a frame whose JPEG was already
+// encoded (and counted) before it entered the offline buffer, so replay
+// attempts add to frames_upload_attempted/frames_upload_succeeded/
+// jpeg_bytes_uploaded without ever incrementing frames_encoded or
+// jpeg_bytes_generated again.
+type Status struct {
+	FramesEncoded         uint64  `json:"frames_encoded"`
+	FramesUploadAttempted uint64  `json:"frames_upload_attempted"`
+	FramesUploadSucceeded uint64  `json:"frames_upload_succeeded"`
+	FramesUploadFailed    uint64  `json:"frames_upload_failed"`
+	JPEGBytesGenerated    uint64  `json:"jpeg_bytes_generated"`
+	JPEGBytesUploaded     uint64  `json:"jpeg_bytes_uploaded"`
+	EncodeLatencyAvgMs    float64 `json:"encode_latency_avg_ms"`
+	UploadLatencyAvgMs    float64 `json:"upload_latency_avg_ms"`
+	EffectiveBytesPerSec  float64 `json:"effective_bytes_per_sec"`
+	EffectiveFramesPerSec float64 `json:"effective_frames_per_sec"`
+	SinceSeconds          float64 `json:"since_seconds"`
+
+	// Milestone I7: throttling and the limits currently configured.
+	ThrottledFrames       uint64  `json:"throttled_frames"`
+	ThrottledBytes        uint64  `json:"throttled_bytes"`
+	ConfiguredBytesPerSec int64   `json:"configured_bytes_per_sec"`
+	ConfiguredMaxFPS      float64 `json:"configured_max_fps"`
+	ConfiguredBurstBytes  int64   `json:"configured_burst_bytes"`
+	JPEGQuality           int     `json:"jpeg_quality"`
+}
+
+// stats holds the atomic counters backing Status. Route may run
+// concurrently with an unrelated /status read (and, once I6 buffering is
+// enabled, with the drain goroutine's own replay uploads), so every field
+// is accessed through sync/atomic — never a mutex, to keep the hot path
+// lock-free.
+type stats struct {
+	framesEncoded        atomic.Uint64
+	uploadAttempted      atomic.Uint64
+	uploadSucceeded      atomic.Uint64
+	uploadFailed         atomic.Uint64
+	jpegBytesGenerated   atomic.Uint64
+	jpegBytesUploaded    atomic.Uint64
+	encodeLatencyNsSum   atomic.Uint64
+	encodeLatencySamples atomic.Uint64
+	uploadLatencyNsSum   atomic.Uint64
+	uploadLatencySamples atomic.Uint64
+	throttledFrames      atomic.Uint64
+	throttledBytes       atomic.Uint64
+}
+
+func (s *stats) snapshot(startedAt time.Time, cfg Config, limiter *TokenBucket) Status {
+	encodeSamples := s.encodeLatencySamples.Load()
+	uploadSamples := s.uploadLatencySamples.Load()
+	var encodeAvgMs, uploadAvgMs float64
+	if encodeSamples > 0 {
+		encodeAvgMs = float64(s.encodeLatencyNsSum.Load()) / float64(encodeSamples) / float64(time.Millisecond)
+	}
+	if uploadSamples > 0 {
+		uploadAvgMs = float64(s.uploadLatencyNsSum.Load()) / float64(uploadSamples) / float64(time.Millisecond)
+	}
+
+	elapsed := time.Since(startedAt).Seconds()
+	bytesUploaded := s.jpegBytesUploaded.Load()
+	framesSucceeded := s.uploadSucceeded.Load()
+	var bytesPerSec, framesPerSec float64
+	if elapsed > 0 {
+		bytesPerSec = float64(bytesUploaded) / elapsed
+		framesPerSec = float64(framesSucceeded) / elapsed
+	}
+
+	var burstBytes int64
+	if limiter != nil {
+		burstBytes = limiter.BurstBytes()
+	}
+
+	return Status{
+		FramesEncoded:         s.framesEncoded.Load(),
+		FramesUploadAttempted: s.uploadAttempted.Load(),
+		FramesUploadSucceeded: framesSucceeded,
+		FramesUploadFailed:    s.uploadFailed.Load(),
+		JPEGBytesGenerated:    s.jpegBytesGenerated.Load(),
+		JPEGBytesUploaded:     bytesUploaded,
+		EncodeLatencyAvgMs:    encodeAvgMs,
+		UploadLatencyAvgMs:    uploadAvgMs,
+		EffectiveBytesPerSec:  bytesPerSec,
+		EffectiveFramesPerSec: framesPerSec,
+		SinceSeconds:          elapsed,
+
+		ThrottledFrames:       s.throttledFrames.Load(),
+		ThrottledBytes:        s.throttledBytes.Load(),
+		ConfiguredBytesPerSec: cfg.MaxBytesPerSec,
+		ConfiguredMaxFPS:      cfg.MaxFPS,
+		ConfiguredBurstBytes:  burstBytes,
+		JPEGQuality:           cfg.JPEGQuality,
+	}
+}
+
 // CloudSink implements processing.Sink. Route itself holds no per-frame
-// state: Router guarantees Route is called by a single goroutine per sink,
-// so nothing there needs a mutex. buffer (I6, optional) is written from
-// that same Route goroutine and drained by its own background goroutine —
-// Buffer itself is safe for that concurrent access.
+// mutable state beyond stats/limiter/buffer, all of which are safe for
+// concurrent use: Router guarantees Route is called by a single goroutine
+// per sink, so encode/throttle/upload ordering needs no mutex; stats stay
+// atomic only because /status and the I6 drain goroutine read/write them
+// from other goroutines.
 type CloudSink struct {
 	sender     FrameSender
 	deviceID   string
 	credential string
+	cfg        Config
+	limiter    *TokenBucket
 	logger     *slog.Logger
+
+	health    HealthSink
+	stats     stats
+	startedAt time.Time
 
 	buffer *Buffer
 	cancel context.CancelFunc
@@ -72,8 +212,8 @@ type CloudSink struct {
 type Option func(*CloudSink)
 
 // WithBuffer enables Milestone I6 offline buffering: a Cloud upload that
-// fails for a recoverable reason (timeout, SaaS unavailable, or an
-// unexpected HTTP status) is spooled under dir instead of being dropped,
+// fails for a recoverable reason (timeout, SaaS unavailable, or a
+// retryable HTTP status) is spooled under dir instead of being dropped,
 // and a background goroutine drains it with backoff once uploads start
 // succeeding again. maxBytes and maxFrames bound the spool and must both be
 // positive, or buffering stays disabled (logged, not a hard error — an
@@ -96,13 +236,33 @@ func WithBuffer(dir string, maxBytes int64, maxFrames int, maxAge time.Duration)
 }
 
 // New creates a CloudSink. deviceID/credential are the Edge's own enrolled
-// identity (internal/credentials) — the same ones the heartbeat module uses,
-// never a separate credential.
-func New(sender FrameSender, deviceID, credential string, logger *slog.Logger, opts ...Option) *CloudSink {
+// identity (internal/credentials) — the same ones the heartbeat module
+// uses, never a separate credential. cfg's zero value is PR #11-compatible
+// (quality 85, unlimited). health is optional (nil skips /status
+// publishing, e.g. in tests). opts configures Milestone I6 buffering.
+func New(sender FrameSender, deviceID, credential string, cfg Config, logger *slog.Logger, health HealthSink, opts ...Option) *CloudSink {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	s := &CloudSink{sender: sender, deviceID: deviceID, credential: credential, logger: logger}
+	if cfg.JPEGQuality <= 0 || cfg.JPEGQuality > 100 {
+		cfg.JPEGQuality = DefaultJPEGQuality
+	}
+
+	var limiter *TokenBucket
+	if cfg.MaxBytesPerSec > 0 || cfg.MaxFPS > 0 {
+		limiter = NewLimiter(cfg.MaxBytesPerSec, cfg.BurstBytes, cfg.MaxFPS)
+	}
+
+	s := &CloudSink{
+		sender:     sender,
+		deviceID:   deviceID,
+		credential: credential,
+		cfg:        cfg,
+		limiter:    limiter,
+		logger:     logger,
+		health:     health,
+		startedAt:  time.Now(),
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -129,6 +289,13 @@ func (s *CloudSink) Close() {
 	s.wg.Wait()
 }
 
+// Status returns a thread-safe snapshot of real transport resource usage,
+// the currently configured Milestone I7 limits, and Milestone I6 throttle
+// counters.
+func (s *CloudSink) Status() Status {
+	return s.stats.snapshot(s.startedAt, s.cfg, s.limiter)
+}
+
 // CloudBufferStats implements processing.CloudBufferReporter. Returns the
 // zero value when buffering is disabled.
 func (s *CloudSink) CloudBufferStats() processing.CloudBufferStats {
@@ -145,30 +312,54 @@ func (s *CloudSink) CloudBufferStats() processing.CloudBufferStats {
 	}
 }
 
-// Route implements processing.Sink: encodes f (yuv420p) to JPEG and uploads
-// it directly. If buffering is disabled, a failed attempt is simply
-// dropped — the pre-I6 behavior. If enabled: a camera that already has
-// frames waiting in the buffer keeps queuing behind them (sending this one
-// directly first would replay it out of order), and a direct upload that
-// fails for a recoverable reason is spooled for later retry instead of
-// dropped outright.
+// Route implements processing.Sink. Semantic order for a new frame:
+//
+//  1. Encode to JPEG at the configured quality (Milestone I7); record I10
+//     encode metrics (frames_encoded, jpeg_bytes_generated, encode latency).
+//  2. If this camera already has frames waiting in the Milestone I6 buffer,
+//     queue this one behind them — sending it directly first would replay
+//     it out of order.
+//  3. Otherwise, apply the Milestone I7 rate limiter before POST. A
+//     throttled frame is a policy drop: it never reaches PostFrame, never
+//     counts as an upload attempt, and never enters the I6 buffer.
+//  4. POST. Record I10 upload metrics (upload_attempted, latency,
+//     succeeded/failed; jpeg_bytes_uploaded only on success).
+//  5. A failed POST is buffered only when isRecoverable classifies it as
+//     transient (Milestone I6); otherwise it is simply dropped, exactly as
+//     before I6.
 func (s *CloudSink) Route(f processing.Frame) error {
 	img, err := yuv420pToImage(f.Data, f.OutputWidth, f.OutputHeight)
 	if err != nil {
 		return fmt.Errorf("cloudsink: %w", err)
 	}
 
+	encodeStart := time.Now()
 	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: JPEGQuality}); err != nil {
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: s.cfg.JPEGQuality}); err != nil {
 		return fmt.Errorf("cloudsink: encode jpeg: %w", err)
 	}
+	encodeLatency := time.Since(encodeStart)
 	jpegBytes := buf.Bytes()
+	s.stats.framesEncoded.Add(1)
+	s.stats.jpegBytesGenerated.Add(uint64(len(jpegBytes)))
+	s.stats.encodeLatencyNsSum.Add(uint64(encodeLatency.Nanoseconds()))
+	s.stats.encodeLatencySamples.Add(1)
+	s.publishStatus()
 
 	if s.buffer != nil && s.buffer.HasPending(f.CandidateKey) {
 		return s.enqueue(f, jpegBytes)
 	}
 
-	uploadErr := s.upload(f, jpegBytes)
+	if s.limiter != nil && !s.limiter.Allow(int64(len(jpegBytes))) {
+		s.stats.throttledFrames.Add(1)
+		s.stats.throttledBytes.Add(uint64(len(jpegBytes)))
+		s.publishStatus()
+		s.logger.Debug("frame throttled by rate limit",
+			"candidate_key", f.CandidateKey, "seq", f.Seq, "bytes", len(jpegBytes))
+		return ErrThrottled
+	}
+
+	uploadErr := s.upload(context.Background(), f, jpegBytes)
 	if uploadErr == nil {
 		return nil
 	}
@@ -183,14 +374,44 @@ func (s *CloudSink) Route(f processing.Frame) error {
 	return uploadErr
 }
 
-func (s *CloudSink) upload(f processing.Frame, jpegBytes []byte) error {
-	ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
+// upload performs the actual PostFrame call — shared by the direct Route
+// path and the Milestone I6 replay path — and records the I10 upload
+// metrics common to both (upload_attempted, latency, succeeded/failed,
+// jpeg_bytes_uploaded on success). It never touches frames_encoded or
+// jpeg_bytes_generated: those are recorded once, at encode time, whether
+// the frame ships directly or is replayed later from the buffer.
+func (s *CloudSink) upload(ctx context.Context, f processing.Frame, jpegBytes []byte) error {
+	uploadCtx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
-	if err := s.sender.PostFrame(ctx, s.deviceID, s.credential, f.CandidateKey, f.Seq, f.Timestamp, jpegBytes); err != nil {
+
+	s.stats.uploadAttempted.Add(1)
+	uploadStart := time.Now()
+	err := s.sender.PostFrame(uploadCtx, s.deviceID, s.credential, f.CandidateKey, f.Seq, f.Timestamp, jpegBytes)
+	uploadLatency := time.Since(uploadStart)
+	s.stats.uploadLatencyNsSum.Add(uint64(uploadLatency.Nanoseconds()))
+	s.stats.uploadLatencySamples.Add(1)
+
+	if err != nil {
+		s.stats.uploadFailed.Add(1)
+		s.publishStatus()
 		return fmt.Errorf("cloudsink: upload frame: %w", err)
 	}
+	s.stats.uploadSucceeded.Add(1)
+	s.stats.jpegBytesUploaded.Add(uint64(len(jpegBytes)))
+	s.publishStatus()
 	s.logger.Debug("frame uploaded", "candidate_key", f.CandidateKey, "seq", f.Seq, "bytes", len(jpegBytes))
 	return nil
+}
+
+// publishStatus pushes the current snapshot to health, when configured. It
+// runs on every encode and every upload attempt: Route/replay are already
+// dominated by JPEG encode + HTTP upload, so one atomic-backed snapshot and
+// a map write on the health side is not a relevant hot-path cost.
+func (s *CloudSink) publishStatus() {
+	if s.health == nil {
+		return
+	}
+	s.health.SetCloudStatus(s.stats.snapshot(s.startedAt, s.cfg, s.limiter))
 }
 
 func (s *CloudSink) enqueue(f processing.Frame, jpegBytes []byte) error {
@@ -224,14 +445,21 @@ func (s *CloudSink) enqueue(f processing.Frame, jpegBytes []byte) error {
 //   - ErrUnexpectedStatus, or any plain/unclassified error (e.g. from a
 //     fake sender in a test): only errors this package can actually name
 //     as transient are buffered.
+//
+// ErrThrottled is never passed here: Route returns it before ever calling
+// upload, so it can't reach this classification.
 func isRecoverable(err error) bool {
 	return errors.Is(err, transport.ErrTimeout) ||
 		errors.Is(err, transport.ErrSaaSUnavailable) ||
 		errors.Is(err, transport.ErrRetryableStatus)
 }
 
-// drainLoop replays buffered frames in FIFO order, one at a time, backing
-// off exponentially between failed attempts so a still-down SaaS never
+// drainLoop replays buffered frames in FIFO order, one at a time, pacing
+// each replay through the same Milestone I7 rate limiter as the direct
+// path (limiter.Wait, not limiter.Allow): a frame that is already durable
+// in the buffer must never be dropped just because tokens are temporarily
+// unavailable — it waits for capacity instead. It also backs off
+// exponentially between failed upload attempts so a still-down SaaS never
 // turns into a request storm. It never blocks Route: they only ever touch
 // the buffer's own mutex briefly, not each other.
 func (s *CloudSink) drainLoop(ctx context.Context) {
@@ -258,9 +486,15 @@ func (s *CloudSink) drainLoop(ctx context.Context) {
 			continue
 		}
 
-		uploadCtx, cancel := context.WithTimeout(ctx, RequestTimeout)
-		err = s.sender.PostFrame(uploadCtx, s.deviceID, s.credential, f.CandidateKey, f.Seq, f.Timestamp, f.JPEG)
-		cancel()
+		if s.limiter != nil {
+			if err := s.limiter.Wait(ctx, int64(len(f.JPEG))); err != nil {
+				// ctx cancelled (shutdown): stop cleanly without discarding
+				// or advancing the still-buffered frame.
+				return
+			}
+		}
+
+		err = s.upload(ctx, processing.Frame{CandidateKey: f.CandidateKey, Seq: f.Seq, Timestamp: f.Timestamp}, f.JPEG)
 
 		switch {
 		case err == nil:

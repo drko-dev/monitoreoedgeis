@@ -59,6 +59,11 @@ type Config struct {
 	CloudBufferMaxBytes  int64
 	CloudBufferMaxFrames int
 	CloudBufferMaxAge    time.Duration
+	// Cloud bandwidth control settings (Milestone I7).
+	CloudJPEGQuality    int
+	CloudMaxBytesPerSec int64
+	CloudBurstBytes     int64
+	CloudMaxFPS         float64
 }
 
 // Defaults. No secrets, no credentials.
@@ -118,6 +123,13 @@ const (
 	DefaultVideoDecodeTimeout          = 10 * time.Second
 	MinVideoDecodeTimeout              = 1 * time.Second
 	MaxVideoDecodeTimeout              = 60 * time.Second
+	// Cloud bandwidth control defaults and bounds (Milestone I7).
+	DefaultCloudJPEGQuality    = 85
+	MinCloudJPEGQuality        = 1
+	MaxCloudJPEGQuality        = 100
+	DefaultCloudMaxBytesPerSec = 0
+	DefaultCloudBurstBytes     = 0
+	DefaultCloudMaxFPS         = 0.0
 )
 
 var validLogLevels = []string{"debug", "info", "warn", "error"}
@@ -151,6 +163,10 @@ func Load() (*Config, error) {
 		VideoMaxConcurrentPipelines: DefaultVideoMaxConcurrentPipelines,
 		VideoFFmpegPath:             DefaultVideoFFmpegPath,
 		VideoDecodeTimeout:          DefaultVideoDecodeTimeout,
+		CloudJPEGQuality:            DefaultCloudJPEGQuality,
+		CloudMaxBytesPerSec:         DefaultCloudMaxBytesPerSec,
+		CloudBurstBytes:             DefaultCloudBurstBytes,
+		CloudMaxFPS:                 DefaultCloudMaxFPS,
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_PROCESSING_MODE")); raw != "" {
@@ -405,6 +421,51 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid cloud buffer max age %q: must not be negative", raw)
 		}
 		cfg.CloudBufferMaxAge = d
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_CLOUD_JPEG_QUALITY")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cloud JPEG quality %q: %w", raw, err)
+		}
+		if v < MinCloudJPEGQuality || v > MaxCloudJPEGQuality {
+			return nil, fmt.Errorf("invalid cloud JPEG quality %q: must be between %d and %d",
+				raw, MinCloudJPEGQuality, MaxCloudJPEGQuality)
+		}
+		cfg.CloudJPEGQuality = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_CLOUD_MAX_BYTES_PER_SEC")); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cloud max bytes per second %q: %w", raw, err)
+		}
+		if v < 0 {
+			return nil, fmt.Errorf("invalid cloud max bytes per second %q: must be non-negative", raw)
+		}
+		cfg.CloudMaxBytesPerSec = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_CLOUD_BURST_BYTES")); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cloud burst bytes %q: %w", raw, err)
+		}
+		if v < 0 {
+			return nil, fmt.Errorf("invalid cloud burst bytes %q: must be non-negative", raw)
+		}
+		cfg.CloudBurstBytes = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_CLOUD_MAX_FPS")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cloud max FPS %q: %w", raw, err)
+		}
+		if v < 0 {
+			return nil, fmt.Errorf("invalid cloud max FPS %q: must be non-negative", raw)
+		}
+		cfg.CloudMaxFPS = v
 	}
 
 	// Fail-fast: reject an insecure http:// SaaS URL here, before any

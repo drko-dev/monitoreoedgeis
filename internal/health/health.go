@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/drko-dev/monitoreoedgeis/internal/cloudsink"
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
 	"github.com/drko-dev/monitoreoedgeis/internal/heartbeat"
@@ -60,6 +61,12 @@ type Snapshot struct {
 	// (camera_count + one PipelineStatus per camera). Omitted when the
 	// video pipeline is disabled. Never carries frame bytes.
 	VideoPipeline *processing.VideoPipelineSummary `json:"video_pipeline,omitempty"`
+	// Cloud is the Hito I10 Cloud transport's real resource-usage snapshot
+	// (frames encoded/uploaded, bytes, latency, I7 throttle/limits).
+	// Omitted when the cloud sink is disabled/unconfigured. This is
+	// telemetry only — never a priced or estimated cost (see
+	// internal/cloudsink).
+	Cloud *cloudsink.Status `json:"cloud,omitempty"`
 }
 
 // Reporter holds the mutable health state of the agent, including per-module
@@ -75,6 +82,7 @@ type Reporter struct {
 	discovery        *discovery.ModuleStatus
 	cameras          []rtsp.CameraStreamStatus
 	videoPipeline    *processing.VideoPipelineSummary
+	cloud            *cloudsink.Status
 
 	version string
 	cfg     *config.Config
@@ -193,6 +201,11 @@ func (r *Reporter) Snapshot() Snapshot {
 		copied := *r.videoPipeline
 		vp = &copied
 	}
+	var cloud *cloudsink.Status
+	if r.cloud != nil {
+		copied := *r.cloud
+		cloud = &copied
+	}
 
 	return Snapshot{
 		Status:           r.state,
@@ -211,6 +224,7 @@ func (r *Reporter) Snapshot() Snapshot {
 		Discovery:        disc,
 		Cameras:          cams,
 		VideoPipeline:    vp,
+		Cloud:            cloud,
 	}
 }
 
@@ -220,4 +234,12 @@ func (r *Reporter) SetVideoPipeline(summary processing.VideoPipelineSummary) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.videoPipeline = &summary
+}
+
+// SetCloudStatus records the latest Cloud transport resource-usage
+// snapshot (implements cloudsink.HealthSink).
+func (r *Reporter) SetCloudStatus(s cloudsink.Status) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cloud = &s
 }
