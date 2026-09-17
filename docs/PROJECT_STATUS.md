@@ -729,18 +729,33 @@ worst-case upper bound in `docs/performance/`.
 
 ## NEXT
 
-Hito I's first slice (this branch) is implemented and unit-tested on both
-repos, but **not validated against a real camera or a real SaaS/Postgres
-instance**, and not reviewed. PRs are open on `feature/cloud-video-sink`
-(Edge) and `feature/edge-frame-push` (SaaS), **not merged** (per
-instructions — no merge without separate authorization).
+Edge PR #16 (`feature/integrate-edge-cloud-hito-i`, consolidating #11/#13/#14/#15)
+went through two review rounds — fixing an oversized-frame drain-loop death
+(P0), limiter-waiter starvation (P1), rolling effective rate (P1), a context-
+cancel error-chain gap (P2), and two flaky replay tests (P2, made
+deterministic via an explicit completion signal instead of a wall-clock
+poll) — and was merged to `main` at `242d8428ed407c23a299d1945d5130d8d7fddf9c`.
+`go test ./...`, `-race`, `go vet`, `gofmt -l`, and `make build-linux`
+(amd64+arm64) all pass on that SHA.
 
-Before this can be called done: run the SaaS's Postgres-backed integration
-tests for real, validate `POST /api/v1/edge/frames` against a live Edge +
-camera + SaaS + worker, and measure actual bandwidth per camera before
-scoping I7/I10.
+Edge deploy to a real production appliance is still **not possible from this
+repo**: the only documented deploy procedure (`make deploy`, `docs/README.md`
+"Deploy to local K3s") explicitly targets a local Rancher Desktop/K3s dev
+cluster and states it "never targets production." Real appliance
+installation (`docs/ROADMAP.md` P7 Instalación / P8 systemd) is still
+unbuilt. This is unchanged by the merge and is not a Hito I regression.
 
-**HITO I (first slice) — IMPLEMENTED, NOT VALIDATED, NOT REVIEWED**
+**Not validated against a real camera or a real SaaS/Postgres instance** —
+this still needs a live TC70 + a reachable SaaS + Postgres to verify
+end-to-end.
+
+Before this can be called fully done: run the SaaS's Postgres-backed
+integration tests for real, validate `POST /api/v1/edge/frames` against a
+live Edge + camera + SaaS + worker, measure actual bandwidth per camera, and
+build the real appliance deploy path (P7/P8 in the roadmap).
+
+**HITO I (first slice + I6/I7/I10) — MERGED TO MAIN, NOT VALIDATED ON REAL
+HARDWARE, NOT DEPLOYED (no production deploy path exists yet)**
 
 ## HOW ANOTHER AI SHOULD CONTINUE
 
