@@ -803,6 +803,30 @@ darwin only, no docker daemon either):
 - No installation happened on any real or virtual machine. No production
   infrastructure (Dattaweb/Hostinger/Geo Multa) was touched or referenced.
 
+## Hito J — Benchmark Hybrid: J10–J11 (THIS BRANCH, `feature/hybrid-benchmark-j10-j11`)
+
+Independent benchmark harness and comparative measurement suite for Hybrid evaluation (J10 bandwidth reduction, J11 precision/recall proxy & compute impact), strictly decoupling benchmark instrumentation from core Hybrid runtime logic (J1–J9).
+
+**IMPLEMENTED**:
+- `internal/cameratest/hybrid_bandwidth_bench_test.go` (build tag `localbench`):
+  - Controlled loopback HTTP benchmark comparing Cloud baseline (continuous transmission of all sampled frames) vs. Hybrid candidate transmission (motion/event gated).
+  - Exact server-side received byte accounting matching client-side transmission (`CloudSink` metrics).
+  - Comprehensive reporting: total frames, transmitted frames, frame drop/suppression %, raw bytes, bandwidth reduction %, and estimated monthly GB at continuous 24/7 operation.
+- `docs/performance/hybrid-j10-j11.md`:
+  - Mathematical formulas for bandwidth reduction and suppression ratios.
+  - Controlled synthetic/loopback baseline results (66.00% bandwidth reduction observed on 50-frame replay: 11.41 MB Cloud baseline vs 3.88 MB Hybrid).
+  - Explicit physical hardware status declaration: **TC70 REAL CAMERA BENCHMARK = BLOCKED** (unconfigured / missing environment).
+  - Proposed non-commercial acceptance criteria for future real camera validation.
+
+**TESTED**:
+- `go test -tags localbench -v ./internal/cameratest -run TestHybridBandwidthBenchmark` passes.
+- Repo-wide `go test ./...`, `go vet ./...`, and `gofmt -l .` pass clean.
+
+**NOT VALIDATED ON PHYSICAL HARDWARE**:
+- Physical camera benchmark against Tapo TC70 is declared **BLOCKED** due to missing `TAPO_ONVIF_IP` / `GEOCAM_E2E_*` hardware configuration.
+- Synthetic replay is documented as an upper-bound baseline, not disguised as real camera telemetry.
+- No merge to `main`, no deploy.
+
 ## HOW ANOTHER AI SHOULD CONTINUE
 
 1. Read `AGENTS.md`.
