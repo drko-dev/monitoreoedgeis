@@ -48,6 +48,14 @@ type Config struct {
 	VideoMaxConcurrentPipelines int
 	VideoFFmpegPath             string
 	VideoDecodeTimeout          time.Duration
+	// Hybrid mode local-analysis settings (Milestone J). Meaningless
+	// unless ProcessingMode == ModeHybrid.
+	HybridMotionThreshold float64
+	HybridMinChangedArea  float64
+	HybridBlockSize       int
+	HybridROIs            []HybridROI
+	HybridIdleFPS         float64
+	HybridIdleAfter       time.Duration
 	// Cloud offline buffer settings (Milestone I6). CloudBufferMaxBytes and
 	// CloudBufferMaxFrames have no production default: shipping a number
 	// here would be inventing business policy this package has no basis
@@ -64,6 +72,15 @@ type Config struct {
 	CloudMaxBytesPerSec int64
 	CloudBurstBytes     int64
 	CloudMaxFPS         float64
+}
+
+// HybridROI is one normalized (0..1) region of interest parsed from
+// GEOCAM_VIDEO_HYBRID_ROI. Defined here (not in internal/processing) to
+// keep config free of a dependency on the feature packages it configures,
+// consistent with validateVideoOutputDimensions below; agent wiring
+// converts it to processing.ROI.
+type HybridROI struct {
+	XMin, YMin, XMax, YMax float64
 }
 
 // Defaults. No secrets, no credentials.
@@ -123,6 +140,40 @@ const (
 	DefaultVideoDecodeTimeout          = 10 * time.Second
 	MinVideoDecodeTimeout              = 1 * time.Second
 	MaxVideoDecodeTimeout              = 60 * time.Second
+	// Hybrid mode defaults and bounds (Milestone J). All meaningless
+	// unless GEOCAM_PROCESSING_MODE=hybrid.
+	//
+	// DefaultHybridMotionThreshold (luma units, 0..255 scale): chosen well
+	// above typical H.264 compression/sensor noise on a static scene
+	// (empirically a few luma units) but well below a real scene change,
+	// so a static camera does not flap into "motion" from encoding noise
+	// alone.
+	DefaultHybridMotionThreshold = 8.0
+	MinHybridMotionThreshold     = 0.0
+	MaxHybridMotionThreshold     = 255.0
+	// DefaultHybridMinChangedArea (fraction of evaluated blocks, 0..1):
+	// low enough to catch a person partially entering frame, high enough
+	// that a handful of noisy blocks alone never triggers a candidate.
+	DefaultHybridMinChangedArea = 0.05
+	MinHybridMinChangedArea     = 0.0
+	MaxHybridMinChangedArea     = 1.0
+	// DefaultHybridBlockSize (pixels): small enough to localize motion
+	// reasonably, large enough to average out single-pixel noise and keep
+	// the per-frame cost trivial.
+	DefaultHybridBlockSize = 16
+	MinHybridBlockSize     = 4
+	MaxHybridBlockSize     = 128
+	// DefaultHybridIdleFPS = 0 disables Milestone J5 adaptive sampling
+	// entirely: any positive value must be explicitly opted into, so a
+	// hybrid pipeline with no GEOCAM_VIDEO_HYBRID_IDLE_FPS set has an
+	// identical Sampler to a cloud-mode one.
+	DefaultHybridIdleFPS = 0.0
+	MinHybridIdleFPS     = 0.0
+	// DefaultHybridIdleAfter only takes effect once HybridIdleFPS>0: how
+	// long the evaluator must see no motion candidate before dropping to
+	// idle FPS. Short enough to save bandwidth quickly, long enough to
+	// absorb a brief gap between real motion events without flapping.
+	DefaultHybridIdleAfter = 5 * time.Second
 	// Cloud bandwidth control defaults and bounds (Milestone I7).
 	DefaultCloudJPEGQuality    = 85
 	MinCloudJPEGQuality        = 1
@@ -163,6 +214,11 @@ func Load() (*Config, error) {
 		VideoMaxConcurrentPipelines: DefaultVideoMaxConcurrentPipelines,
 		VideoFFmpegPath:             DefaultVideoFFmpegPath,
 		VideoDecodeTimeout:          DefaultVideoDecodeTimeout,
+		HybridMotionThreshold:       DefaultHybridMotionThreshold,
+		HybridMinChangedArea:        DefaultHybridMinChangedArea,
+		HybridBlockSize:             DefaultHybridBlockSize,
+		HybridIdleFPS:               DefaultHybridIdleFPS,
+		HybridIdleAfter:             DefaultHybridIdleAfter,
 		CloudJPEGQuality:            DefaultCloudJPEGQuality,
 		CloudMaxBytesPerSec:         DefaultCloudMaxBytesPerSec,
 		CloudBurstBytes:             DefaultCloudBurstBytes,
@@ -390,6 +446,73 @@ func Load() (*Config, error) {
 		cfg.VideoDecodeTimeout = d
 	}
 
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_HYBRID_MOTION_THRESHOLD")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid hybrid motion threshold %q: %w", raw, err)
+		}
+		if v < MinHybridMotionThreshold || v > MaxHybridMotionThreshold {
+			return nil, fmt.Errorf("invalid hybrid motion threshold %q: must be between %g and %g",
+				raw, MinHybridMotionThreshold, MaxHybridMotionThreshold)
+		}
+		cfg.HybridMotionThreshold = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_HYBRID_MIN_CHANGED_AREA")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid hybrid min changed area %q: %w", raw, err)
+		}
+		if v < MinHybridMinChangedArea || v > MaxHybridMinChangedArea {
+			return nil, fmt.Errorf("invalid hybrid min changed area %q: must be between %g and %g",
+				raw, MinHybridMinChangedArea, MaxHybridMinChangedArea)
+		}
+		cfg.HybridMinChangedArea = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_HYBRID_BLOCK_SIZE")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid hybrid block size %q: %w", raw, err)
+		}
+		if v < MinHybridBlockSize || v > MaxHybridBlockSize {
+			return nil, fmt.Errorf("invalid hybrid block size %q: must be between %d and %d",
+				raw, MinHybridBlockSize, MaxHybridBlockSize)
+		}
+		cfg.HybridBlockSize = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_HYBRID_IDLE_FPS")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid hybrid idle FPS %q: %w", raw, err)
+		}
+		if v < MinHybridIdleFPS || v > MaxVideoTargetFPS {
+			return nil, fmt.Errorf("invalid hybrid idle FPS %q: must be between %g and %g",
+				raw, MinHybridIdleFPS, MaxVideoTargetFPS)
+		}
+		cfg.HybridIdleFPS = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_HYBRID_IDLE_AFTER")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid hybrid idle after %q: %w", raw, err)
+		}
+		if d < 0 {
+			return nil, fmt.Errorf("invalid hybrid idle after %q: must not be negative", raw)
+		}
+		cfg.HybridIdleAfter = d
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_HYBRID_ROI")); raw != "" {
+		rois, err := parseHybridROIs(raw)
+		if err != nil {
+			return nil, err
+		}
+		cfg.HybridROIs = rois
+	}
+
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_CLOUD_BUFFER_MAX_BYTES")); raw != "" {
 		v, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil {
@@ -476,6 +599,41 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// parseHybridROIs parses GEOCAM_VIDEO_HYBRID_ROI: semicolon-separated
+// rectangles, each "x_min,y_min,x_max,y_max" in normalized 0..1
+// coordinates (independent of GEOCAM_VIDEO_OUTPUT_WIDTH/HEIGHT). A
+// malformed or out-of-range rectangle is a hard startup error -- consistent
+// with every other GEOCAM_VIDEO_* value in this file -- rather than
+// silently ignoring a misconfigured ROI at runtime.
+func parseHybridROIs(raw string) ([]HybridROI, error) {
+	parts := strings.Split(raw, ";")
+	rois := make([]HybridROI, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		coords := strings.Split(p, ",")
+		if len(coords) != 4 {
+			return nil, fmt.Errorf("invalid hybrid ROI %q: expected x_min,y_min,x_max,y_max", p)
+		}
+		var v [4]float64
+		for i, c := range coords {
+			f, err := strconv.ParseFloat(strings.TrimSpace(c), 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid hybrid ROI %q: %w", p, err)
+			}
+			v[i] = f
+		}
+		roi := HybridROI{XMin: v[0], YMin: v[1], XMax: v[2], YMax: v[3]}
+		if roi.XMin < 0 || roi.YMin < 0 || roi.XMax > 1 || roi.YMax > 1 || roi.XMin >= roi.XMax || roi.YMin >= roi.YMax {
+			return nil, fmt.Errorf("invalid hybrid ROI %q: coordinates must be within 0..1 with min < max", p)
+		}
+		rois = append(rois, roi)
+	}
+	return rois, nil
 }
 
 // validateVideoOutputDimensions enforces the only two valid shapes for

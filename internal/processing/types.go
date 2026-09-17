@@ -96,6 +96,9 @@ type PipelineStatus struct {
 	BufferUsage        int        `json:"buffer_usage"`
 	DecodeLatencyMs    float64    `json:"decode_latency_ms"`
 	LastFrameAt        *time.Time `json:"last_frame_at,omitempty"`
+	// Hybrid is nil unless Milestone J's local evaluator is active for this
+	// camera (Config.Hybrid.Enabled).
+	Hybrid *HybridStatus `json:"hybrid,omitempty"`
 }
 
 // VideoPipelineSummary is the small block published to /status under
@@ -150,4 +153,59 @@ type Config struct {
 	MaxConcurrentPipelines int
 	FFmpegPath             string
 	DecodeTimeout          time.Duration
+	// Hybrid holds Milestone J's local-analysis tunables. Meaningless
+	// unless Hybrid.Enabled (set by agent wiring from
+	// config.ProcessingMode == config.ModeHybrid, not a second on/off
+	// knob) -- when false, cameraPipeline.readLoop behaves exactly as it
+	// did before Milestone J: every sampled frame is dispatched.
+	Hybrid HybridConfig
+}
+
+// HybridConfig holds Milestone J's local motion-filter tunables, all
+// sourced from GEOCAM_VIDEO_HYBRID_* environment variables (see
+// internal/config).
+type HybridConfig struct {
+	// Enabled gates the whole hybrid evaluator. Set by agent wiring, true
+	// only when config.ProcessingMode == config.ModeHybrid.
+	Enabled bool
+	// MotionThreshold is the minimum absolute change in a block's average
+	// luma (0..255 scale) between consecutive frames for that block to
+	// count as "changed".
+	MotionThreshold float64
+	// MinChangedArea is the minimum fraction (0..1) of evaluated blocks
+	// that must be "changed" for the frame to be flagged a motion
+	// candidate.
+	MinChangedArea float64
+	// BlockSize is the pixel edge length of each square block used for
+	// the block-based luma diff.
+	BlockSize int
+	// ROIs restricts motion evaluation to these normalized (0..1) regions
+	// of the frame. Empty means "analyze the whole frame" (default).
+	ROIs []ROI
+	// IdleFPS, when > 0, enables Milestone J5 adaptive sampling: after
+	// IdleAfter with no motion candidate, cameraPipeline.readLoop's
+	// Sampler drops its emit rate to IdleFPS (never above TargetFPS,
+	// which remains the ceiling). 0 disables adaptive sampling entirely
+	// -- Sampler then behaves exactly like NewSampler(TargetFPS) always
+	// has.
+	IdleFPS float64
+	// IdleAfter is how long the evaluator must see no motion candidate
+	// before dropping to IdleFPS. Only meaningful when IdleFPS > 0.
+	IdleAfter time.Duration
+}
+
+// HybridStatus is Milestone J's telemetry block, included in
+// PipelineStatus only when Hybrid mode is active for that camera. Never
+// carries an RTSP URI, credential, or frame bytes -- only counters and the
+// current adaptive state.
+type HybridStatus struct {
+	Enabled          bool    `json:"enabled"`
+	FramesEvaluated  int64   `json:"frames_evaluated"`
+	MotionCandidates int64   `json:"motion_candidates"`
+	FramesFiltered   int64   `json:"frames_filtered"`
+	AdaptiveState    string  `json:"adaptive_state"` // "idle" | "active"
+	IdleFPS          float64 `json:"idle_fps"`
+	ActiveFPS        float64 `json:"active_fps"`
+	ROICount         int     `json:"roi_count"`
+	LastMotionScore  float64 `json:"last_motion_score"`
 }

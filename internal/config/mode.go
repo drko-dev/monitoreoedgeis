@@ -2,14 +2,18 @@ package config
 
 import "fmt"
 
-// ProcessingMode selects where inference/video work happens. This milestone
-// models the three modes but implements no functional difference between them.
+// ProcessingMode selects where inference/video work happens.
 type ProcessingMode string
 
 const (
-	// ModeCloud does everything in the SaaS; the edge agent stays minimal.
+	// ModeCloud does everything in the SaaS; the edge agent stays minimal:
+	// every sampled frame is dispatched, unfiltered.
 	ModeCloud ProcessingMode = "cloud"
-	// ModeHybrid splits light local processing with the SaaS.
+	// ModeHybrid (Milestone J) runs a lightweight local motion evaluator
+	// (internal/processing.MotionDetector) ahead of the Router: only frames
+	// flagged as motion candidates are dispatched (and therefore reach the
+	// Cloud sink), reducing Cloud traffic while Cloud remains the sole
+	// inference engine. It is not local YOLO/object detection (Hito K).
 	ModeHybrid ProcessingMode = "hybrid"
 	// ModeEdge runs local inference via a (future) Python Vision Worker.
 	ModeEdge ProcessingMode = "edge"
