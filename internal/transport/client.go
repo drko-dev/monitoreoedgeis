@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,13 +22,18 @@ var (
 	// ErrTokenInvalid covers every 401 from the enroll endpoint: invalid,
 	// expired, already-used or mismatched token are all indistinguishable
 	// by design (anti-enumeration) — never inferred from response text.
-	ErrTokenInvalid     = errors.New("transport: enrollment token invalid")
-	ErrAlreadyEnrolled  = errors.New("transport: edge_id already enrolled")
-	ErrInvalidRequest   = errors.New("transport: request rejected as invalid by SaaS")
-	ErrUnauthorized     = errors.New("transport: unauthorized (credential rejected or revoked)")
-	ErrSaaSUnavailable  = errors.New("transport: SaaS unreachable")
-	ErrTimeout          = errors.New("transport: request timed out")
-	ErrInsecureURL      = errors.New("transport: insecure SaaS URL rejected")
+	ErrTokenInvalid    = errors.New("transport: enrollment token invalid")
+	ErrAlreadyEnrolled = errors.New("transport: edge_id already enrolled")
+	ErrInvalidRequest  = errors.New("transport: request rejected as invalid by SaaS")
+	ErrUnauthorized    = errors.New("transport: unauthorized (credential rejected or revoked)")
+	ErrSaaSUnavailable = errors.New("transport: SaaS unreachable")
+	ErrTimeout         = errors.New("transport: request timed out")
+	ErrInsecureURL     = errors.New("transport: insecure SaaS URL rejected")
+	// ErrRetryableStatus is a response the SaaS itself is telling us to
+	// retry: 408 (client timed out), 429 (rate limited), or any 5xx (the
+	// SaaS's own failure, not our request's). Distinct from
+	// ErrUnexpectedStatus, which stays non-retryable — see PostFrame.
+	ErrRetryableStatus  = errors.New("transport: SaaS reported a retryable failure")
 	ErrUnexpectedStatus = errors.New("transport: unexpected response from SaaS")
 )
 
@@ -203,6 +209,79 @@ func (c *Client) RotateKey(ctx context.Context, deviceID, credential string, req
 	return resp, nil
 }
 
+// PostFrame uploads one sampled video frame to FramesPath (Milestone I).
+// Unlike do(), the body is the raw JPEG (Content-Type: image/jpeg), not
+// JSON — frame metadata travels as headers instead, since there is no JSON
+// envelope to put it in. capturedAt is the pipeline's best-effort decode
+// timestamp (processing.Frame.Timestamp), not a true camera capture time.
+func (c *Client) PostFrame(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+FramesPath, bytes.NewReader(jpeg))
+	if err != nil {
+		return fmt.Errorf("transport: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "image/jpeg")
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("X-Device-Id", deviceID)
+	req.Header.Set("Authorization", "Bearer "+credential)
+	req.Header.Set("X-Candidate-Key", candidateKey)
+	req.Header.Set("X-Frame-Seq", strconv.FormatUint(seq, 10))
+	req.Header.Set("X-Frame-Timestamp", capturedAt.UTC().Format(time.RFC3339Nano))
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("%w: POST %s", ErrTimeout, FramesPath)
+		}
+		var netErr interface{ Timeout() bool }
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return fmt.Errorf("%w: POST %s", ErrTimeout, FramesPath)
+		}
+		// %w (not %v) on err: preserves context.Canceled in the chain when
+		// the caller's own context was cancelled mid-request (e.g. Milestone
+		// I6's drain loop shutting down), so errors.Is(result,
+		// context.Canceled) still works for the caller — while
+		// errors.Is(result, ErrSaaSUnavailable) keeps working too, since Go
+		// supports multiple %w verbs in one Errorf.
+		return fmt.Errorf("%w: POST %s: %w", ErrSaaSUnavailable, FramesPath, err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+
+	return classifyFrameStatus(resp.StatusCode)
+}
+
+// classifyFrameStatus maps a PostFrame HTTP status to a sentinel error by
+// status code alone — never by inferring from the response body — so
+// cloudsink's I6 offline buffer can tell a transient failure (worth
+// spooling for retry) from a permanent one (never worth retrying, buffered
+// or not):
+//
+//   - 200/202: success, nil.
+//   - 401/403: ErrUnauthorized — the credential itself is rejected; no
+//     retry, buffered or not, will succeed until an operator fixes it.
+//   - 408/429/5xx: ErrRetryableStatus — the SaaS is explicitly telling us
+//     (or failing in a way that implies) this exact request may succeed
+//     later.
+//   - Any other 4xx (400/404/409/413/422/...): ErrInvalidRequest — the
+//     request itself is permanently wrong; retrying it, buffered or not,
+//     would just repeat the same rejection forever.
+//   - Anything else (e.g. an unexpected 1xx/3xx): ErrUnexpectedStatus,
+//     treated as non-retryable since this package cannot say what it means.
+func classifyFrameStatus(status int) error {
+	switch {
+	case status == http.StatusAccepted || status == http.StatusOK:
+		return nil
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return fmt.Errorf("%w (status %d)", ErrUnauthorized, status)
+	case status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500:
+		return fmt.Errorf("%w (status %d)", ErrRetryableStatus, status)
+	case status >= 400:
+		return fmt.Errorf("%w (status %d)", ErrInvalidRequest, status)
+	default:
+		return fmt.Errorf("%w: status %d", ErrUnexpectedStatus, status)
+	}
+}
+
 // do issues one HTTP request and returns the raw status, response headers and
 // body for the caller to interpret. deviceID (X-Device-Id) and credential
 // (Authorization: Bearer) are both sent whenever non-empty — the SaaS
@@ -241,7 +320,10 @@ func (c *Client) do(ctx context.Context, method, path, deviceID, credential stri
 		if errors.As(err, &netErr) && netErr.Timeout() {
 			return 0, nil, nil, fmt.Errorf("%w: %s %s", ErrTimeout, method, path)
 		}
-		return 0, nil, nil, fmt.Errorf("%w: %s %s: %v", ErrSaaSUnavailable, method, path, err)
+		// %w on err (see PostFrame's identical fix): preserves
+		// context.Canceled in the chain for errors.Is, alongside
+		// ErrSaaSUnavailable.
+		return 0, nil, nil, fmt.Errorf("%w: %s %s: %w", ErrSaaSUnavailable, method, path, err)
 	}
 	defer resp.Body.Close()
 

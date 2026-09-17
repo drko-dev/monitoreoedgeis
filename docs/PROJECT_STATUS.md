@@ -9,20 +9,22 @@
 | Field             | Value                                                     |
 | ----------------- | ----------------------------------------------------------- |
 | **PROJECT**       | GEO CAM Edge                                              |
-| **CURRENT HITO**  | H — Video Pipeline (Geo Cam Edge)                         |
-| **STATE**         | IMPLEMENTED / TESTED / VALIDATED LOCAL + CI — READY FOR FINAL REVIEW |
-| **MERGED**        | Hito G: **YES** (PRs #7/#8/#9, `main` @ `50c7de7`). Hito H: **NO** — PR open on `feature/video-pipeline` |
-| **Branch**        | `feature/video-pipeline`                                    |
+| **CURRENT HITO**  | I — Modo Cloud (first slice: Edge→SaaS frame push)        |
+| **STATE**         | IMPLEMENTED / UNIT-TESTED — NO real-camera validation yet — NOT REVIEWED |
+| **MERGED**        | Hito G: **YES** (PRs #7/#8/#9, `main` @ `50c7de7`). Hito H: **YES** (PR #10, `main` @ `f7263b3`). Hito I: **NO** — PR open on `feature/cloud-video-sink` (Edge) / `feature/edge-frame-push` (SaaS, `monitoreoia`) |
+| **Branch**        | `feature/cloud-video-sink`                                   |
 | **DEPLOYED PROD** | **NO** — VPS/production untouched                         |
 | **Go version**    | 1.26.2                                                    |
 
-Hitos A through G are merged into `main` (Hito G's connectivity + operational
-CLI landed via PRs #7/#8/#9). This snapshot previously said Hito G's PR was
-still open on `feature/camera-connectivity` — that was stale; corrected here
-as part of Hito H per AGENTS.md's "keep PROJECT_STATUS accurate" rule. Hito H
-(this branch) is implemented and unit/race/vet/fmt/build-tested; see its
-section below for exact item-by-item status and what real-camera validation
-was/wasn't completed.
+Hitos A through H are merged into `main` (Hito G via PRs #7/#8/#9, Hito H via
+PR #10). This snapshot previously said Hito H's PR was still open — that was
+stale; corrected here as part of Hito I per AGENTS.md's "keep PROJECT_STATUS
+accurate" rule. Hito I's first slice (Edge→SaaS frame push, `docs/ROADMAP.md`
+items I1/I3/I4/I5/I8) is implemented and unit-tested on both repos
+(`go test -race ./...` clean on the Edge; SaaS unit tests clean, its
+PostgreSQL-backed integration tests are written but not run in this
+environment — no local Postgres). **No real-camera validation has been done
+for this slice** — see the Hito I section below.
 
 ## Hito A — what was implemented (MERGED)
 
@@ -398,7 +400,7 @@ credential is the one SaaS-side condition that degrades the whole agent.
 - **Strict Credential Privacy**: No secrets, tokens, or plaintext passwords logged or returned in status payloads.
 - **LAN Live Camera Validation**: Verified against physical Tapo TC70 camera (`192.168.0.6:554/stream2`), reading 20+ live interleaved packets in 1.47s.
 
-## Hito H — Video Pipeline (THIS BRANCH, `feature/video-pipeline`)
+## Hito H — Video Pipeline (MERGED, PR #10, `feature/video-pipeline`)
 
 Independent video pipeline downstream of Hito G's existing RTSP/RTP
 transport — no second RTSP client, no duplicated credentials/reconnect/health.
@@ -666,26 +668,79 @@ detection, ROI, Hybrid, Full Edge, GPU/NPU, long-term video storage —
 Hitos I/J/K. `video probe` CLI subcommand (justified above). H.265
 depacketization/decode (interface designed for it, not implemented).
 
+Hito H merged into `main` via PR #10 (`f7263b3`), explicitly authorized by a
+direct "mergeá el PR #10" instruction after four review rounds — see git
+history for the full round-by-round record (protocol corrections, decode
+queue/watchdog/metrics bugs, a shutdown deadlock, and the GPL→LGPL ffmpeg
+migration verified on both architectures).
+
+## Hito I — Modo Cloud (THIS BRANCH, `feature/cloud-video-sink`)
+
+First slice only: Edge→SaaS frame push, reusing Hito H's pipeline and the
+SaaS's existing Cloud Vision Worker (no RTSP duplication, no direct Cloud→LAN
+connection). Full item-by-item status in `docs/ROADMAP.md`'s Hito I section.
+
+**Edge (this repo):**
+- `internal/cloudsink` (new package) — `CloudSink` implements `processing.Sink`:
+  yuv420p → JPEG (quality 85) → `transport.Client.PostFrame`.
+- `internal/transport`: `FramesPath` + `Client.PostFrame` (raw JPEG body,
+  metadata as headers — `X-Candidate-Key`/`X-Frame-Seq`/`X-Frame-Timestamp`).
+- `internal/processing.Manager`: `NewManager(..., extraSinks ...Sink)` —
+  backward-compatible, `DebugSink` always first.
+- `internal/agent/cloudsink_module.go`: `newCloudSink`, gated on the
+  *existing* `GEOCAM_PROCESSING_MODE=cloud` (no new env var) + enrolled
+  credentials — same pattern as `newHeartbeatModule`.
+- Tests: `internal/cloudsink/cloudsink_test.go` (encode/upload/error paths),
+  `internal/transport/client_test.go` (`TestPostFrame*`, httptest-backed).
+  `go build ./...` / `go vet ./...` / `gofmt -l .` / `go test -race ./...` /
+  `make build-linux` (linux/amd64 + linux/arm64) — all clean.
+
+**SaaS (`monitoreoia`, branch `feature/edge-frame-push`, separate PR):**
+- `routers/edge.py`: `POST /api/v1/edge/frames` — auth via the existing
+  `authenticate_edge_device`, `candidate_key` resolved to `camera_id`
+  server-side (new `db_postgres.resolve_camera_id_by_identifier`, reusing the
+  existing `edge_device_cameras` table), forwards to the worker via the
+  existing `cloud_vision_client` IPC helper.
+- `cloud_vision_worker.py`: new IPC route `POST /internal/cameras/{camera_id}/frame`.
+- `cloud_vision.py`: `CloudVisionManager.push_frame()` feeds the same
+  detection path RTSP-pull uses; `CloudCameraState.edge_push` +
+  `sync_cameras_from_db` gating ensure a camera never runs RTSP-pull and
+  Edge-push at the same time.
+- Tests: `geocam/tests/test_edge_frame_ingest.py` — 7 pure unit tests pass
+  locally (no DB needed); 9 PostgreSQL-integration tests are written
+  (endpoint auth/resolution/forwarding, DB resolver functions) but **could
+  not be run in this environment** (no local Postgres — `STE_DB_BACKEND`
+  harness skips cleanly, same as this repo's other PG-backed tests).
+
+**Now done as code, on `feature/integrate-edge-cloud-hito-i`** (see
+`docs/ROADMAP.md`): offline buffering (I6), bandwidth control/compression
+tuning (I7), and real cost/bandwidth telemetry (I10) — one unified
+`internal/cloudsink.CloudSink` combining all three: JPEG quality/rate
+limiting applied after per-camera FIFO ordering and before POST, a disk
+spool for recoverable failures that replays paced through the same rate
+limiter (never dropping an already-durable frame for lack of tokens), and
+one canonical `Status`/`/status` surface with no duplicate counters across
+the three milestones. `go test ./...`, `-race`, `go vet`, `gofmt -l`, and
+`make build-linux` (amd64+arm64) all pass. **No real-camera validation** —
+this needs a live TC70 + a reachable SaaS + Postgres to verify end-to-end,
+none of which were available/authorized in this session; only a local
+encode+loopback-HTTP benchmark ran, documented as a synthetic-noise
+worst-case upper bound in `docs/performance/`.
+
 ## NEXT
 
-Hito H (this branch) is implemented, tested (unit + `-race`), validated
-against the real TC70 three times across fix iterations, and
-Docker-image-smoke-tested on both `linux/arm64` (local) and `linux/amd64`
-(CI, real hardware) with the final LGPL-only ffmpeg build — see its
-section above for exact per-item status and every real bug found/fixed
-along the way (ONVIF codec mismap, decode queue depth not wired, no stall
-watchdog, unbounded pendingTimes/stderr buffers, frames_received metric
-semantics, cumulative metrics across decoder restart, a shutdown deadlock,
-and the GPL→LGPL ffmpeg migration verified on both architectures). PR is
-open on `feature/video-pipeline`, **not merged** (per instructions — no
-merge without separate authorization).
+Hito I's first slice (this branch) is implemented and unit-tested on both
+repos, but **not validated against a real camera or a real SaaS/Postgres
+instance**, and not reviewed. PRs are open on `feature/cloud-video-sink`
+(Edge) and `feature/edge-frame-push` (SaaS), **not merged** (per
+instructions — no merge without separate authorization).
 
-**No remaining technical blockers. No remaining licensing/business
-decision.**
+Before this can be called done: run the SaaS's Postgres-backed integration
+tests for real, validate `POST /api/v1/edge/frames` against a live Edge +
+camera + SaaS + worker, and measure actual bandwidth per camera before
+scoping I7/I10.
 
-Next is Hito I. Do NOT start Hito I until authorized.
-
-**HITO H — READY FOR FINAL REVIEW**
+**HITO I (first slice) — IMPLEMENTED, NOT VALIDATED, NOT REVIEWED**
 
 ## HOW ANOTHER AI SHOULD CONTINUE
 

@@ -45,12 +45,17 @@ type Manager struct {
 	pipelines   map[string]*cameraPipeline
 	unsupported map[string]bool
 	router      *Router
+	extraSinks  []Sink
 }
 
 // NewManager creates a video pipeline manager. rtspMgr is Hito G's existing
 // RTSP connectivity manager — Manager registers itself as its PacketSink,
 // never opening a second connection to any camera.
-func NewManager(cfg Config, rtspMgr *rtsp.Manager, health HealthSink, logger *slog.Logger) *Manager {
+//
+// extraSinks are additional Sink implementations appended after DebugSink
+// (e.g. Milestone I's cloudsink.CloudSink) — empty is the common case
+// (Milestone H, or Milestone I with the cloud sink disabled/unconfigured).
+func NewManager(cfg Config, rtspMgr *rtsp.Manager, health HealthSink, logger *slog.Logger, extraSinks ...Sink) *Manager {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -62,6 +67,7 @@ func NewManager(cfg Config, rtspMgr *rtsp.Manager, health HealthSink, logger *sl
 		pipelines:   make(map[string]*cameraPipeline),
 		unsupported: make(map[string]bool),
 		doneCh:      make(chan struct{}),
+		extraSinks:  extraSinks,
 	}
 }
 
@@ -88,7 +94,8 @@ func (m *Manager) DebugSink() *DebugSink {
 // Start implements agent.Module.
 func (m *Manager) Start(ctx context.Context) error {
 	m.ctx, m.cancel = context.WithCancel(ctx)
-	m.router = NewRouter([]Sink{NewDebugSink()}, m.cfg.QueueDepth, m.logger)
+	sinks := append([]Sink{NewDebugSink()}, m.extraSinks...)
+	m.router = NewRouter(sinks, m.cfg.QueueDepth, m.logger)
 	m.rtsp.SetPacketSink(m)
 	go m.run()
 	return nil
@@ -209,5 +216,24 @@ func (m *Manager) publishStatus() {
 	m.health.SetVideoPipeline(VideoPipelineSummary{
 		CameraCount: len(statuses),
 		Cameras:     statuses,
+		CloudBuffer: m.cloudBufferStats(),
 	})
+}
+
+// cloudBufferStats returns the I6 buffer snapshot from whichever registered
+// sink reports one (nil when none does, e.g. buffering disabled).
+func (m *Manager) cloudBufferStats() *CloudBufferStats {
+	m.mu.Lock()
+	router := m.router
+	m.mu.Unlock()
+	if router == nil {
+		return nil
+	}
+	for _, s := range router.sinks {
+		if r, ok := s.(CloudBufferReporter); ok {
+			stats := r.CloudBufferStats()
+			return &stats
+		}
+	}
+	return nil
 }

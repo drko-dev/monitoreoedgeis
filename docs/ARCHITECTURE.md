@@ -296,8 +296,39 @@ Downstream of Hito G's existing RTSP/RTP transport (`internal/rtsp`), never a
 second RTSP client. Chain: `rtsp.PacketSink` (video RTP only, RTCP filtered
 out in `internal/rtsp`) → H.264 depacketize (single NALU/FU-A/STAP-A,
 whole-access-unit drop on packet loss) → decode → FPS sampling → resize →
-bounded ring buffer → `Router`/`Sink` (only `DebugSink` in this milestone —
-Cloud/Hybrid/Edge-YOLO sinks are I/J/K).
+bounded ring buffer → `Router`/`Sink` (`DebugSink` from Milestone H, plus
+`internal/cloudsink.CloudSink` from Milestone I — Hybrid/Edge-YOLO sinks
+remain J/K).
+
+## Cloud video sink (`internal/cloudsink`, Milestone I, first slice)
+
+`CloudSink` implements `processing.Sink`. It is wired into `processing.Manager`
+as an extra sink (`NewManager(..., extraSinks ...Sink)`) only when
+`GEOCAM_PROCESSING_MODE=cloud` (the existing knob, not a new one) and the Edge
+is enrolled — see `internal/agent/cloudsink_module.go`'s `newCloudSink`.
+
+Per routed `Frame` (already sampled/resized by Hito H): encode yuv420p to
+JPEG (`image/jpeg`, quality 85, `*image.YCbCr` straight into `jpeg.Encode` —
+no RGB round-trip) → `transport.Client.PostFrame` → `POST /api/v1/edge/frames`
+on the SaaS, reusing the Edge's existing enrolled Bearer credential (same one
+heartbeat uses — no separate credential). Frame metadata (`candidate_key`,
+sequence, timestamp) travels as headers (`X-Candidate-Key`, `X-Frame-Seq`,
+`X-Frame-Timestamp`) since the body is raw JPEG, not JSON. A failed upload is
+dropped, not retried or buffered (I6/I7 are explicitly out of scope for this
+slice) — same drop-on-backpressure philosophy as the rest of the pipeline.
+
+On the SaaS side (`monitoreoia`, branch `feature/edge-frame-push`,
+**not merged**): `POST /api/v1/edge/frames` resolves `organization_id` from
+the authenticated device (never from the Edge) and `camera_id` from
+`candidate_key` via the existing `edge_device_cameras` table (never a raw
+`camera_id` sent by the Edge), then forwards the JPEG to the Cloud Vision
+Worker over its existing internal loopback IPC
+(`cloud_vision_client.push_frame` → `cloud_vision_worker.py`'s new
+`POST /internal/cameras/{camera_id}/frame` → `CloudVisionManager.push_frame`).
+A camera linked to an Edge device (`edge_push=True`) never gets an RTSP-pull
+thread from the worker — `sync_cameras_from_db` gates on it — so the two
+frame sources (SaaS RTSP-pull, legacy; Edge push, this milestone) are never
+both active for the same camera.
 
 **Hook-in.** `internal/rtsp/supervisor.go`'s `streamLoop()` now calls
 `session.VideoChannel()` — the interleaved channel actually negotiated in

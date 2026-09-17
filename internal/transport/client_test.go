@@ -286,3 +286,162 @@ func contains(s, substr string) bool {
 	}
 	return false
 }
+
+func TestPostFrameSuccess(t *testing.T) {
+	frameBody := []byte{0xFF, 0xD8, 0xFF, 0xD9} // not a real jpeg, just distinguishable bytes
+	capturedAt := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != FramesPath {
+			t.Errorf("path = %q, want %q", r.URL.Path, FramesPath)
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %q, want POST", r.Method)
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "image/jpeg" {
+			t.Errorf("Content-Type = %q, want image/jpeg", ct)
+		}
+		if got := r.Header.Get("X-Device-Id"); got != "device-1" {
+			t.Errorf("X-Device-Id = %q", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer cred-1" {
+			t.Errorf("Authorization = %q", got)
+		}
+		if got := r.Header.Get("X-Candidate-Key"); got != "cam-1" {
+			t.Errorf("X-Candidate-Key = %q", got)
+		}
+		if got := r.Header.Get("X-Frame-Seq"); got != "7" {
+			t.Errorf("X-Frame-Seq = %q, want 7", got)
+		}
+		if got := r.Header.Get("X-Frame-Timestamp"); got != capturedAt.Format(time.RFC3339Nano) {
+			t.Errorf("X-Frame-Timestamp = %q", got)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if string(body) != string(frameBody) {
+			t.Errorf("body = %v, want %v", body, frameBody)
+		}
+		w.WriteHeader(http.StatusAccepted)
+	})
+
+	c, err := New(srv.URL, true, 2*time.Second, "test")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := c.PostFrame(context.Background(), "device-1", "cred-1", "cam-1", 7, capturedAt, frameBody); err != nil {
+		t.Fatalf("PostFrame() error = %v", err)
+	}
+}
+
+func TestPostFrameUnauthorized(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	c, _ := New(srv.URL, true, 2*time.Second, "test")
+
+	err := c.PostFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{1})
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("PostFrame() error = %v, want ErrUnauthorized", err)
+	}
+}
+
+// TestPostFrameStatusClassification pins the exact status->sentinel mapping
+// I6's offline buffer depends on to decide what is worth retrying:
+// classification is by HTTP status alone, never inferred from the response
+// body (see classifyFrameStatus).
+func TestPostFrameStatusClassification(t *testing.T) {
+	tests := []struct {
+		status int
+		want   error
+	}{
+		// Retryable: the SaaS is transiently failing or asking to slow down.
+		{http.StatusRequestTimeout, ErrRetryableStatus},
+		{http.StatusTooManyRequests, ErrRetryableStatus},
+		{http.StatusInternalServerError, ErrRetryableStatus},
+		{http.StatusBadGateway, ErrRetryableStatus},
+		{http.StatusServiceUnavailable, ErrRetryableStatus},
+		{http.StatusGatewayTimeout, ErrRetryableStatus},
+		// Never retryable: the credential is rejected.
+		{http.StatusUnauthorized, ErrUnauthorized},
+		{http.StatusForbidden, ErrUnauthorized},
+		// Never retryable: the request itself is permanently wrong.
+		{http.StatusBadRequest, ErrInvalidRequest},
+		{http.StatusNotFound, ErrInvalidRequest},
+		{http.StatusConflict, ErrInvalidRequest},
+		{http.StatusRequestEntityTooLarge, ErrInvalidRequest},
+		{http.StatusUnprocessableEntity, ErrInvalidRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run(http.StatusText(tt.status), func(t *testing.T) {
+			srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
+			})
+			c, _ := New(srv.URL, true, 2*time.Second, "test")
+
+			err := c.PostFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{1})
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("PostFrame() [status %d] error = %v, want wrapping %v", tt.status, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestPostFrameSaaSUnavailable(t *testing.T) {
+	// A closed connection (no listener) makes the client's Do() fail before
+	// any status code exists.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	c, err := New("http://"+addr, true, 500*time.Millisecond, "test")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = c.PostFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{1})
+	if !errors.Is(err, ErrSaaSUnavailable) {
+		t.Fatalf("PostFrame() error = %v, want ErrSaaSUnavailable", err)
+	}
+}
+
+// TestPostFrameContextCanceledIsPreserved pins the fix for a caller (e.g.
+// cloudsink's I6 drain loop) that needs to distinguish "my own shutdown
+// cancelled this request" from "the SaaS is unreachable" — both used to
+// collapse into ErrSaaSUnavailable because the underlying error was
+// wrapped with %v instead of %w, which silently drops it from the
+// errors.Is chain.
+func TestPostFrameContextCanceledIsPreserved(t *testing.T) {
+	release := make(chan struct{})
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		<-release // hold the request open until the client cancels
+	})
+	defer close(release)
+
+	c, err := New(srv.URL, true, 5*time.Second, "test")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	err = c.PostFrame(ctx, "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{1})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("PostFrame() error = %v, want errors.Is(err, context.Canceled) == true", err)
+	}
+	// The existing classification must still work alongside it (Go
+	// supports multiple %w verbs in one Errorf).
+	if !errors.Is(err, ErrSaaSUnavailable) {
+		t.Fatalf("PostFrame() error = %v, want errors.Is(err, ErrSaaSUnavailable) == true too", err)
+	}
+}

@@ -104,6 +104,37 @@ type PipelineStatus struct {
 type VideoPipelineSummary struct {
 	CameraCount int              `json:"camera_count"`
 	Cameras     []PipelineStatus `json:"cameras"`
+	// CloudBuffer is nil unless a registered Sink implements
+	// CloudBufferReporter and reports buffering as active (Milestone I6).
+	CloudBuffer *CloudBufferStats `json:"cloud_buffer,omitempty"`
+}
+
+// CloudBufferStats is a point-in-time snapshot of Milestone I6's offline
+// buffer (cloudsink.CloudSink, when GEOCAM_CLOUD_BUFFER_MAX_BYTES/FRAMES
+// enable it). Defined here rather than in internal/cloudsink so Manager can
+// read it without importing cloudsink, which would cycle back to
+// processing (cloudsink already imports processing.Frame/Sink).
+type CloudBufferStats struct {
+	BufferedFrames int   `json:"buffered_frames"`
+	BufferedBytes  int64 `json:"buffered_bytes"`
+	ReplayedFrames int64 `json:"replayed_frames"`
+	DroppedFull    int64 `json:"dropped_buffer_full"`
+	CorruptEntries int64 `json:"corrupt_buffer_entries"`
+	// DroppedOversize counts a buffered frame discarded during replay
+	// because its JPEG size permanently exceeds the currently configured
+	// Milestone I7 rate limiter burst capacity (GEOCAM_CLOUD_BURST_BYTES) —
+	// it can never be sent under that config, no matter how long the drain
+	// loop waits. Distinct from DroppedFull (a live buffer that was full at
+	// enqueue time): this is a replay-time, config-driven discard.
+	DroppedOversize int64 `json:"dropped_oversize"`
+}
+
+// CloudBufferReporter is implemented by a Sink that exposes I6 buffer
+// metrics. Only cloudsink.CloudSink does, and only when buffering is
+// enabled (see cloudsink.WithBuffer) — Manager checks for it with a type
+// assertion, so a Sink without buffering (or DebugSink) is unaffected.
+type CloudBufferReporter interface {
+	CloudBufferStats() CloudBufferStats
 }
 
 // Config holds the video pipeline's tunables, all sourced from
