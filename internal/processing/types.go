@@ -120,6 +120,13 @@ type CloudBufferStats struct {
 	ReplayedFrames int64 `json:"replayed_frames"`
 	DroppedFull    int64 `json:"dropped_buffer_full"`
 	CorruptEntries int64 `json:"corrupt_buffer_entries"`
+	// DroppedOversize counts a buffered frame discarded during replay
+	// because its JPEG size permanently exceeds the currently configured
+	// Milestone I7 rate limiter burst capacity (GEOCAM_CLOUD_BURST_BYTES) —
+	// it can never be sent under that config, no matter how long the drain
+	// loop waits. Distinct from DroppedFull (a live buffer that was full at
+	// enqueue time): this is a replay-time, config-driven discard.
+	DroppedOversize int64 `json:"dropped_oversize"`
 }
 
 // CloudBufferReporter is implemented by a Sink that exposes I6 buffer

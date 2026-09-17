@@ -3,6 +3,7 @@ package cloudsink
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"image/jpeg"
@@ -20,9 +21,6 @@ import (
 type fakeSender struct {
 	mu  sync.Mutex
 	err error
-	// failFirstN, if > 0, makes the first N calls fail with err before
-	// switching to success — used to exercise buffer replay.
-	failFirstN int
 
 	gotDeviceID   string
 	gotCredential string
@@ -43,12 +41,6 @@ func (f *fakeSender) PostFrame(_ context.Context, deviceID, credential, candidat
 	f.gotSeq = seq
 	f.gotCapturedAt = capturedAt
 	f.gotJPEG = append([]byte(nil), jpeg...)
-	if f.failFirstN > 0 {
-		if f.calls <= f.failFirstN {
-			return f.err
-		}
-		return nil
-	}
 	return f.err
 }
 
@@ -70,6 +62,20 @@ func solidYUV420p(width, height int, y, cb, cr byte) []byte {
 	}
 	for i := ySize + cSize; i < ySize+2*cSize; i++ {
 		buf[i] = cr
+	}
+	return buf
+}
+
+// noisyYUV420pForTest fills a yuv420p buffer with pseudo-random bytes so
+// JPEG compression actually scales with size — a solid-color frame
+// compresses to nearly the same tiny size regardless of dimensions.
+func noisyYUV420pForTest(t *testing.T, width, height int) []byte {
+	t.Helper()
+	ySize := width * height
+	cSize := (width / 2) * (height / 2)
+	buf := make([]byte, ySize+2*cSize)
+	if _, err := rand.Read(buf); err != nil {
+		t.Fatalf("rand.Read: %v", err)
 	}
 	return buf
 }
@@ -702,12 +708,19 @@ func TestCloudSink_Replay_UploadsBufferedFramesInOrder(t *testing.T) {
 	drainPollInterval = 10 * time.Millisecond
 	t.Cleanup(func() { drainPollInterval = 2 * time.Second })
 
-	// failFirstN=1: only the first call (frame 1's direct upload attempt
-	// from Route) fails. Frame 2 never reaches the sender via Route at all
-	// — HasPending(cam-1) is already true once frame 1 is queued, so Route
-	// enqueues it directly (see the FIFO-ordering test above). Both
-	// replay attempts must then succeed with no backoff involved.
-	sender := &fakeSender{err: transport.ErrSaaSUnavailable, failFirstN: 1}
+	// The sender fails for BOTH Route() calls below and is only allowed to
+	// succeed afterward, once both frames are confirmed durably queued.
+	// This closes a real flakiness this test used to have: with a
+	// call-counter-based sender that succeeds starting from a fixed call
+	// number, a drain-loop replay racing ahead of Route(2) could consume
+	// that "first success" slot before Route(2) ever enqueued — HasPending
+	// would then see an empty buffer and Route(2) would upload directly
+	// instead of queuing, so BufferedFrames never reached 2
+	// (`go test -count=100 -run TestCloudSink_Replay_UploadsBufferedFramesInOrder`
+	// caught this within the first few runs). Keeping the sender failing
+	// deterministically until both frames are queued removes the race
+	// entirely, without any added sleep.
+	sender := &fakeSender{err: transport.ErrSaaSUnavailable}
 	s, _ := newBufferedSink(t, sender, 10)
 
 	if err := s.Route(testFrame("cam-1", 1)); err != nil {
@@ -719,6 +732,10 @@ func TestCloudSink_Replay_UploadsBufferedFramesInOrder(t *testing.T) {
 	if got := s.CloudBufferStats().BufferedFrames; got != 2 {
 		t.Fatalf("BufferedFrames before replay = %d, want 2", got)
 	}
+
+	sender.mu.Lock()
+	sender.err = nil
+	sender.mu.Unlock()
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -883,6 +900,89 @@ func TestCloudSink_Close_DuringLimiterWait_TerminatesCleanly(t *testing.T) {
 	}
 }
 
+// TestCloudSink_Replay_OversizedFrame_DiscardedOnce_DrainContinues is the P0
+// fix: a buffered frame whose JPEG permanently exceeds the currently
+// configured burst capacity (e.g. GEOCAM_CLOUD_BURST_BYTES lowered across a
+// restart) must be discarded on its own — once — not kill the drain
+// goroutine and stall every frame behind it.
+func TestCloudSink_Replay_OversizedFrame_DiscardedOnce_DrainContinues(t *testing.T) {
+	// A solid-color image compresses to nearly the same tiny size
+	// regardless of its dimensions (JPEG's block-based encoding dominates
+	// at this scale), so "big" needs real entropy to actually produce a
+	// larger JPEG than "small" — noise, not a bigger solid frame.
+	bigFrame := processing.Frame{
+		CandidateKey: "cam-1",
+		Timestamp:    time.Now(),
+		Seq:          1,
+		OutputWidth:  64,
+		OutputHeight: 64,
+		Data:         noisyYUV420pForTest(t, 64, 64),
+	}
+	smallFrame := testFrame("cam-2", 1)
+
+	probe := New(&fakeSender{}, "dev-1", "cred-1", Config{}, slog.Default(), nil)
+	if err := probe.Route(bigFrame); err != nil {
+		t.Fatalf("probe Route(big) error = %v", err)
+	}
+	bigBytes := probe.Status().JPEGBytesGenerated
+	if err := probe.Route(smallFrame); err != nil {
+		t.Fatalf("probe Route(small) error = %v", err)
+	}
+	smallBytes := probe.Status().JPEGBytesGenerated - bigBytes
+	if smallBytes >= bigBytes {
+		t.Fatalf("test setup invalid: small frame (%d bytes) not smaller than big frame (%d bytes)", smallBytes, bigBytes)
+	}
+
+	// Phase 1: buffer both frames with no limiter constraint, in FIFO
+	// order (big first).
+	dir := t.TempDir()
+	sender := &fakeSender{err: transport.ErrSaaSUnavailable}
+	s1 := New(sender, "dev-1", "cred-1", Config{}, slog.Default(), nil, WithBuffer(dir, 1<<20, 10, 0))
+	if err := s1.Route(bigFrame); err != nil {
+		t.Fatalf("Route(big) error = %v", err)
+	}
+	if err := s1.Route(smallFrame); err != nil {
+		t.Fatalf("Route(small) error = %v", err)
+	}
+	if got := s1.CloudBufferStats().BufferedFrames; got != 2 {
+		t.Fatalf("expected 2 buffered frames, got %d", got)
+	}
+	s1.Close()
+
+	// Phase 2: reopen the same spool with a burst that admits the small
+	// frame but not the big (now-oversized) one at the front of the queue.
+	drainPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { drainPollInterval = 2 * time.Second })
+
+	sender.mu.Lock()
+	sender.err = nil
+	sender.mu.Unlock()
+
+	cfg := Config{MaxBytesPerSec: 1_000_000, BurstBytes: int64(bigBytes) - 1}
+	if int64(smallBytes) > cfg.BurstBytes {
+		t.Fatalf("test setup invalid: small frame (%d bytes) still exceeds burst (%d)", smallBytes, cfg.BurstBytes)
+	}
+	s2 := New(sender, "dev-1", "cred-1", cfg, slog.Default(), nil, WithBuffer(dir, 1<<20, 10, 0))
+	t.Cleanup(s2.Close)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && s2.CloudBufferStats().BufferedFrames != 0 {
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	stats := s2.CloudBufferStats()
+	if stats.BufferedFrames != 0 {
+		t.Fatalf("drain loop appears dead: BufferedFrames = %d, want 0 "+
+			"(the oversized frame should be discarded and the small one replayed)", stats.BufferedFrames)
+	}
+	if stats.DroppedOversize != 1 {
+		t.Fatalf("DroppedOversize = %d, want 1", stats.DroppedOversize)
+	}
+	if stats.ReplayedFrames != 1 {
+		t.Fatalf("ReplayedFrames = %d, want 1 (only the small, non-oversized frame)", stats.ReplayedFrames)
+	}
+}
+
 func TestCloudSink_RestartRecoversSpool_AndReplays(t *testing.T) {
 	dir := t.TempDir()
 	sender := &fakeSender{err: transport.ErrSaaSUnavailable}
@@ -940,6 +1040,20 @@ func TestCloudSink_Close_ShutsDownDrainLoopCleanly(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("Close() did not return: drain goroutine did not shut down cleanly")
+	}
+
+	// Shutdown must never discard or advance the still-buffered frame, and
+	// must never count it as a successful/failed upload it never made.
+	stats := s.CloudBufferStats()
+	if stats.BufferedFrames != 1 {
+		t.Fatalf("BufferedFrames after shutdown = %d, want 1 (frame preserved, not lost)", stats.BufferedFrames)
+	}
+	if stats.ReplayedFrames != 0 {
+		t.Fatalf("ReplayedFrames after shutdown = %d, want 0", stats.ReplayedFrames)
+	}
+	status := s.Status()
+	if status.FramesUploadSucceeded != 0 {
+		t.Fatalf("FramesUploadSucceeded after shutdown = %d, want 0", status.FramesUploadSucceeded)
 	}
 }
 

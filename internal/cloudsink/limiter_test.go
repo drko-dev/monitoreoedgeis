@@ -2,6 +2,7 @@ package cloudsink
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -211,4 +212,92 @@ func TestTokenBucket_ThreadSafety(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestTokenBucket_Wait_BlocksAllowUntilSatisfied is the fairness fix for
+// the I6/I7 starvation finding: while a replay is inside Wait(), the
+// direct path's Allow() must yield instead of racing it for newly-refilled
+// tokens, or a durable buffered frame could be postponed indefinitely
+// under sustained direct traffic.
+func TestTokenBucket_Wait_BlocksAllowUntilSatisfied(t *testing.T) {
+	l := NewLimiter(1000, 100, 0) // 1000 B/s, burst 100 B
+	if !l.Allow(100) {
+		t.Fatal("initial Allow(100) should succeed (full burst)")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	waitStarted := make(chan struct{})
+	waitDone := make(chan error, 1)
+	go func() {
+		close(waitStarted)
+		waitDone <- l.Wait(ctx, 100) // needs the burst to fully refill
+	}()
+	<-waitStarted
+	time.Sleep(20 * time.Millisecond) // let Wait() register as a waiter
+
+	if l.Allow(1) {
+		t.Fatal("Allow() succeeded while a Wait() was pending — no fairness against starvation")
+	}
+
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			t.Fatalf("Wait() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wait() did not complete")
+	}
+
+	// Wait(100) just consumed the full refilled burst for itself, so an
+	// immediate Allow(1) can legitimately fail on token exhaustion alone —
+	// that's not what this assertion is checking. Give a few bytes time to
+	// refill (1000 B/s), then confirm Allow() is no longer blocked by
+	// fairness (a waiters-count bug would still block it here).
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if l.Allow(1) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("Allow() still blocked after Wait() completed and tokens had time to refill — priority was not released")
+}
+
+// TestTokenBucket_Wait_CancellationReleasesPriority ensures a cancelled
+// waiter doesn't leave Allow() permanently blocked.
+func TestTokenBucket_Wait_CancellationReleasesPriority(t *testing.T) {
+	l := NewLimiter(1, 100, 0) // refill so slow Wait(100) will not finish in test time
+	if !l.Allow(100) {
+		t.Fatal("initial Allow(100) should succeed")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- l.Wait(ctx, 100) }()
+
+	time.Sleep(20 * time.Millisecond)
+	if l.Allow(1) {
+		t.Fatal("Allow() succeeded while a Wait() was pending")
+	}
+
+	cancel()
+	select {
+	case err := <-waitDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Wait() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wait() did not return after cancellation")
+	}
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if l.Allow(1) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("Allow() still blocked after the waiting Wait() was cancelled — priority not released")
 }

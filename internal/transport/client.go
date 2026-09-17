@@ -236,7 +236,13 @@ func (c *Client) PostFrame(ctx context.Context, deviceID, credential, candidateK
 		if errors.As(err, &netErr) && netErr.Timeout() {
 			return fmt.Errorf("%w: POST %s", ErrTimeout, FramesPath)
 		}
-		return fmt.Errorf("%w: POST %s: %v", ErrSaaSUnavailable, FramesPath, err)
+		// %w (not %v) on err: preserves context.Canceled in the chain when
+		// the caller's own context was cancelled mid-request (e.g. Milestone
+		// I6's drain loop shutting down), so errors.Is(result,
+		// context.Canceled) still works for the caller — while
+		// errors.Is(result, ErrSaaSUnavailable) keeps working too, since Go
+		// supports multiple %w verbs in one Errorf.
+		return fmt.Errorf("%w: POST %s: %w", ErrSaaSUnavailable, FramesPath, err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
@@ -314,7 +320,10 @@ func (c *Client) do(ctx context.Context, method, path, deviceID, credential stri
 		if errors.As(err, &netErr) && netErr.Timeout() {
 			return 0, nil, nil, fmt.Errorf("%w: %s %s", ErrTimeout, method, path)
 		}
-		return 0, nil, nil, fmt.Errorf("%w: %s %s: %v", ErrSaaSUnavailable, method, path, err)
+		// %w on err (see PostFrame's identical fix): preserves
+		// context.Canceled in the chain for errors.Is, alongside
+		// ErrSaaSUnavailable.
+		return 0, nil, nil, fmt.Errorf("%w: %s %s: %w", ErrSaaSUnavailable, method, path, err)
 	}
 	defer resp.Body.Close()
 

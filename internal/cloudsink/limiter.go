@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,6 +34,16 @@ type TokenBucket struct {
 	lastFrameRefill time.Time
 
 	nowFunc func() time.Time
+
+	// waiters counts in-flight Wait() calls (Milestone I6 replay). While
+	// > 0, Allow() (the direct Route path) yields instead of racing a
+	// waiter for newly-refilled tokens — otherwise sustained direct
+	// traffic from other cameras can starve an already-durable buffered
+	// frame indefinitely, since Allow() checks opportunistically on every
+	// call while Wait() only rechecks after its own computed sleep. A
+	// counter, not a bool, because more than one replay/drain call could
+	// in principle wait concurrently.
+	waiters atomic.Int32
 }
 
 // NewLimiter creates a TokenBucket rate limiter.
@@ -145,9 +156,18 @@ func (l *TokenBucket) refillLocked(now time.Time) {
 // Allow reports whether an event consuming bytes is permitted right now.
 // If permitted, tokens are consumed and Allow returns true.
 // If not permitted, tokens are not consumed and Allow returns false.
+//
+// While a Milestone I6 replay is blocked inside Wait, Allow yields
+// (returns false without touching the token pool) rather than racing that
+// waiter for newly-refilled tokens: direct traffic throttles normally
+// (ErrThrottled) until the waiter's frame ships or gives up, then Allow
+// resumes competing for tokens as usual.
 func (l *TokenBucket) Allow(bytes int64) bool {
 	if l == nil || !l.enabled() {
 		return true
+	}
+	if l.waiters.Load() > 0 {
+		return false
 	}
 
 	l.mu.Lock()
@@ -175,10 +195,18 @@ func (l *TokenBucket) Allow(bytes int64) bool {
 // Wait blocks until enough tokens are available to permit an event of size
 // bytes, or until ctx is cancelled. It calculates the exact wait duration and
 // uses a timer without busy-looping.
+//
+// For the duration of the call, Wait holds fairness priority over Allow
+// (see the waiters field): direct-path callers yield instead of consuming
+// tokens a waiting replay is counting on. Priority is released as soon as
+// Wait returns, for any reason — success, cancellation, or a burst-capacity
+// error — never held longer than this one call.
 func (l *TokenBucket) Wait(ctx context.Context, bytes int64) error {
 	if l == nil || !l.enabled() {
 		return ctx.Err()
 	}
+	l.waiters.Add(1)
+	defer l.waiters.Add(-1)
 
 	for {
 		if err := ctx.Err(); err != nil {

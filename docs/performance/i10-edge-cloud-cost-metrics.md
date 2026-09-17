@@ -14,7 +14,13 @@ never a mutex on the hot path — see `internal/cloudsink/cloudsink.go`):
 - `jpeg_bytes_uploaded` (only the body of **successful** uploads — a failed
   attempt's body was generated but never delivered, so it does not count)
 - `upload_latency_avg_ms`
-- `effective_bytes_per_sec`, `effective_frames_per_sec` (since process start)
+- `effective_bytes_per_sec`, `effective_frames_per_sec` — a **rolling
+  10-second window** (`internal/cloudsink/rate.go`), not a since-process-start
+  average. That distinction matters: after the offline buffer (Milestone I6)
+  drains a backlog built up during an outage, a since-start average would
+  report a rate diluted by the idle outage time, understating real load right
+  when it's highest. `since_seconds` still exists as plain uptime, but is no
+  longer the denominator of either effective rate.
 
 `jpeg_bytes_uploaded` is deliberately not called `network_bytes`: it is the
 JPEG body only. HTTP/TLS overhead is not measured and not estimated — the
@@ -93,6 +99,42 @@ go test -tags localbench ./internal/cameratest/ -run TestLocalBandwidthBenchmark
    per the I10 goal, percentiles were not.
 4. **No multi-camera extrapolation** was performed or is implied here. The
    numbers above are single-camera, single-process.
+
+## I6 offline buffer × I7 bandwidth limiter — post-review fixes
+
+An independent review of the I6/I7/I10 integration (PR #16) found two
+cross-milestone bugs, both fixed on the same branch:
+
+- **Oversized buffered frame killing the whole drain loop (P0).** The I6
+  drain goroutine replays each buffered frame through the I7 rate limiter's
+  `TokenBucket.Wait`. If a frame's JPEG permanently exceeds the currently
+  configured burst (`GEOCAM_CLOUD_BURST_BYTES` lowered, or changed across a
+  restart while frames were still spooled from before), `Wait` returns a
+  non-cancellation error that the drain loop used to treat identically to a
+  shutdown signal — silently and permanently stopping *all* replay, not just
+  that one frame, until a process restart. It now discards only that frame,
+  logs a warning (no JPEG bytes, no secrets), and keeps draining. The buffer
+  surface (`VideoPipelineSummary.CloudBuffer` / `CloudBufferStats`) gained a
+  new counter for this, kept separate from the pre-existing
+  `dropped_buffer_full`:
+
+  ```json
+  "cloud_buffer": {
+    "dropped_oversize": 0
+  }
+  ```
+
+- **Starvation between direct traffic and replay (P1).** The direct upload
+  path (`Allow`) and the I6 replay path (`Wait`) shared one `TokenBucket`
+  with no fairness: sustained direct traffic from other cameras could keep
+  consuming tokens as they refilled, indefinitely postponing an
+  already-durable buffered frame (never dropping it, just never sending it).
+  `TokenBucket` now tracks an in-flight-waiter count; while a replay is
+  inside `Wait`, `Allow` yields (`false`, no tokens touched) instead of
+  racing it. Priority is held only for the duration of that one `Wait` call
+  and released the moment it returns, for any reason — including
+  cancellation, so a caller waiting-then-giving-up never leaves direct
+  traffic blocked behind it.
 
 ## What this gives I7
 

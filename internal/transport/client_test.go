@@ -410,3 +410,38 @@ func TestPostFrameSaaSUnavailable(t *testing.T) {
 		t.Fatalf("PostFrame() error = %v, want ErrSaaSUnavailable", err)
 	}
 }
+
+// TestPostFrameContextCanceledIsPreserved pins the fix for a caller (e.g.
+// cloudsink's I6 drain loop) that needs to distinguish "my own shutdown
+// cancelled this request" from "the SaaS is unreachable" — both used to
+// collapse into ErrSaaSUnavailable because the underlying error was
+// wrapped with %v instead of %w, which silently drops it from the
+// errors.Is chain.
+func TestPostFrameContextCanceledIsPreserved(t *testing.T) {
+	release := make(chan struct{})
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		<-release // hold the request open until the client cancels
+	})
+	defer close(release)
+
+	c, err := New(srv.URL, true, 5*time.Second, "test")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	err = c.PostFrame(ctx, "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{1})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("PostFrame() error = %v, want errors.Is(err, context.Canceled) == true", err)
+	}
+	// The existing classification must still work alongside it (Go
+	// supports multiple %w verbs in one Errorf).
+	if !errors.Is(err, ErrSaaSUnavailable) {
+		t.Fatalf("PostFrame() error = %v, want errors.Is(err, ErrSaaSUnavailable) == true too", err)
+	}
+}

@@ -105,9 +105,19 @@ type Status struct {
 	JPEGBytesUploaded     uint64  `json:"jpeg_bytes_uploaded"`
 	EncodeLatencyAvgMs    float64 `json:"encode_latency_avg_ms"`
 	UploadLatencyAvgMs    float64 `json:"upload_latency_avg_ms"`
+	// EffectiveBytesPerSec/EffectiveFramesPerSec are a ROLLING rate over
+	// the trailing effectiveRateWindow (10s) — never a since-process-start
+	// average. A cumulative average would stay badly diluted for the rest
+	// of the process's life after any outage: a long idle period followed
+	// by an I6 replay burst would otherwise report a misleadingly low
+	// rate right when real load is highest. Both direct and replayed
+	// uploads count identically. Decays to 0 once nothing has uploaded for
+	// a full window.
 	EffectiveBytesPerSec  float64 `json:"effective_bytes_per_sec"`
 	EffectiveFramesPerSec float64 `json:"effective_frames_per_sec"`
-	SinceSeconds          float64 `json:"since_seconds"`
+	// SinceSeconds is process uptime for context only — it is NOT the
+	// denominator of EffectiveBytesPerSec/EffectiveFramesPerSec.
+	SinceSeconds float64 `json:"since_seconds"`
 
 	// Milestone I7: throttling and the limits currently configured.
 	ThrottledFrames       uint64  `json:"throttled_frames"`
@@ -138,7 +148,7 @@ type stats struct {
 	throttledBytes       atomic.Uint64
 }
 
-func (s *stats) snapshot(startedAt time.Time, cfg Config, limiter *TokenBucket) Status {
+func (s *stats) snapshot(startedAt time.Time, cfg Config, limiter *TokenBucket, rate *effectiveRate) Status {
 	encodeSamples := s.encodeLatencySamples.Load()
 	uploadSamples := s.uploadLatencySamples.Load()
 	var encodeAvgMs, uploadAvgMs float64
@@ -152,11 +162,7 @@ func (s *stats) snapshot(startedAt time.Time, cfg Config, limiter *TokenBucket) 
 	elapsed := time.Since(startedAt).Seconds()
 	bytesUploaded := s.jpegBytesUploaded.Load()
 	framesSucceeded := s.uploadSucceeded.Load()
-	var bytesPerSec, framesPerSec float64
-	if elapsed > 0 {
-		bytesPerSec = float64(bytesUploaded) / elapsed
-		framesPerSec = float64(framesSucceeded) / elapsed
-	}
+	bytesPerSec, framesPerSec := rate.rate(time.Now())
 
 	var burstBytes int64
 	if limiter != nil {
@@ -201,11 +207,13 @@ type CloudSink struct {
 
 	health    HealthSink
 	stats     stats
+	rate      *effectiveRate
 	startedAt time.Time
 
-	buffer *Buffer
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	buffer          *Buffer
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
+	droppedOversize atomic.Uint64
 }
 
 // Option configures optional CloudSink behavior at construction time.
@@ -261,6 +269,7 @@ func New(sender FrameSender, deviceID, credential string, cfg Config, logger *sl
 		limiter:    limiter,
 		logger:     logger,
 		health:     health,
+		rate:       newEffectiveRate(effectiveRateWindow),
 		startedAt:  time.Now(),
 	}
 	for _, opt := range opts {
@@ -293,7 +302,7 @@ func (s *CloudSink) Close() {
 // the currently configured Milestone I7 limits, and Milestone I6 throttle
 // counters.
 func (s *CloudSink) Status() Status {
-	return s.stats.snapshot(s.startedAt, s.cfg, s.limiter)
+	return s.stats.snapshot(s.startedAt, s.cfg, s.limiter, s.rate)
 }
 
 // CloudBufferStats implements processing.CloudBufferReporter. Returns the
@@ -304,11 +313,12 @@ func (s *CloudSink) CloudBufferStats() processing.CloudBufferStats {
 	}
 	st := s.buffer.Stats()
 	return processing.CloudBufferStats{
-		BufferedFrames: st.BufferedFrames,
-		BufferedBytes:  st.BufferedBytes,
-		ReplayedFrames: st.ReplayedFrames,
-		DroppedFull:    st.DroppedFull,
-		CorruptEntries: st.CorruptEntries,
+		BufferedFrames:  st.BufferedFrames,
+		BufferedBytes:   st.BufferedBytes,
+		ReplayedFrames:  st.ReplayedFrames,
+		DroppedFull:     st.DroppedFull,
+		CorruptEntries:  st.CorruptEntries,
+		DroppedOversize: int64(s.droppedOversize.Load()),
 	}
 }
 
@@ -398,6 +408,7 @@ func (s *CloudSink) upload(ctx context.Context, f processing.Frame, jpegBytes []
 	}
 	s.stats.uploadSucceeded.Add(1)
 	s.stats.jpegBytesUploaded.Add(uint64(len(jpegBytes)))
+	s.rate.record(int64(len(jpegBytes)), time.Now())
 	s.publishStatus()
 	s.logger.Debug("frame uploaded", "candidate_key", f.CandidateKey, "seq", f.Seq, "bytes", len(jpegBytes))
 	return nil
@@ -411,7 +422,7 @@ func (s *CloudSink) publishStatus() {
 	if s.health == nil {
 		return
 	}
-	s.health.SetCloudStatus(s.stats.snapshot(s.startedAt, s.cfg, s.limiter))
+	s.health.SetCloudStatus(s.stats.snapshot(s.startedAt, s.cfg, s.limiter, s.rate))
 }
 
 func (s *CloudSink) enqueue(f processing.Frame, jpegBytes []byte) error {
@@ -488,9 +499,26 @@ func (s *CloudSink) drainLoop(ctx context.Context) {
 
 		if s.limiter != nil {
 			if err := s.limiter.Wait(ctx, int64(len(f.JPEG))); err != nil {
-				// ctx cancelled (shutdown): stop cleanly without discarding
-				// or advancing the still-buffered frame.
-				return
+				if ctx.Err() != nil {
+					// Real shutdown: stop cleanly without discarding or
+					// advancing the still-buffered frame.
+					return
+				}
+				// Not a cancellation: this frame's JPEG permanently
+				// exceeds the currently configured burst capacity (e.g.
+				// GEOCAM_CLOUD_BURST_BYTES was lowered, or the frame
+				// predates a resolution/quality change), so no amount of
+				// waiting will ever admit it under this config. Killing
+				// the whole drain goroutine over one such frame would
+				// silently stall every frame behind it too — instead,
+				// discard only this frame (never bypass the limiter) and
+				// keep draining the rest of the spool.
+				s.droppedOversize.Add(1)
+				s.logger.Warn("cloud buffer: discarding frame that exceeds configured burst capacity",
+					"candidate_key", f.CandidateKey, "seq", f.Seq, slog.Any("error", err))
+				s.buffer.Discard()
+				backoff = 0
+				continue
 			}
 		}
 
