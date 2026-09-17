@@ -207,19 +207,27 @@ func (s *CloudSink) enqueue(f processing.Frame, jpegBytes []byte) error {
 }
 
 // isRecoverable decides whether a PostFrame error is worth buffering for
-// retry. ErrUnauthorized (revoked/invalid credential) is deliberately
-// excluded: retrying it won't succeed until an operator fixes the
-// credential out of band, and repeatedly retrying it would just be a
-// request storm against a SaaS that is already rejecting this Edge. Every
-// other transport error PostFrame can return (timeout, SaaS unavailable, or
-// any non-2xx/401/403 status — see internal/transport/client.go) is treated
-// as recoverable. A plain, unclassified error (e.g. from a fake sender in a
-// test) is also never buffered — only errors this package can actually
-// name as transient are.
+// retry, classified by transport's HTTP status sentinels alone (see
+// transport.classifyFrameStatus) — never inferred from a response body.
+//
+// Recoverable: a network-level timeout or unreachable SaaS, or
+// ErrRetryableStatus (HTTP 408/429/5xx — the SaaS itself is transiently
+// failing or asking to slow down).
+//
+// Never recoverable, however many times it's retried:
+//   - ErrUnauthorized (401/403): the credential is rejected; only an
+//     operator rotating it can fix this, and retrying would just be a
+//     request storm against a SaaS already rejecting this Edge.
+//   - ErrInvalidRequest (400/404/409/413/422/...): the request itself is
+//     permanently wrong. Buffering it would spool a frame that can never
+//     upload, taking up space a genuinely transient frame could use.
+//   - ErrUnexpectedStatus, or any plain/unclassified error (e.g. from a
+//     fake sender in a test): only errors this package can actually name
+//     as transient are buffered.
 func isRecoverable(err error) bool {
 	return errors.Is(err, transport.ErrTimeout) ||
 		errors.Is(err, transport.ErrSaaSUnavailable) ||
-		errors.Is(err, transport.ErrUnexpectedStatus)
+		errors.Is(err, transport.ErrRetryableStatus)
 }
 
 // drainLoop replays buffered frames in FIFO order, one at a time, backing

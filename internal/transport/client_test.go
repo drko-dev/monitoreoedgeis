@@ -348,15 +348,45 @@ func TestPostFrameUnauthorized(t *testing.T) {
 	}
 }
 
-func TestPostFrameUnexpectedStatus(t *testing.T) {
-	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	})
-	c, _ := New(srv.URL, true, 2*time.Second, "test")
+// TestPostFrameStatusClassification pins the exact status->sentinel mapping
+// I6's offline buffer depends on to decide what is worth retrying:
+// classification is by HTTP status alone, never inferred from the response
+// body (see classifyFrameStatus).
+func TestPostFrameStatusClassification(t *testing.T) {
+	tests := []struct {
+		status int
+		want   error
+	}{
+		// Retryable: the SaaS is transiently failing or asking to slow down.
+		{http.StatusRequestTimeout, ErrRetryableStatus},
+		{http.StatusTooManyRequests, ErrRetryableStatus},
+		{http.StatusInternalServerError, ErrRetryableStatus},
+		{http.StatusBadGateway, ErrRetryableStatus},
+		{http.StatusServiceUnavailable, ErrRetryableStatus},
+		{http.StatusGatewayTimeout, ErrRetryableStatus},
+		// Never retryable: the credential is rejected.
+		{http.StatusUnauthorized, ErrUnauthorized},
+		{http.StatusForbidden, ErrUnauthorized},
+		// Never retryable: the request itself is permanently wrong.
+		{http.StatusBadRequest, ErrInvalidRequest},
+		{http.StatusNotFound, ErrInvalidRequest},
+		{http.StatusConflict, ErrInvalidRequest},
+		{http.StatusRequestEntityTooLarge, ErrInvalidRequest},
+		{http.StatusUnprocessableEntity, ErrInvalidRequest},
+	}
 
-	err := c.PostFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{1})
-	if !errors.Is(err, ErrUnexpectedStatus) {
-		t.Fatalf("PostFrame() error = %v, want ErrUnexpectedStatus", err)
+	for _, tt := range tests {
+		t.Run(http.StatusText(tt.status), func(t *testing.T) {
+			srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
+			})
+			c, _ := New(srv.URL, true, 2*time.Second, "test")
+
+			err := c.PostFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{1})
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("PostFrame() [status %d] error = %v, want wrapping %v", tt.status, err, tt.want)
+			}
+		})
 	}
 }
 

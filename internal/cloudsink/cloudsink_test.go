@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"image/jpeg"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -244,6 +246,113 @@ func TestCloudSink_Route_NonRecoverableError_NeverBuffers(t *testing.T) {
 	}
 	if got := s.CloudBufferStats().BufferedFrames; got != 0 {
 		t.Fatalf("BufferedFrames = %d, want 0 (unauthorized must never be buffered)", got)
+	}
+}
+
+// TestCloudSink_Route_HTTPStatusClassification pins buffer-or-not behavior
+// per HTTP status, using transport's real status classifier (not a
+// hand-picked sentinel) so a future change to that classification is
+// caught here too.
+func TestCloudSink_Route_HTTPStatusClassification(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantBuffer bool
+	}{
+		{"500 -> buffer", statusErr(t, http.StatusInternalServerError), true},
+		{"503 -> buffer", statusErr(t, http.StatusServiceUnavailable), true},
+		{"429 -> buffer", statusErr(t, http.StatusTooManyRequests), true},
+		{"408 -> buffer", statusErr(t, http.StatusRequestTimeout), true},
+		{"timeout -> buffer", transport.ErrTimeout, true},
+		{"unreachable -> buffer", transport.ErrSaaSUnavailable, true},
+
+		{"400 -> NO buffer", statusErr(t, http.StatusBadRequest), false},
+		{"401 -> NO buffer", statusErr(t, http.StatusUnauthorized), false},
+		{"403 -> NO buffer", statusErr(t, http.StatusForbidden), false},
+		{"404 -> NO buffer", statusErr(t, http.StatusNotFound), false},
+		{"409 -> NO buffer", statusErr(t, http.StatusConflict), false},
+		{"413 -> NO buffer", statusErr(t, http.StatusRequestEntityTooLarge), false},
+		{"422 -> NO buffer", statusErr(t, http.StatusUnprocessableEntity), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sender := &fakeSender{err: tt.err}
+			s, _ := newBufferedSink(t, sender, 10)
+
+			_ = s.Route(testFrame("cam-1", 1))
+
+			got := s.CloudBufferStats().BufferedFrames
+			if tt.wantBuffer && got != 1 {
+				t.Fatalf("BufferedFrames = %d, want 1 (buffered)", got)
+			}
+			if !tt.wantBuffer && got != 0 {
+				t.Fatalf("BufferedFrames = %d, want 0 (never buffered)", got)
+			}
+		})
+	}
+}
+
+// statusErr runs the real transport classifier for status via a tiny local
+// HTTP server, so this test exercises the same code path PostFrame does
+// rather than hand-picking a sentinel that might drift from it.
+func statusErr(t *testing.T, status int) error {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := transport.New(srv.URL, true, 2*time.Second, "test")
+	if err != nil {
+		t.Fatalf("transport.New() error = %v", err)
+	}
+	return c.PostFrame(context.Background(), "dev-1", "cred-1", "cam-1", 1, time.Now(), []byte{1})
+}
+
+// TestCloudSink_Replay_PermanentErrorDiscardsOnceWithoutBlockingQueue covers
+// the case a frame already sitting in the spool later fails replay for a
+// permanent (non-recoverable) reason: it must be dropped exactly once and
+// never block the frame queued behind it.
+func TestCloudSink_Replay_PermanentErrorDiscardsOnceWithoutBlockingQueue(t *testing.T) {
+	drainPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { drainPollInterval = 2 * time.Second })
+
+	// Both frames buffer directly: the sender always fails while they're
+	// enqueued via Route (SaaS unavailable), then switches to a permanent
+	// 404 once the drain loop starts replaying.
+	sender := &fakeSender{err: transport.ErrSaaSUnavailable}
+	s, _ := newBufferedSink(t, sender, 10)
+
+	if err := s.Route(testFrame("cam-1", 1)); err != nil {
+		t.Fatalf("Route(1) error = %v", err)
+	}
+	if err := s.Route(testFrame("cam-1", 2)); err != nil {
+		t.Fatalf("Route(2) error = %v", err)
+	}
+	if got := s.CloudBufferStats().BufferedFrames; got != 2 {
+		t.Fatalf("BufferedFrames before replay = %d, want 2", got)
+	}
+
+	sender.mu.Lock()
+	sender.err = statusErr(t, http.StatusNotFound)
+	sender.mu.Unlock()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.CloudBufferStats().BufferedFrames == 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	stats := s.CloudBufferStats()
+	if stats.BufferedFrames != 0 {
+		t.Fatalf("BufferedFrames after replay = %d, want 0 (both discarded, queue never blocked)", stats.BufferedFrames)
+	}
+	// Neither frame was ever replayable once the sender started returning
+	// 404, so both must have been dropped — not counted as replayed.
+	if stats.ReplayedFrames != 0 {
+		t.Fatalf("ReplayedFrames = %d, want 0 (404 is permanent, never a successful replay)", stats.ReplayedFrames)
 	}
 }
 
