@@ -712,11 +712,20 @@ connection). Full item-by-item status in `docs/ROADMAP.md`'s Hito I section.
   not be run in this environment** (no local Postgres — `STE_DB_BACKEND`
   harness skips cleanly, same as this repo's other PG-backed tests).
 
-**Explicitly not done this slice** (see `docs/ROADMAP.md`): offline buffering
-(I6), bandwidth control/compression tuning (I7), cost metrics (I10). **No
-real-camera validation** — this needs a live camera + a reachable SaaS +
-Postgres to verify end-to-end, none of which were available/authorized in
-this session.
+**Now done as code, on `feature/integrate-edge-cloud-hito-i`** (see
+`docs/ROADMAP.md`): offline buffering (I6), bandwidth control/compression
+tuning (I7), and real cost/bandwidth telemetry (I10) — one unified
+`internal/cloudsink.CloudSink` combining all three: JPEG quality/rate
+limiting applied after per-camera FIFO ordering and before POST, a disk
+spool for recoverable failures that replays paced through the same rate
+limiter (never dropping an already-durable frame for lack of tokens), and
+one canonical `Status`/`/status` surface with no duplicate counters across
+the three milestones. `go test ./...`, `-race`, `go vet`, `gofmt -l`, and
+`make build-linux` (amd64+arm64) all pass. **No real-camera validation** —
+this needs a live TC70 + a reachable SaaS + Postgres to verify end-to-end,
+none of which were available/authorized in this session; only a local
+encode+loopback-HTTP benchmark ran, documented as a synthetic-noise
+worst-case upper bound in `docs/performance/`.
 
 ## NEXT
 
