@@ -803,6 +803,57 @@ darwin only, no docker daemon either):
 - No installation happened on any real or virtual machine. No production
   infrastructure (Dattaweb/Hostinger/Geo Multa) was touched or referenced.
 
+## Hito J — Hybrid Core (J1–J5)
+
+**IMPLEMENTED, TESTED** (branch `feature/hybrid-core-j1-j5`, not yet
+MERGED). Scope: J1–J5 only — see `docs/ROADMAP.md`'s Hito J section for the
+per-item breakdown and what is explicitly excluded.
+
+Summary:
+- `processing_mode=hybrid` now has real behavior: the existing RTSP →
+  decode → resize pipeline (no parallel pipeline) runs a lightweight local
+  motion evaluator (`internal/processing.MotionDetector`) in
+  `cameraPipeline.readLoop`, ahead of `Router.Dispatch`. Only frames
+  flagged as motion candidates are dispatched — including to the Cloud
+  sink, which is unchanged and remains the sole inference engine.
+- `processing_mode=cloud` behavior is byte-for-byte unchanged: with
+  `Config.Hybrid.Enabled == false` (its zero value), `cameraPipeline` never
+  builds a `MotionDetector`, and `Sampler` behaves exactly as
+  `NewSampler(TargetFPS)` always has.
+- Motion algorithm: block-based luminance diff on the yuv420p Y plane of
+  the already-resized frame, comparing each block's average luma only
+  against the immediately preceding frame (bounded memory — no history).
+- ROI: `GEOCAM_VIDEO_HYBRID_ROI`, `;`-separated normalized (0..1)
+  rectangles `x_min,y_min,x_max,y_max`. No ROI configured analyzes the
+  whole frame. A malformed/out-of-range ROI is a hard config-parse error at
+  startup, never a runtime panic.
+- Adaptive sampling: `internal/processing.Sampler` extended with
+  `NewAdaptiveSampler(activeFPS, idleFPS, idleAfter)`, fed by the motion
+  evaluator's own candidate decisions. `GEOCAM_VIDEO_HYBRID_IDLE_FPS=0`
+  (default) disables adaptation entirely. Hysteresis
+  (`GEOCAM_VIDEO_HYBRID_IDLE_AFTER`, default 5s) only guards the
+  active→idle edge; idle→active is immediate on the next motion candidate.
+- Telemetry: `/status`'s `PipelineStatus.hybrid` (nil unless hybrid is
+  active for that camera) reports `frames_evaluated`, `motion_candidates`,
+  `frames_filtered`, `adaptive_state` (idle/active), configured
+  idle/active FPS, ROI count, and the most recent motion score. Never an
+  RTSP URI, credential, or frame byte.
+- New env vars (all `GEOCAM_VIDEO_HYBRID_*`, documented with defaults in
+  `README.md` and `internal/config/config.go`):
+  `MOTION_THRESHOLD` (8), `MIN_CHANGED_AREA` (0.05), `BLOCK_SIZE` (16),
+  `ROI` (empty), `IDLE_FPS` (0, disabled), `IDLE_AFTER` (5s).
+
+**Explicitly NOT done in this slice** (see `docs/ROADMAP.md` J6–J11):
+- No local YOLO / heavy object detection (Hito K).
+- No second Cloud inference pass or cross-source correlation.
+- No real-hardware bandwidth or precision/cost benchmark.
+
+**NOT VALIDATED**: no real RTSP camera or ffmpeg-decoded live footage was
+used to observe motion detection end-to-end — coverage is via `go test`
+(including `-race`) against `internal/processing`'s fake decoder with
+synthetic yuv420p frames, plus `go vet`, `gofmt`, and `make build-linux`
+(linux/amd64 + linux/arm64, `CGO_ENABLED=0`).
+
 ## HOW ANOTHER AI SHOULD CONTINUE
 
 1. Read `AGENTS.md`.

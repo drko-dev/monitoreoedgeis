@@ -197,17 +197,38 @@ Done this slice (code, not yet real-hardware validated end to end): offline buff
 
 ## J — Modo Hybrid
 
-- J1. processing_mode=hybrid.
-- J2. Motion detection local.
-- J3. Filtro frames.
-- J4. ROI.
-- J5. Sampling adaptativo.
-- J6. Modelo liviano opcional.
-- J7. Enviar candidatos.
-- J8. Segunda inferencia Cloud.
-- J9. Correlación.
-- J10. Benchmark ancho de banda.
-- J11. Benchmark precisión/costo.
+- J1. processing_mode=hybrid. DONE — real behavior: RTSP → decode → resize
+  → hybrid evaluator → candidate/no-candidate → Router, reusing the same
+  pipeline (no parallel pipeline). `processing_mode=cloud` is byte-for-byte
+  unchanged (Hybrid.Enabled false ⇒ every sampled frame dispatched).
+- J2. Motion detection local. DONE — pure Go, block-based luminance diff on
+  the yuv420p Y plane of the resized frame, comparing only against the
+  immediately preceding frame (bounded memory, no history). No OpenCV, no
+  model.
+- J3. Filtro frames. DONE — `cameraPipeline.readLoop` skips `Router.Dispatch`
+  for non-candidate frames when hybrid is active; separate atomic counters
+  (`frames_evaluated`, `motion_candidates`, `frames_filtered`) never inflate
+  `FramesDropped` (that stays error/queue-full only).
+- J4. ROI. DONE — `GEOCAM_VIDEO_HYBRID_ROI`, normalized 0..1 rectangles,
+  `;`-separated. No ROI ⇒ whole frame analyzed (default). An invalid ROI is
+  a hard config-parse error at startup (fail-fast, consistent with every
+  other `GEOCAM_VIDEO_*` value), never a runtime panic.
+- J5. Sampling adaptativo. DONE — `Sampler` extended (not replaced) with
+  `NewAdaptiveSampler(activeFPS, idleFPS, idleAfter)`; idle/active driven by
+  the motion evaluator's own candidate decisions, with a
+  `GEOCAM_VIDEO_HYBRID_IDLE_AFTER` hysteresis window on the active→idle
+  edge only (idle→active is immediate). `GEOCAM_VIDEO_HYBRID_IDLE_FPS=0`
+  (default) preserves today's fixed-FPS behavior exactly, hybrid or not.
+- J6. Modelo liviano opcional. **NOT in this slice** — explicitly out of
+  scope (belongs to Hito K's local YOLO work).
+- J7. Enviar candidatos. Covered by J1/J3: candidates reach the existing
+  Cloud sink through the unchanged Router/Dispatch path — no new sink was
+  built or needed.
+- J8. Segunda inferencia Cloud. **NOT in this slice.**
+- J9. Correlación. **NOT in this slice.**
+- J10. Benchmark ancho de banda. **NOT in this slice** — no real-hardware
+  bandwidth benchmark was run.
+- J11. Benchmark precisión/costo. **NOT in this slice.**
 
 ## K — Full Edge
 
