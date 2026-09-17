@@ -359,3 +359,84 @@ func TestLoadVideoMaxConcurrentPipelinesOutOfRange(t *testing.T) {
 		t.Fatal("expected error for GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES=17")
 	}
 }
+
+func TestLoadCloudBufferDefaultsToDisabled(t *testing.T) {
+	for _, k := range []string{
+		"GEOCAM_CLOUD_BUFFER_MAX_BYTES", "GEOCAM_CLOUD_BUFFER_MAX_FRAMES", "GEOCAM_CLOUD_BUFFER_MAX_AGE",
+	} {
+		t.Setenv(k, "")
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	// No production default here on purpose (see the field's doc comment):
+	// zero means buffering stays off until an operator makes an explicit
+	// decision.
+	if cfg.CloudBufferMaxBytes != 0 {
+		t.Errorf("CloudBufferMaxBytes = %d, want 0 (no invented default)", cfg.CloudBufferMaxBytes)
+	}
+	if cfg.CloudBufferMaxFrames != 0 {
+		t.Errorf("CloudBufferMaxFrames = %d, want 0 (no invented default)", cfg.CloudBufferMaxFrames)
+	}
+	if cfg.CloudBufferMaxAge != 0 {
+		t.Errorf("CloudBufferMaxAge = %v, want 0 (age eviction disabled by default)", cfg.CloudBufferMaxAge)
+	}
+}
+
+func TestLoadCloudBufferOverrides(t *testing.T) {
+	t.Setenv("GEOCAM_CLOUD_BUFFER_MAX_BYTES", "104857600")
+	t.Setenv("GEOCAM_CLOUD_BUFFER_MAX_FRAMES", "500")
+	t.Setenv("GEOCAM_CLOUD_BUFFER_MAX_AGE", "1h")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.CloudBufferMaxBytes != 104857600 {
+		t.Errorf("CloudBufferMaxBytes = %d, want 104857600", cfg.CloudBufferMaxBytes)
+	}
+	if cfg.CloudBufferMaxFrames != 500 {
+		t.Errorf("CloudBufferMaxFrames = %d, want 500", cfg.CloudBufferMaxFrames)
+	}
+	if cfg.CloudBufferMaxAge != time.Hour {
+		t.Errorf("CloudBufferMaxAge = %v, want 1h", cfg.CloudBufferMaxAge)
+	}
+}
+
+func TestLoadCloudBufferMaxBytesInvalid(t *testing.T) {
+	t.Setenv("GEOCAM_CLOUD_BUFFER_MAX_BYTES", "not-a-number")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for non-numeric GEOCAM_CLOUD_BUFFER_MAX_BYTES")
+	}
+	t.Setenv("GEOCAM_CLOUD_BUFFER_MAX_BYTES", "0")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for GEOCAM_CLOUD_BUFFER_MAX_BYTES=0 (must be positive)")
+	}
+	t.Setenv("GEOCAM_CLOUD_BUFFER_MAX_BYTES", "-1")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for negative GEOCAM_CLOUD_BUFFER_MAX_BYTES")
+	}
+}
+
+func TestLoadCloudBufferMaxFramesInvalid(t *testing.T) {
+	t.Setenv("GEOCAM_CLOUD_BUFFER_MAX_FRAMES", "not-a-number")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for non-numeric GEOCAM_CLOUD_BUFFER_MAX_FRAMES")
+	}
+	t.Setenv("GEOCAM_CLOUD_BUFFER_MAX_FRAMES", "0")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for GEOCAM_CLOUD_BUFFER_MAX_FRAMES=0 (must be positive)")
+	}
+}
+
+func TestLoadCloudBufferMaxAgeInvalid(t *testing.T) {
+	t.Setenv("GEOCAM_CLOUD_BUFFER_MAX_AGE", "not-a-duration")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for invalid GEOCAM_CLOUD_BUFFER_MAX_AGE")
+	}
+	t.Setenv("GEOCAM_CLOUD_BUFFER_MAX_AGE", "-1h")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for negative GEOCAM_CLOUD_BUFFER_MAX_AGE")
+	}
+}

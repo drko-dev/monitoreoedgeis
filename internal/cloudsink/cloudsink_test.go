@@ -4,16 +4,23 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"image/jpeg"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
+	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
 
 type fakeSender struct {
+	mu  sync.Mutex
 	err error
+	// failFirstN, if > 0, makes the first N calls fail with err before
+	// switching to success — used to exercise buffer replay.
+	failFirstN int
 
 	gotDeviceID   string
 	gotCredential string
@@ -25,6 +32,8 @@ type fakeSender struct {
 }
 
 func (f *fakeSender) PostFrame(_ context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls++
 	f.gotDeviceID = deviceID
 	f.gotCredential = credential
@@ -32,7 +41,19 @@ func (f *fakeSender) PostFrame(_ context.Context, deviceID, credential, candidat
 	f.gotSeq = seq
 	f.gotCapturedAt = capturedAt
 	f.gotJPEG = append([]byte(nil), jpeg...)
+	if f.failFirstN > 0 {
+		if f.calls <= f.failFirstN {
+			return f.err
+		}
+		return nil
+	}
 	return f.err
+}
+
+func (f *fakeSender) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 func solidYUV420p(width, height int, y, cb, cr byte) []byte {
@@ -164,4 +185,251 @@ func TestYUV420pToImage_RejectsZeroDimensions(t *testing.T) {
 	if _, err := yuv420pToImage(nil, 0, 0); err == nil {
 		t.Fatal("yuv420pToImage(0,0): want error, got nil")
 	}
+}
+
+// --- Milestone I6: offline buffer integration --------------------------
+
+func testFrame(candidateKey string, seq uint64) processing.Frame {
+	return processing.Frame{
+		CandidateKey: candidateKey,
+		Timestamp:    time.Now(),
+		Seq:          seq,
+		OutputWidth:  4,
+		OutputHeight: 4,
+		Data:         solidYUV420p(4, 4, 10, 20, 30),
+	}
+}
+
+func newBufferedSink(t *testing.T, sender FrameSender, maxFrames int) (*CloudSink, string) {
+	t.Helper()
+	dir := t.TempDir()
+	s := New(sender, "dev-1", "cred-1", slog.Default(),
+		WithBuffer(dir, 1<<20, maxFrames, 0))
+	t.Cleanup(s.Close)
+	return s, dir
+}
+
+func TestCloudSink_Route_UploadOK_NeverBuffers(t *testing.T) {
+	sender := &fakeSender{}
+	s, _ := newBufferedSink(t, sender, 10)
+
+	if err := s.Route(testFrame("cam-1", 1)); err != nil {
+		t.Fatalf("Route() error = %v", err)
+	}
+	if got := s.CloudBufferStats().BufferedFrames; got != 0 {
+		t.Fatalf("BufferedFrames = %d, want 0 (upload succeeded)", got)
+	}
+}
+
+func TestCloudSink_Route_RecoverableError_Buffers(t *testing.T) {
+	sender := &fakeSender{err: fmt.Errorf("boom: %w", transport.ErrSaaSUnavailable)}
+	s, _ := newBufferedSink(t, sender, 10)
+
+	if err := s.Route(testFrame("cam-1", 1)); err != nil {
+		t.Fatalf("Route() error = %v, want nil (buffered, not dropped)", err)
+	}
+	stats := s.CloudBufferStats()
+	if stats.BufferedFrames != 1 {
+		t.Fatalf("BufferedFrames = %d, want 1", stats.BufferedFrames)
+	}
+}
+
+func TestCloudSink_Route_NonRecoverableError_NeverBuffers(t *testing.T) {
+	sender := &fakeSender{err: fmt.Errorf("nope: %w", transport.ErrUnauthorized)}
+	s, _ := newBufferedSink(t, sender, 10)
+
+	err := s.Route(testFrame("cam-1", 1))
+	if err == nil || !errors.Is(err, transport.ErrUnauthorized) {
+		t.Fatalf("Route() error = %v, want wrapped ErrUnauthorized", err)
+	}
+	if got := s.CloudBufferStats().BufferedFrames; got != 0 {
+		t.Fatalf("BufferedFrames = %d, want 0 (unauthorized must never be buffered)", got)
+	}
+}
+
+func TestCloudSink_Route_UnclassifiedError_NeverBuffers(t *testing.T) {
+	// A plain, unwrapped error (never seen from the real transport client)
+	// must not be buffered either: only errors this package can actually
+	// name as transient are.
+	sender := &fakeSender{err: errors.New("weird local failure")}
+	s, _ := newBufferedSink(t, sender, 10)
+
+	if err := s.Route(testFrame("cam-1", 1)); err == nil {
+		t.Fatal("Route() with unclassified error: want error, got nil")
+	}
+	if got := s.CloudBufferStats().BufferedFrames; got != 0 {
+		t.Fatalf("BufferedFrames = %d, want 0", got)
+	}
+}
+
+func TestCloudSink_Route_KeepsQueuingBehindPendingFrames_FIFO(t *testing.T) {
+	sender := &fakeSender{err: fmt.Errorf("down: %w", transport.ErrTimeout)}
+	s, dir := newBufferedSink(t, sender, 10)
+
+	if err := s.Route(testFrame("cam-1", 1)); err != nil {
+		t.Fatalf("Route(1) error = %v", err)
+	}
+
+	// Now let a direct upload for the SAME camera succeed — Route must
+	// still queue it behind frame 1 rather than uploading it directly,
+	// or replay would deliver seq 2 before seq 1.
+	sender.mu.Lock()
+	sender.err = nil
+	sender.mu.Unlock()
+	if err := s.Route(testFrame("cam-1", 2)); err != nil {
+		t.Fatalf("Route(2) error = %v", err)
+	}
+
+	if got := s.CloudBufferStats().BufferedFrames; got != 2 {
+		t.Fatalf("BufferedFrames = %d, want 2 (frame 2 must queue behind frame 1)", got)
+	}
+	_ = dir
+}
+
+func TestCloudSink_Replay_UploadsBufferedFramesInOrder(t *testing.T) {
+	drainPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { drainPollInterval = 2 * time.Second })
+
+	// failFirstN=1: only the first call (frame 1's direct upload attempt
+	// from Route) fails. Frame 2 never reaches the sender via Route at all
+	// — HasPending(cam-1) is already true once frame 1 is queued, so Route
+	// enqueues it directly (see the FIFO-ordering test above). Both
+	// replay attempts must then succeed with no backoff involved.
+	sender := &fakeSender{err: transport.ErrSaaSUnavailable, failFirstN: 1}
+	s, _ := newBufferedSink(t, sender, 10)
+
+	if err := s.Route(testFrame("cam-1", 1)); err != nil {
+		t.Fatalf("Route(1) error = %v", err)
+	}
+	if err := s.Route(testFrame("cam-1", 2)); err != nil {
+		t.Fatalf("Route(2) error = %v", err)
+	}
+	if got := s.CloudBufferStats().BufferedFrames; got != 2 {
+		t.Fatalf("BufferedFrames before replay = %d, want 2", got)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.CloudBufferStats().BufferedFrames == 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	stats := s.CloudBufferStats()
+	if stats.BufferedFrames != 0 {
+		t.Fatalf("BufferedFrames after replay = %d, want 0", stats.BufferedFrames)
+	}
+	if stats.ReplayedFrames != 2 {
+		t.Fatalf("ReplayedFrames = %d, want 2", stats.ReplayedFrames)
+	}
+}
+
+func TestCloudSink_RestartRecoversSpool_AndReplays(t *testing.T) {
+	dir := t.TempDir()
+	sender := &fakeSender{err: transport.ErrSaaSUnavailable}
+	s1 := New(sender, "dev-1", "cred-1", slog.Default(), WithBuffer(dir, 1<<20, 10, 0))
+	if err := s1.Route(testFrame("cam-1", 1)); err != nil {
+		t.Fatalf("Route() error = %v", err)
+	}
+	if got := s1.CloudBufferStats().BufferedFrames; got != 1 {
+		t.Fatalf("BufferedFrames = %d, want 1", got)
+	}
+	s1.Close()
+
+	drainPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { drainPollInterval = 2 * time.Second })
+
+	sender.mu.Lock()
+	sender.err = nil
+	sender.mu.Unlock()
+
+	s2 := New(sender, "dev-1", "cred-1", slog.Default(), WithBuffer(dir, 1<<20, 10, 0))
+	t.Cleanup(s2.Close)
+
+	if got := s2.CloudBufferStats().BufferedFrames; got != 1 {
+		t.Fatalf("BufferedFrames after restart = %d, want 1 (recovered from disk)", got)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && s2.CloudBufferStats().BufferedFrames != 0 {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := s2.CloudBufferStats().BufferedFrames; got != 0 {
+		t.Fatalf("BufferedFrames after replay post-restart = %d, want 0", got)
+	}
+}
+
+func TestCloudSink_Close_ShutsDownDrainLoopCleanly(t *testing.T) {
+	drainPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { drainPollInterval = 2 * time.Second })
+
+	sender := &fakeSender{err: transport.ErrSaaSUnavailable}
+	dir := t.TempDir()
+	s := New(sender, "dev-1", "cred-1", slog.Default(), WithBuffer(dir, 1<<20, 10, 0))
+
+	if err := s.Route(testFrame("cam-1", 1)); err != nil {
+		t.Fatalf("Route() error = %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close() did not return: drain goroutine did not shut down cleanly")
+	}
+}
+
+func TestCloudSink_Close_WithoutBuffer_IsNoop(t *testing.T) {
+	s := New(&fakeSender{}, "dev-1", "cred-1", slog.Default())
+	s.Close() // must not panic or block
+}
+
+func TestCloudSink_DisabledBuffer_BehavesLikePreI6(t *testing.T) {
+	sender := &fakeSender{err: fmt.Errorf("down: %w", transport.ErrSaaSUnavailable)}
+	// No WithBuffer option: buffering stays off, exactly the original
+	// (pre-I6) drop-on-failure behavior.
+	s := New(sender, "dev-1", "cred-1", slog.Default())
+
+	err := s.Route(testFrame("cam-1", 1))
+	if err == nil {
+		t.Fatal("Route() with buffering disabled: want the upload error propagated, got nil")
+	}
+	if got := s.CloudBufferStats(); got != (processing.CloudBufferStats{}) {
+		t.Fatalf("CloudBufferStats() = %+v, want zero value when disabled", got)
+	}
+}
+
+func TestCloudSink_Race_ConcurrentRouteAndDrain(t *testing.T) {
+	drainPollInterval = 5 * time.Millisecond
+	t.Cleanup(func() { drainPollInterval = 2 * time.Second })
+
+	sender := &fakeSender{err: transport.ErrSaaSUnavailable}
+	s, _ := newBufferedSink(t, sender, 500)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := uint64(0); i < 50; i++ {
+			_ = s.Route(testFrame("cam-1", i))
+		}
+	}()
+
+	// Let uploads start succeeding partway through, so the drain loop is
+	// racing real Route() calls, not just spinning on failures.
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		sender.mu.Lock()
+		sender.err = nil
+		sender.mu.Unlock()
+	}()
+
+	wg.Wait()
+	s.Close()
 }

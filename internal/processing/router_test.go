@@ -3,6 +3,7 @@ package processing
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -104,4 +105,25 @@ func TestRouter_SinkErrorDoesNotStopWorker(t *testing.T) {
 		r.Dispatch(Frame{Seq: uint64(i)})
 	}
 	time.Sleep(50 * time.Millisecond)
+}
+
+// closingSink implements the optional sinkCloser hook (Milestone I6 uses
+// this for cloudsink.CloudSink's buffer drain goroutine).
+type closingSink struct {
+	closed atomic.Int64
+}
+
+func (s *closingSink) Name() string        { return "closing" }
+func (s *closingSink) Route(f Frame) error { return nil }
+func (s *closingSink) Close()              { s.closed.Add(1) }
+
+func TestRouter_Stop_ClosesSinksThatImplementSinkCloser(t *testing.T) {
+	cs := &closingSink{}
+	r := NewRouter([]Sink{cs, NewDebugSink()}, 4, nil)
+
+	r.Stop()
+
+	if got := cs.closed.Load(); got != 1 {
+		t.Fatalf("closingSink.Close() called %d times, want exactly 1", got)
+	}
 }

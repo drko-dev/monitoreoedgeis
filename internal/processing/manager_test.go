@@ -126,3 +126,86 @@ func TestManager_NoGoroutineLeakAfterStop(t *testing.T) {
 		t.Fatalf("possible goroutine leak: before=%d after=%d", before, after)
 	}
 }
+
+// recordingHealthSink captures the last VideoPipelineSummary published, so
+// tests can assert on its CloudBuffer field (Milestone I6).
+type recordingHealthSink struct {
+	mu      sync.Mutex
+	summary VideoPipelineSummary
+}
+
+func (r *recordingHealthSink) SetVideoPipeline(s VideoPipelineSummary) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.summary = s
+}
+
+func (r *recordingHealthSink) get() VideoPipelineSummary {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.summary
+}
+
+// bufferReportingSink is a minimal Sink that also implements
+// CloudBufferReporter, standing in for cloudsink.CloudSink without
+// importing it (would cycle back to this package).
+type bufferReportingSink struct {
+	stats CloudBufferStats
+}
+
+func (s *bufferReportingSink) Name() string                       { return "cloud" }
+func (s *bufferReportingSink) Route(f Frame) error                { return nil }
+func (s *bufferReportingSink) CloudBufferStats() CloudBufferStats { return s.stats }
+
+func TestManager_PublishStatus_IncludesCloudBufferStatsFromReportingSink(t *testing.T) {
+	rtspMgr := rtsp.NewManager(rtsp.Config{Enabled: true}, nil, nil)
+	health := &recordingHealthSink{}
+	extra := &bufferReportingSink{stats: CloudBufferStats{BufferedFrames: 3, BufferedBytes: 1024, ReplayedFrames: 5, DroppedFull: 1, CorruptEntries: 2}}
+	mgr := NewManager(Config{QueueDepth: 8, RingBufferSize: 4, MaxConcurrentPipelines: 2}, rtspMgr, health, nil, extra)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_ = rtspMgr.Start(ctx)
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer stopCancel()
+		_ = mgr.Stop(stopCtx)
+	}()
+
+	mgr.publishStatus()
+
+	got := health.get().CloudBuffer
+	if got == nil {
+		t.Fatal("VideoPipelineSummary.CloudBuffer = nil, want a snapshot from the reporting sink")
+	}
+	if *got != extra.stats {
+		t.Fatalf("CloudBuffer = %+v, want %+v", *got, extra.stats)
+	}
+}
+
+func TestManager_PublishStatus_CloudBufferNilWithoutReportingSink(t *testing.T) {
+	rtspMgr := rtsp.NewManager(rtsp.Config{Enabled: true}, nil, nil)
+	health := &recordingHealthSink{}
+	mgr := NewManager(Config{QueueDepth: 8, RingBufferSize: 4, MaxConcurrentPipelines: 2}, rtspMgr, health, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_ = rtspMgr.Start(ctx)
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer stopCancel()
+		_ = mgr.Stop(stopCtx)
+	}()
+
+	mgr.publishStatus()
+
+	if got := health.get().CloudBuffer; got != nil {
+		t.Fatalf("CloudBuffer = %+v, want nil (no sink implements CloudBufferReporter)", *got)
+	}
+}
