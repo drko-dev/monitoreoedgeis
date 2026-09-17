@@ -2,6 +2,7 @@ package agent
 
 import (
 	"log/slog"
+	"path/filepath"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/cloudsink"
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
@@ -10,6 +11,10 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
+
+// cloudBufferDirName is the subdirectory of GEOCAM_DATA_DIR holding
+// Milestone I6's offline spool.
+const cloudBufferDirName = "cloud-buffer"
 
 // newCloudSink builds the Milestone I video-frame-upload sink, or returns nil
 // when this Edge has nothing to push frames to or isn't configured for cloud
@@ -41,5 +46,14 @@ func newCloudSink(cfg *config.Config, creds credentials.Credentials, log *slog.L
 		return nil
 	}
 
-	return cloudsink.New(client, creds.DeviceID, creds.Credential, logging.Component(log, "cloud-sink"))
+	var opts []cloudsink.Option
+	if cfg.CloudBufferMaxBytes > 0 && cfg.CloudBufferMaxFrames > 0 {
+		opts = append(opts, cloudsink.WithBuffer(
+			filepath.Join(cfg.DataDir, cloudBufferDirName),
+			cfg.CloudBufferMaxBytes, cfg.CloudBufferMaxFrames, cfg.CloudBufferMaxAge))
+	} else {
+		log.Info("cloud offline buffer disabled: GEOCAM_CLOUD_BUFFER_MAX_BYTES/GEOCAM_CLOUD_BUFFER_MAX_FRAMES not set")
+	}
+
+	return cloudsink.New(client, creds.DeviceID, creds.Credential, logging.Component(log, "cloud-sink"), opts...)
 }

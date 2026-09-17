@@ -48,6 +48,17 @@ type Config struct {
 	VideoMaxConcurrentPipelines int
 	VideoFFmpegPath             string
 	VideoDecodeTimeout          time.Duration
+	// Cloud offline buffer settings (Milestone I6). CloudBufferMaxBytes and
+	// CloudBufferMaxFrames have no production default: shipping a number
+	// here would be inventing business policy this package has no basis
+	// for. Buffering only activates once both are set to a positive value
+	// (see internal/cloudsink.WithBuffer); until then CloudSink behaves
+	// exactly as it did before I6 (drop on failure). CloudBufferMaxAge is
+	// different: 0 is itself a safe, non-business default (no age-based
+	// eviction — rely on the byte/frame caps alone).
+	CloudBufferMaxBytes  int64
+	CloudBufferMaxFrames int
+	CloudBufferMaxAge    time.Duration
 }
 
 // Defaults. No secrets, no credentials.
@@ -361,6 +372,39 @@ func Load() (*Config, error) {
 				raw, MinVideoDecodeTimeout, MaxVideoDecodeTimeout)
 		}
 		cfg.VideoDecodeTimeout = d
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_CLOUD_BUFFER_MAX_BYTES")); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cloud buffer max bytes %q: %w", raw, err)
+		}
+		if v <= 0 {
+			return nil, fmt.Errorf("invalid cloud buffer max bytes %q: must be positive", raw)
+		}
+		cfg.CloudBufferMaxBytes = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_CLOUD_BUFFER_MAX_FRAMES")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cloud buffer max frames %q: %w", raw, err)
+		}
+		if v <= 0 {
+			return nil, fmt.Errorf("invalid cloud buffer max frames %q: must be positive", raw)
+		}
+		cfg.CloudBufferMaxFrames = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_CLOUD_BUFFER_MAX_AGE")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cloud buffer max age %q: %w", raw, err)
+		}
+		if d < 0 {
+			return nil, fmt.Errorf("invalid cloud buffer max age %q: must not be negative", raw)
+		}
+		cfg.CloudBufferMaxAge = d
 	}
 
 	// Fail-fast: reject an insecure http:// SaaS URL here, before any

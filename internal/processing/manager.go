@@ -216,5 +216,24 @@ func (m *Manager) publishStatus() {
 	m.health.SetVideoPipeline(VideoPipelineSummary{
 		CameraCount: len(statuses),
 		Cameras:     statuses,
+		CloudBuffer: m.cloudBufferStats(),
 	})
+}
+
+// cloudBufferStats returns the I6 buffer snapshot from whichever registered
+// sink reports one (nil when none does, e.g. buffering disabled).
+func (m *Manager) cloudBufferStats() *CloudBufferStats {
+	m.mu.Lock()
+	router := m.router
+	m.mu.Unlock()
+	if router == nil {
+		return nil
+	}
+	for _, s := range router.sinks {
+		if r, ok := s.(CloudBufferReporter); ok {
+			stats := r.CloudBufferStats()
+			return &stats
+		}
+	}
+	return nil
 }

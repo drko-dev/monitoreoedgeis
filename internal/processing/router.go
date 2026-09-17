@@ -91,10 +91,24 @@ func (r *Router) Dropped(sinkName string) int64 {
 	return 0
 }
 
-// Stop terminates every worker goroutine and waits for them to exit.
+// sinkCloser is implemented by a Sink holding background resources that
+// need an orderly shutdown (e.g. cloudsink.CloudSink's I6 offline-buffer
+// drain goroutine). Checked with a type assertion so ordinary sinks (ones
+// with no such resource, like DebugSink) need nothing extra.
+type sinkCloser interface {
+	Close()
+}
+
+// Stop terminates every worker goroutine, waits for them to exit, then
+// closes any sink that holds its own background resources.
 func (r *Router) Stop() {
 	close(r.stop)
 	r.wg.Wait()
+	for _, s := range r.sinks {
+		if c, ok := s.(sinkCloser); ok {
+			c.Close()
+		}
+	}
 }
 
 // DebugSink is the only Sink shipped in Hito H: it records a count and the
