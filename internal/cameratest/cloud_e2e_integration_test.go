@@ -133,7 +133,7 @@ func TestIntegration_CloudFramePush(t *testing.T) {
 	if err != nil {
 		t.Fatalf("transport.New: %v", err)
 	}
-	cSink := cloudsink.New(tc, deviceID, deviceKey, nil)
+	cSink := cloudsink.New(tc, deviceID, deviceKey, nil, nil)
 
 	procCfg := processing.Config{
 		Enabled:                true,
@@ -201,6 +201,20 @@ func TestIntegration_CloudFramePush(t *testing.T) {
 	}
 	t.Logf("ACCEPTANCE: ran %s, frames_sampled=%d (each one attempted a POST /api/v1/edge/frames to %s) — check the SaaS/worker logs and DB for delivery/detection results",
 		time.Since(start).Round(time.Second), lastStatus.FramesSampled, saasURL)
+
+	// I10 real bandwidth/cost telemetry: actual resources consumed by this
+	// run, straight from CloudSink's own counters — never estimated.
+	cloudStatus := cSink.Status()
+	var avgJPEGBytes float64
+	if cloudStatus.FramesUploadSucceeded > 0 {
+		avgJPEGBytes = float64(cloudStatus.JPEGBytesUploaded) / float64(cloudStatus.FramesUploadSucceeded)
+	}
+	t.Logf("I10 BENCHMARK: duration=%s quality=%d target_fps=%v frames_encoded=%d frames_upload_attempted=%d frames_upload_succeeded=%d frames_upload_failed=%d",
+		time.Since(start).Round(time.Second), cloudsink.JPEGQuality, procCfg.TargetFPS,
+		cloudStatus.FramesEncoded, cloudStatus.FramesUploadAttempted, cloudStatus.FramesUploadSucceeded, cloudStatus.FramesUploadFailed)
+	t.Logf("I10 BENCHMARK: jpeg_bytes_uploaded=%d avg_bytes_per_frame=%.0f effective_bytes_per_sec=%.1f effective_mbps=%.3f effective_frames_per_sec=%.2f encode_latency_avg_ms=%.2f upload_latency_avg_ms=%.2f",
+		cloudStatus.JPEGBytesUploaded, avgJPEGBytes, cloudStatus.EffectiveBytesPerSec, cloudStatus.EffectiveBytesPerSec*8/1_000_000,
+		cloudStatus.EffectiveFramesPerSec, cloudStatus.EncodeLatencyAvgMs, cloudStatus.UploadLatencyAvgMs)
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer stopCancel()

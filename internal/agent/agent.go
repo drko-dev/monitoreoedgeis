@@ -114,7 +114,7 @@ func New(cfg *config.Config) *Agent {
 				DecodeTimeout:          cfg.VideoDecodeTimeout,
 			}
 			var extraSinks []processing.Sink
-			if cs := newCloudSink(cfg, creds, log); cs != nil {
+			if cs := newCloudSink(cfg, creds, reporter, log); cs != nil {
 				extraSinks = append(extraSinks, cs)
 			}
 
