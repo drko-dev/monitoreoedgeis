@@ -803,6 +803,11 @@ darwin only, no docker daemon either):
 - No installation happened on any real or virtual machine. No production
   infrastructure (Dattaweb/Hostinger/Geo Multa) was touched or referenced.
 
+## Hito J — Hybrid Candidates Transport & Classifier (J6–J7)
+
+- **J6 (Lightweight Classifier Adapter)**: Implemented decoupled `CandidateClassifier` interface, `ClassificationResult`, and `NoopClassifier` in `internal/hybrid`. Status: ADAPTER DONE / MODEL REAL OPTIONAL PENDING. Default mode is disabled.
+- **J7 (Candidate Transport & Spooling)**: Extended `processing.Frame` and `cloudsink.Buffer` (`BufferedFrame`/`bufferMeta`) with candidate metadata (`ProcessingMode`, `CandidateReason`, `CandidateScore`, `CorrelationID`). Extended `internal/transport.Client` with `PostFrameWithMetadata` sending `X-Processing-Mode`, `X-Candidate-Reason`, `X-Candidate-Score`, and `X-Correlation-Id` without breaking standard cloud upload. Offline buffer preserves hybrid metadata on recoverable retries and replay.
+
 ## HOW ANOTHER AI SHOULD CONTINUE
 
 1. Read `AGENTS.md`.

@@ -445,3 +445,58 @@ func TestPostFrameContextCanceledIsPreserved(t *testing.T) {
 		t.Fatalf("PostFrame() error = %v, want errors.Is(err, ErrSaaSUnavailable) == true too", err)
 	}
 }
+
+func TestPostFrameWithMetadata(t *testing.T) {
+	var receivedHeaders http.Header
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		receivedHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	})
+
+	c, err := New(srv.URL, true, 2*time.Second, "test")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	// 1. PostFrame standard: optional hybrid headers MUST NOT be present
+	err = c.PostFrame(context.Background(), "device-1", "cred-1", "cam-1", 42, time.Now(), []byte{1, 2, 3})
+	if err != nil {
+		t.Fatalf("PostFrame standard error: %v", err)
+	}
+	if receivedHeaders.Get("X-Processing-Mode") != "" {
+		t.Errorf("unexpected X-Processing-Mode header in standard PostFrame: %q", receivedHeaders.Get("X-Processing-Mode"))
+	}
+	if receivedHeaders.Get("X-Candidate-Reason") != "" {
+		t.Errorf("unexpected X-Candidate-Reason header in standard PostFrame: %q", receivedHeaders.Get("X-Candidate-Reason"))
+	}
+	if receivedHeaders.Get("X-Candidate-Score") != "" {
+		t.Errorf("unexpected X-Candidate-Score header in standard PostFrame: %q", receivedHeaders.Get("X-Candidate-Score"))
+	}
+	if receivedHeaders.Get("X-Correlation-Id") != "" {
+		t.Errorf("unexpected X-Correlation-Id header in standard PostFrame: %q", receivedHeaders.Get("X-Correlation-Id"))
+	}
+
+	// 2. PostFrameWithMetadata: optional hybrid headers MUST match exactly
+	meta := FrameMetadata{
+		ProcessingMode:  "hybrid",
+		CandidateReason: "motion",
+		CandidateScore:  0.9123,
+		CorrelationID:   "corr-abc-xyz",
+	}
+	err = c.PostFrameWithMetadata(context.Background(), "device-1", "cred-1", "cam-1", 43, time.Now(), []byte{1, 2, 3}, meta)
+	if err != nil {
+		t.Fatalf("PostFrameWithMetadata error: %v", err)
+	}
+	if got := receivedHeaders.Get("X-Processing-Mode"); got != "hybrid" {
+		t.Errorf("X-Processing-Mode = %q, want 'hybrid'", got)
+	}
+	if got := receivedHeaders.Get("X-Candidate-Reason"); got != "motion" {
+		t.Errorf("X-Candidate-Reason = %q, want 'motion'", got)
+	}
+	if got := receivedHeaders.Get("X-Candidate-Score"); got != "0.9123" {
+		t.Errorf("X-Candidate-Score = %q, want '0.9123'", got)
+	}
+	if got := receivedHeaders.Get("X-Correlation-Id"); got != "corr-abc-xyz" {
+		t.Errorf("X-Correlation-Id = %q, want 'corr-abc-xyz'", got)
+	}
+}
