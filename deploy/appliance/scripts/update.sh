@@ -6,8 +6,10 @@
 #
 # Usage: update.sh <artifact.tar.gz>
 #
-# Validates the artifact's architecture and checksum (if a sibling
-# <artifact>.sha256 exists) BEFORE touching anything installed, records the
+# Validates the artifact's checksum (mandatory: a sibling <artifact>.sha256
+# must exist and verify, and a SHA256 tool must be available — anything
+# short of that rejects the update) and architecture BEFORE touching
+# anything installed, records the
 # currently active release so rollback.sh has something deterministic to
 # restore, installs the new release into its own versioned directory
 # (previous versions are never deleted), atomically swaps the `current`
@@ -23,19 +25,17 @@ ARTIFACT="${1:-}"
 [ -n "$ARTIFACT" ] || die "usage: update.sh <artifact.tar.gz>"
 [ -f "$ARTIFACT" ] || die "artifact not found: $ARTIFACT"
 
-# --- 1. Checksum, if provided (package.sh always writes one) ---------------
-if [ -f "${ARTIFACT}.sha256" ]; then
-    if have_cmd sha256sum; then
-        ( cd "$(dirname "$ARTIFACT")" && sha256sum -c "$(basename "$ARTIFACT").sha256" ) \
-            || die "checksum verification failed for $ARTIFACT — artifact rejected, nothing changed"
-    elif have_cmd shasum; then
-        ( cd "$(dirname "$ARTIFACT")" && shasum -a 256 -c "$(basename "$ARTIFACT").sha256" ) \
-            || die "checksum verification failed for $ARTIFACT — artifact rejected, nothing changed"
-    else
-        log "warning: no sha256sum/shasum available, skipping checksum verification"
-    fi
+# --- 1. Checksum (mandatory, fail-closed: package.sh always writes one) ----
+[ -f "${ARTIFACT}.sha256" ] || die "no ${ARTIFACT}.sha256 found — checksum verification is mandatory, artifact rejected, nothing changed"
+
+if have_cmd sha256sum; then
+    ( cd "$(dirname "$ARTIFACT")" && sha256sum -c "$(basename "$ARTIFACT").sha256" ) \
+        || die "checksum verification failed for $ARTIFACT — artifact rejected, nothing changed"
+elif have_cmd shasum; then
+    ( cd "$(dirname "$ARTIFACT")" && shasum -a 256 -c "$(basename "$ARTIFACT").sha256" ) \
+        || die "checksum verification failed for $ARTIFACT — artifact rejected, nothing changed"
 else
-    log "warning: no ${ARTIFACT}.sha256 found, skipping checksum verification"
+    die "no sha256sum/shasum available — cannot verify checksum, artifact rejected, nothing changed"
 fi
 
 # --- 2. Extract to a scratch dir, validate BEFORE installing anything ------

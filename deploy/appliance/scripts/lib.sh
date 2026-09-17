@@ -54,20 +54,28 @@ have_cmd() { command -v "$1" >/dev/null 2>&1; }
 # atomic_symlink_swap points $1 (an existing or new symlink path) at $2
 # (target, relative to the symlink's directory).
 #
-# ponytail: this is `ln -sfn` directly, not a create-temp-then-rename dance.
-# The obvious "safer" version — `ln -sfn target link.tmp.$$ && mv link.tmp.$$
-# link` — is actually WRONG here and was the first version of this function:
-# when `link` already exists and resolves (through the symlink) to a
-# directory, both GNU and BSD `mv` treat an existing symlink-to-directory
-# destination as "move source INTO that directory", not "replace this
-# entry" — so the swap silently no-ops and `current` keeps pointing at the
-# old release. `ln`'s own `-n` flag exists precisely to avoid that
-# dereference: `-f` overwrites the existing entry, `-n` means "as a file,
-# not through the directory it points to". `ln -sfn` is unlink+link
-# internally on both platforms, so there's a sub-millisecond window with no
-# symlink present — acceptable for a single-writer install/update/rollback
-# script; upgrade to renameat2/copy_file_range-based swap if concurrent
-# swaps or true crash-atomicity ever matter here.
+# On Linux (the real appliance target) this is genuinely atomic: create a
+# new symlink under a throwaway temp name in the same directory, then
+# `mv -T` it over the destination. `-T`/--no-target-directory is required —
+# without it, `mv` treats an existing symlink-to-directory destination as
+# "move source INTO that directory" rather than "replace this entry" (that
+# dereference bug was the first version of this function, before `-T`
+# existed here), which would silently no-op and leave `current` pointing at
+# the old release. A `mv` between two symlinks in the same filesystem is a
+# single rename(2) syscall, so there's no window with no symlink present.
+#
+# BSD/macOS `mv` has no `-T` equivalent, so the same dereference bug would
+# reappear there — this test suite's sandbox is darwin, so it keeps the
+# previous `ln -sfn` behavior (unlink+link, a sub-millisecond gap with no
+# symlink present) on non-Linux. That gap is not a production concern: the
+# appliance only ever runs this on Linux.
 atomic_symlink_swap() {
-    ln -sfn "$2" "$1"
+    if [ "$(uname -s)" = "Linux" ]; then
+        local tmp
+        tmp="$(dirname "$1")/.$(basename "$1").tmp.$$"
+        ln -sfn "$2" "$tmp"
+        mv -T "$tmp" "$1"
+    else
+        ln -sfn "$2" "$1"
+    fi
 }

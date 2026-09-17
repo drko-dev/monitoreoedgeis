@@ -34,6 +34,16 @@ FFMPEG_SRC="${2:-}"
 HOST_ARCH="$(host_arch)"
 log "target architecture: $HOST_ARCH"
 
+# Reject an incompatible-architecture binary BEFORE touching anything
+# installed — same check/style as update.sh's artifact validation. A
+# packaged tarball ships an ARCH marker file alongside the binary; a bare
+# dev binary (no ARCH file) skips this check and relies on host_arch's own
+# uname-based validation instead.
+ARTIFACT_ARCH="$(cat "$(dirname "$BIN_SRC")/ARCH" 2>/dev/null || echo "")"
+if [ -n "$ARTIFACT_ARCH" ] && [ "$ARTIFACT_ARCH" != "$HOST_ARCH" ]; then
+    die "binary architecture ($ARTIFACT_ARCH) does not match host ($HOST_ARCH) — rejected, nothing installed"
+fi
+
 # Version resolution order: explicit GEOCAM_VERSION (used by update.sh/
 # package.sh, which always know it), a sibling VERSION file shipped next to
 # the binary in the packaged tarball, then — only as a last resort, for a
@@ -112,9 +122,21 @@ else
 fi
 
 # --- 6. systemd unit (always refreshed: it's not operator-editable state) --
+# If this release bundles ffmpeg, point GEOCAM_VIDEO_FFMPEG_PATH at it
+# deterministically (via `current`, so it keeps working across future
+# releases) instead of relying on a global "ffmpeg" on $PATH. It's emitted
+# as an Environment= line ahead of EnvironmentFile= below, so an operator
+# override of GEOCAM_VIDEO_FFMPEG_PATH in geocam-edge.env still wins (later
+# definitions of the same variable override earlier ones in systemd).
+FFMPEG_ENV_LINE=""
+if [ -f "$RELEASE_DIR/ffmpeg" ]; then
+    FFMPEG_ENV_LINE="Environment=GEOCAM_VIDEO_FFMPEG_PATH=$GEOCAM_PREFIX/current/ffmpeg"
+fi
+
 mkdir -p "$SYSTEMD_DIR"
 sed \
     -e "s|@GEOCAM_EXEC_PATH@|$GEOCAM_PREFIX/current/geocam-edge|g" \
+    -e "s|@GEOCAM_FFMPEG_ENV_LINE@|$FFMPEG_ENV_LINE|g" \
     -e "s|@GEOCAM_ENV_FILE@|$GEOCAM_CONFIG_DIR/geocam-edge.env|g" \
     -e "s|@GEOCAM_SERVICE_USER@|$GEOCAM_SERVICE_USER|g" \
     -e "s|@GEOCAM_SERVICE_GROUP@|$GEOCAM_SERVICE_GROUP|g" \

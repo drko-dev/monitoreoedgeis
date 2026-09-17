@@ -10,6 +10,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=@GEOCAM_EXEC_PATH@ run
+@GEOCAM_FFMPEG_ENV_LINE@
 EnvironmentFile=@GEOCAM_ENV_FILE@
 User=@GEOCAM_SERVICE_USER@
 Group=@GEOCAM_SERVICE_GROUP@

@@ -9,6 +9,9 @@
 package appliance_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -179,6 +182,21 @@ func buildArtifact(t *testing.T, dir, version, arch string) string {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("tar czf failed: %v\n%s", err, out)
 	}
+
+	// update.sh now rejects an artifact with no checksum (fail-closed), so
+	// every artifact this helper builds needs a valid sibling .sha256, same
+	// format package.sh/sha256sum produce, unless a test deliberately wants
+	// to exercise the missing/bad checksum path.
+	data, err := os.ReadFile(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	checksum := fmt.Sprintf("%s  %s\n", hex.EncodeToString(sum[:]), filepath.Base(artifact))
+	if err := os.WriteFile(artifact+".sha256", []byte(checksum), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	return artifact
 }
 
@@ -277,6 +295,73 @@ func TestUpdateRejectsBadChecksum(t *testing.T) {
 	}
 	if target != "releases/1.0.0" {
 		t.Errorf("current changed despite rejected artifact: %q", target)
+	}
+}
+
+func TestUpdateRejectsMissingChecksum(t *testing.T) {
+	requireBash(t)
+	root := t.TempDir()
+	bin := fakeBinary(t, t.TempDir(), "geocam-edge")
+	if out, err := runScript(t, root, "install.sh", []string{"GEOCAM_VERSION=1.0.0"}, bin); err != nil {
+		t.Fatalf("install.sh failed: %v\n%s", err, out)
+	}
+
+	artifactDir := t.TempDir()
+	artifact := buildArtifact(t, artifactDir, "2.0.0", "")
+	if err := os.Remove(artifact + ".sha256"); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runScript(t, root, "update.sh", nil, artifact)
+	if err == nil {
+		t.Fatalf("update.sh with no checksum file should have failed; output:\n%s", out)
+	}
+	target, rerr := os.Readlink(filepath.Join(root, "opt/geocam-edge/current"))
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if target != "releases/1.0.0" {
+		t.Errorf("current changed despite rejected artifact: %q", target)
+	}
+}
+
+func TestInstallRejectsWrongArchitecture(t *testing.T) {
+	requireBash(t)
+	root := t.TempDir()
+	binDir := t.TempDir()
+	bin := fakeBinary(t, binDir, "geocam-edge")
+	if err := os.WriteFile(filepath.Join(binDir, "ARCH"), []byte("definitely-not-a-real-arch"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runScript(t, root, "install.sh", []string{"GEOCAM_VERSION=1.0.0"}, bin)
+	if err == nil {
+		t.Fatalf("install.sh with wrong architecture should have failed; output:\n%s", out)
+	}
+	if _, statErr := os.Lstat(filepath.Join(root, "opt/geocam-edge/current")); !os.IsNotExist(statErr) {
+		t.Errorf("current symlink created despite rejected architecture: err=%v", statErr)
+	}
+}
+
+func TestInstallWithFfmpegPinsSystemdToPackagedFfmpeg(t *testing.T) {
+	requireBash(t)
+	root := t.TempDir()
+	dir := t.TempDir()
+	bin := fakeBinary(t, dir, "geocam-edge")
+	ffmpeg := fakeBinary(t, dir, "ffmpeg")
+
+	out, err := runScript(t, root, "install.sh", []string{"GEOCAM_VERSION=1.0.0"}, bin, ffmpeg)
+	if err != nil {
+		t.Fatalf("install.sh failed: %v\n%s", err, out)
+	}
+
+	unit, err := os.ReadFile(filepath.Join(root, "etc/systemd/system/geocam-edge.service"))
+	if err != nil {
+		t.Fatalf("reading generated systemd unit: %v", err)
+	}
+	want := "Environment=GEOCAM_VIDEO_FFMPEG_PATH=/opt/geocam-edge/current/ffmpeg"
+	if !strings.Contains(string(unit), want) {
+		t.Errorf("packaged install with ffmpeg should pin the service to it; unit missing %q:\n%s", want, unit)
 	}
 }
 
