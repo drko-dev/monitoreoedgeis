@@ -809,22 +809,24 @@ Independent benchmark harness and comparative measurement suite for Hybrid evalu
 
 **IMPLEMENTED**:
 - `internal/cameratest/hybrid_bandwidth_bench_test.go` (build tag `localbench`):
-  - Controlled loopback HTTP benchmark comparing Cloud baseline (continuous transmission of all sampled frames) vs. Hybrid candidate transmission (motion/event gated).
+  - **CONTROLLED REPLAY**: loopback HTTP benchmark comparing Cloud baseline (continuous transmission of all sampled synthetic frames) vs. a **SYNTHETIC SELECTIVITY / TRANSPORT SENSITIVITY** candidate transmission mode (fixed deterministic `i%3==0` pattern — NOT the real Hybrid J1-J5 motion/event candidate algorithm).
   - Exact server-side received byte accounting matching client-side transmission (`CloudSink` metrics).
-  - Comprehensive reporting: total frames, transmitted frames, frame drop/suppression %, raw bytes, bandwidth reduction %, and estimated monthly GB at continuous 24/7 operation.
+  - Comprehensive reporting: total frames, transmitted frames, frame drop/suppression %, raw bytes, bandwidth reduction %, and estimated monthly GB at continuous 24/7 operation, all explicitly labeled as synthetic results.
+  - Candidate selection is factored into a swappable `selectSyntheticCandidates(i int) bool` selector so a future **INTEGRATED HYBRID** benchmark can inject real candidate decisions from `internal/processing` (PR #19, `MotionResult.Candidate`) without changing the rest of the harness — not implemented in this PR.
 - `docs/performance/hybrid-j10-j11.md`:
   - Mathematical formulas for bandwidth reduction and suppression ratios.
-  - Controlled synthetic/loopback baseline results (66.00% bandwidth reduction observed on 50-frame replay: 11.41 MB Cloud baseline vs 3.88 MB Hybrid).
-  - Explicit physical hardware status declaration: **TC70 REAL CAMERA BENCHMARK = BLOCKED** (unconfigured / missing environment).
-  - Proposed non-commercial acceptance criteria for future real camera validation.
+  - **SYNTHETIC SELECTIVITY** results under **CONTROLLED REPLAY** (66.00% bandwidth reduction observed on 50-frame replay: 11.41 MB Cloud baseline vs 3.88 MB synthetic-selectivity mode), explicitly labeled as a controlled synthetic result validating byte/transport accounting, not real Hybrid J1-J5 savings.
+  - Explicit physical hardware status declaration: **REAL CAMERA = BLOCKED / NOT_EXECUTED** (no RTSP capture path in this harness; env var presence does not change this).
+  - **INTEGRATED HYBRID** explicitly called out as NOT IMPLEMENTED / future work.
 
 **TESTED**:
 - `go test -tags localbench -v ./internal/cameratest -run TestHybridBandwidthBenchmark` passes.
 - Repo-wide `go test ./...`, `go vet ./...`, and `gofmt -l .` pass clean.
 
 **NOT VALIDATED ON PHYSICAL HARDWARE**:
-- Physical camera benchmark against Tapo TC70 is declared **BLOCKED** due to missing `TAPO_ONVIF_IP` / `GEOCAM_E2E_*` hardware configuration.
-- Synthetic replay is documented as an upper-bound baseline, not disguised as real camera telemetry.
+- **REAL CAMERA**: physical benchmark against Tapo TC70 is **BLOCKED / NOT MEASURED** — no camera reachable, and this harness has no RTSP capture code path regardless of `TAPO_ONVIF_IP` / `GEOCAM_E2E_*` configuration.
+- **SYNTHETIC SELECTIVITY** results are documented as a controlled synthetic result, not disguised as real camera or real Hybrid J1-J5 telemetry.
+- **INTEGRATED HYBRID** (real motion detector wired into this benchmark) is NOT IMPLEMENTED in this PR.
 - No merge to `main`, no deploy.
 
 ## HOW ANOTHER AI SHOULD CONTINUE
