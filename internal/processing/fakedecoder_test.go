@@ -28,6 +28,12 @@ type fakeDecoder struct {
 	// without ever emitting a frame — simulating a decoder that is alive
 	// and receiving input but stuck, for the watchdog test.
 	stalled atomic.Bool
+
+	// dataFn, if set, generates each emitted frame's yuv420p Data given the
+	// 1-based decoded-frame sequence number — used by Hito J's motion
+	// tests to control exactly which pixels change between frames. nil
+	// keeps the original zero-filled buffer.
+	dataFn func(seq int64) []byte
 }
 
 func newFakeDecoder(width, height int) *fakeDecoder {
@@ -46,12 +52,16 @@ func (f *fakeDecoder) Push(au AccessUnit) error {
 	if f.stalled.Load() {
 		return nil // accepted, but deliberately never produces a frame
 	}
-	f.decoded.Add(1)
+	seq := f.decoded.Add(1)
+	data := make([]byte, f.width*f.height*3/2)
+	if f.dataFn != nil {
+		copy(data, f.dataFn(seq))
+	}
 	frame := DecodedFrame{
-		Data:             make([]byte, f.width*f.height*3/2),
+		Data:             data,
 		Width:            f.width,
 		Height:           f.height,
-		PipelineSeq:      uint64(f.decoded.Load()),
+		PipelineSeq:      uint64(seq),
 		SourceReceivedAt: au.ReceivedAt,
 		DecodedAt:        time.Now(),
 	}
