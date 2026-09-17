@@ -757,6 +757,52 @@ build the real appliance deploy path (P7/P8 in the roadmap).
 **HITO I (first slice + I6/I7/I10) — MERGED TO MAIN, NOT VALIDATED ON REAL
 HARDWARE, NOT DEPLOYED (no production deploy path exists yet)**
 
+## P7/P8 — Linux appliance install/update/rollback (branch `feature/edge-production-appliance`)
+
+Converts GEO CAM Edge into installable/maintainable software on a bare Linux
+appliance, outside K3s/Docker. See `docs/deployment/appliance.md` for the
+full operational guide and `docs/ROADMAP.md`'s P section for the per-item
+breakdown.
+
+**IMPLEMENTED**:
+- `deploy/appliance/scripts/{install,update,rollback,uninstall,package,build-ffmpeg-static,wait-ready}.sh`
+  and `deploy/appliance/systemd/geocam-edge.service.in` + `deploy/appliance/config/geocam-edge.env.example`.
+- Dedicated non-root `geocam-edge` system user/group (no login shell), versioned
+  `/opt/geocam-edge/releases/<version>` + atomic `current` symlink, `GEOCAM_DATA_DIR`
+  kept outside the release tree so it is never touched by install/update/uninstall.
+- `update.sh` validates checksum + architecture before touching anything installed,
+  keeps prior releases for rollback, restarts the service and verifies `/readyz`,
+  auto-invoking `rollback.sh` on failure. `uninstall.sh` never deletes
+  `GEOCAM_DATA_DIR`/config unless `--purge` is passed AND explicitly confirmed.
+- `build-ffmpeg-static.sh` reuses the existing root `Dockerfile`'s `ffmpeg-build`
+  stage (Hito H's pinned, LGPLv2.1+-only recipe) unmodified, as a build-time-only
+  tool, to produce a standalone static ffmpeg binary for the appliance package.
+
+**TESTED**: `go test ./deploy/appliance/...` — 9 tests, all passing on this sandbox.
+Covers: expected install layout, idempotent re-install preserving identity/config,
+update→rollback round-trip, rejection of wrong-architecture and bad-checksum
+artifacts (with `current` provably unchanged after rejection), non-purge uninstall
+preserving data, purge requiring explicit confirmation, no secret leakage in script
+output, and static structure checks on the systemd unit template.
+Repo-wide `go test ./...`, `go test -race ./...`, `go vet ./...`, `gofmt -l .`, and
+`make build-linux` (amd64+arm64 ELF binaries confirmed via `file`) all pass clean.
+
+**NOT VALIDATED** (no Linux/systemd machine or VM available in this sandbox —
+darwin only, no docker daemon either):
+- Real `useradd`/`groupadd`/`systemctl enable|start|restart` execution — the
+  scripts detect "not a real Linux target" and skip these (documented gap, see
+  `lib.sh:is_real_linux_target`), so this path has never actually run.
+- `systemd-analyze verify` against the generated unit (only a static content/
+  structure check ran).
+- An actual `geocam-edge run` process receiving `SIGTERM` from systemd and
+  shutting down within `TimeoutStopSec` — confirmed only by reading
+  `cmd/geocam-edge/main.go`'s `signal.NotifyContext`, not by observing it.
+- `build-ffmpeg-static.sh` was never executed (no Docker daemon here) — the
+  Dockerfile recipe it reuses is unchanged from Hito H, but the extraction
+  script itself has only been read-reviewed, not run.
+- No installation happened on any real or virtual machine. No production
+  infrastructure (Dattaweb/Hostinger/Geo Multa) was touched or referenced.
+
 ## HOW ANOTHER AI SHOULD CONTINUE
 
 1. Read `AGENTS.md`.
