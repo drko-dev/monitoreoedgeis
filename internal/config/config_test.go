@@ -13,6 +13,8 @@ func TestLoadDefaults(t *testing.T) {
 		"GEOCAM_HEALTH_ADDR", "GEOCAM_ALLOW_INSECURE_HTTP", "GEOCAM_SAAS_TIMEOUT",
 		"GEOCAM_DISCOVERY_ENABLED", "GEOCAM_DISCOVERY_INTERVAL", "GEOCAM_DISCOVERY_TIMEOUT",
 		"GEOCAM_DISCOVERY_INTERFACES",
+		"GEOCAM_CLOUD_JPEG_QUALITY", "GEOCAM_CLOUD_MAX_BYTES_PER_SEC",
+		"GEOCAM_CLOUD_BURST_BYTES", "GEOCAM_CLOUD_MAX_FPS",
 	} {
 		t.Setenv(k, "")
 	}
@@ -56,6 +58,18 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if len(cfg.DiscoveryInterfaces) != 0 {
 		t.Errorf("DiscoveryInterfaces = %v, want empty", cfg.DiscoveryInterfaces)
+	}
+	if cfg.CloudJPEGQuality != DefaultCloudJPEGQuality {
+		t.Errorf("CloudJPEGQuality = %d, want %d", cfg.CloudJPEGQuality, DefaultCloudJPEGQuality)
+	}
+	if cfg.CloudMaxBytesPerSec != DefaultCloudMaxBytesPerSec {
+		t.Errorf("CloudMaxBytesPerSec = %d, want %d", cfg.CloudMaxBytesPerSec, DefaultCloudMaxBytesPerSec)
+	}
+	if cfg.CloudBurstBytes != DefaultCloudBurstBytes {
+		t.Errorf("CloudBurstBytes = %d, want %d", cfg.CloudBurstBytes, DefaultCloudBurstBytes)
+	}
+	if cfg.CloudMaxFPS != DefaultCloudMaxFPS {
+		t.Errorf("CloudMaxFPS = %g, want %g", cfg.CloudMaxFPS, DefaultCloudMaxFPS)
 	}
 }
 
@@ -357,5 +371,56 @@ func TestLoadVideoMaxConcurrentPipelinesOutOfRange(t *testing.T) {
 	t.Setenv("GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES", "17")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected error for GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES=17")
+	}
+}
+
+func TestCloudBandwidthConfig_Valid(t *testing.T) {
+	t.Setenv("GEOCAM_CLOUD_JPEG_QUALITY", "75")
+	t.Setenv("GEOCAM_CLOUD_MAX_BYTES_PER_SEC", "250000")
+	t.Setenv("GEOCAM_CLOUD_BURST_BYTES", "500000")
+	t.Setenv("GEOCAM_CLOUD_MAX_FPS", "4.5")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if cfg.CloudJPEGQuality != 75 {
+		t.Errorf("CloudJPEGQuality = %d, want 75", cfg.CloudJPEGQuality)
+	}
+	if cfg.CloudMaxBytesPerSec != 250000 {
+		t.Errorf("CloudMaxBytesPerSec = %d, want 250000", cfg.CloudMaxBytesPerSec)
+	}
+	if cfg.CloudBurstBytes != 500000 {
+		t.Errorf("CloudBurstBytes = %d, want 500000", cfg.CloudBurstBytes)
+	}
+	if cfg.CloudMaxFPS != 4.5 {
+		t.Errorf("CloudMaxFPS = %g, want 4.5", cfg.CloudMaxFPS)
+	}
+}
+
+func TestCloudBandwidthConfig_Invalid(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+	}{
+		{"quality zero", map[string]string{"GEOCAM_CLOUD_JPEG_QUALITY": "0"}},
+		{"quality negative", map[string]string{"GEOCAM_CLOUD_JPEG_QUALITY": "-10"}},
+		{"quality over 100", map[string]string{"GEOCAM_CLOUD_JPEG_QUALITY": "101"}},
+		{"quality non-integer", map[string]string{"GEOCAM_CLOUD_JPEG_QUALITY": "high"}},
+		{"bytes per sec negative", map[string]string{"GEOCAM_CLOUD_MAX_BYTES_PER_SEC": "-1"}},
+		{"bytes per sec invalid", map[string]string{"GEOCAM_CLOUD_MAX_BYTES_PER_SEC": "fast"}},
+		{"burst negative", map[string]string{"GEOCAM_CLOUD_BURST_BYTES": "-100"}},
+		{"fps negative", map[string]string{"GEOCAM_CLOUD_MAX_FPS": "-1.5"}},
+		{"fps invalid", map[string]string{"GEOCAM_CLOUD_MAX_FPS": "slow"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected error for case %q, got nil", tc.name)
+			}
+		})
 	}
 }

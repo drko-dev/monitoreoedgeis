@@ -165,3 +165,164 @@ func TestYUV420pToImage_RejectsZeroDimensions(t *testing.T) {
 		t.Fatal("yuv420pToImage(0,0): want error, got nil")
 	}
 }
+
+func TestCloudSink_ConfigurableJPEGQuality(t *testing.T) {
+	senderLow := &fakeSender{}
+	sLow := NewWithConfig(senderLow, "dev-1", "cred-1", Config{JPEGQuality: 10}, slog.Default())
+
+	senderHigh := &fakeSender{}
+	sHigh := NewWithConfig(senderHigh, "dev-1", "cred-1", Config{JPEGQuality: 95}, slog.Default())
+
+	frame := processing.Frame{
+		CandidateKey: "cam-1",
+		Timestamp:    time.Now(),
+		Seq:          1,
+		OutputWidth:  64,
+		OutputHeight: 64,
+		Data:         solidYUV420p(64, 64, 120, 100, 150),
+	}
+
+	if err := sLow.Route(frame); err != nil {
+		t.Fatalf("sLow.Route() error = %v", err)
+	}
+	if err := sHigh.Route(frame); err != nil {
+		t.Fatalf("sHigh.Route() error = %v", err)
+	}
+
+	if len(senderLow.gotJPEG) >= len(senderHigh.gotJPEG) {
+		t.Fatalf("Quality 10 JPEG (%d bytes) should be smaller than Quality 95 JPEG (%d bytes)",
+			len(senderLow.gotJPEG), len(senderHigh.gotJPEG))
+	}
+
+	// Verify fallback for out-of-range quality
+	sFallback := NewWithConfig(&fakeSender{}, "dev-1", "cred-1", Config{JPEGQuality: 150}, slog.Default())
+	if sFallback.cfg.JPEGQuality != DefaultJPEGQuality {
+		t.Fatalf("expected fallback to %d for quality 150, got %d", DefaultJPEGQuality, sFallback.cfg.JPEGQuality)
+	}
+}
+
+func TestCloudSink_PrePostThrottling(t *testing.T) {
+	sender := &fakeSender{}
+	// Strict limit: burst only 10 bytes -> any realistic frame will exceed this and get throttled.
+	cfg := Config{
+		JPEGQuality:    85,
+		MaxBytesPerSec: 100,
+		BurstBytes:     10,
+	}
+	s := NewWithConfig(sender, "dev-1", "cred-1", cfg, slog.Default())
+
+	frame := processing.Frame{
+		CandidateKey: "cam-test",
+		Timestamp:    time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC),
+		Seq:          99,
+		OutputWidth:  16,
+		OutputHeight: 8,
+		Data:         solidYUV420p(16, 8, 128, 128, 128),
+	}
+
+	err := s.Route(frame)
+	if err == nil {
+		t.Fatal("expected Route() to fail due to rate limit, got nil")
+	}
+	if !errors.Is(err, ErrThrottled) {
+		t.Fatalf("expected errors.Is(err, ErrThrottled) = true, got %v", err)
+	}
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("expected errors.Is(err, ErrRateLimited) = true, got %v", err)
+	}
+
+	// CRITICAL: Ensure POST was never called (pre-POST throttling)
+	if sender.calls != 0 {
+		t.Fatalf("sender.calls = %d, want 0 (frame must be throttled BEFORE POST)", sender.calls)
+	}
+
+	// Check metrics
+	status := s.Status()
+	if status.ThrottledFrames != 1 {
+		t.Fatalf("status.ThrottledFrames = %d, want 1", status.ThrottledFrames)
+	}
+	if status.ThrottledBytes <= 0 {
+		t.Fatalf("status.ThrottledBytes = %d, want > 0", status.ThrottledBytes)
+	}
+	if status.UploadedFrames != 0 {
+		t.Fatalf("status.UploadedFrames = %d, want 0", status.UploadedFrames)
+	}
+	if status.UploadedBytes != 0 {
+		t.Fatalf("status.UploadedBytes = %d, want 0", status.UploadedBytes)
+	}
+	if status.ConfiguredLimit != 100 {
+		t.Fatalf("status.ConfiguredLimit = %d, want 100", status.ConfiguredLimit)
+	}
+}
+
+func TestCloudSink_ErrorDistinction(t *testing.T) {
+	// 1. Throttling error
+	sThrottled := NewWithConfig(&fakeSender{}, "dev-1", "cred-1", Config{
+		MaxBytesPerSec: 10,
+		BurstBytes:     10,
+	}, slog.Default())
+	frame := processing.Frame{
+		CandidateKey: "cam-1",
+		Timestamp:    time.Now(),
+		Seq:          1,
+		OutputWidth:  16,
+		OutputHeight: 8,
+		Data:         solidYUV420p(16, 8, 100, 100, 100),
+	}
+	errThrottled := sThrottled.Route(frame)
+	if !errors.Is(errThrottled, ErrThrottled) {
+		t.Fatalf("expected ErrThrottled, got %v", errThrottled)
+	}
+
+	// 2. Transport error
+	netErr := errors.New("connection reset by peer")
+	sTransport := New(&fakeSender{err: netErr}, "dev-1", "cred-1", slog.Default())
+	errTransport := sTransport.Route(frame)
+	if !errors.Is(errTransport, netErr) {
+		t.Fatalf("expected wrapped netErr, got %v", errTransport)
+	}
+	if errors.Is(errTransport, ErrThrottled) {
+		t.Fatal("transport error must not match ErrThrottled")
+	}
+
+	// 3. Dimension error
+	badFrame := processing.Frame{
+		OutputWidth:  0,
+		OutputHeight: 0,
+	}
+	errDim := sTransport.Route(badFrame)
+	if errors.Is(errDim, ErrThrottled) || errors.Is(errDim, netErr) {
+		t.Fatalf("dimension error should be distinct, got %v", errDim)
+	}
+}
+
+func TestCloudSink_DefaultBackwardCompatibility(t *testing.T) {
+	sender := &fakeSender{}
+	s := New(sender, "dev-1", "cred-1", slog.Default())
+
+	frame := processing.Frame{
+		CandidateKey: "cam-1",
+		Timestamp:    time.Now(),
+		Seq:          10,
+		OutputWidth:  16,
+		OutputHeight: 8,
+		Data:         solidYUV420p(16, 8, 100, 100, 100),
+	}
+
+	if err := s.Route(frame); err != nil {
+		t.Fatalf("Route() failed: %v", err)
+	}
+	if sender.calls != 1 {
+		t.Fatalf("sender.calls = %d, want 1", sender.calls)
+	}
+	status := s.Status()
+	if status.ThrottledFrames != 0 {
+		t.Fatalf("ThrottledFrames = %d, want 0", status.ThrottledFrames)
+	}
+	if status.UploadedFrames != 1 {
+		t.Fatalf("UploadedFrames = %d, want 1", status.UploadedFrames)
+	}
+	if status.ConfiguredLimit != 0 {
+		t.Fatalf("ConfiguredLimit = %d, want 0", status.ConfiguredLimit)
+	}
+}

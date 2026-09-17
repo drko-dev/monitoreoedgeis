@@ -41,5 +41,11 @@ func newCloudSink(cfg *config.Config, creds credentials.Credentials, log *slog.L
 		return nil
 	}
 
-	return cloudsink.New(client, creds.DeviceID, creds.Credential, logging.Component(log, "cloud-sink"))
+	sinkCfg := cloudsink.Config{
+		JPEGQuality:    cfg.CloudJPEGQuality,
+		MaxBytesPerSec: cfg.CloudMaxBytesPerSec,
+		BurstBytes:     cfg.CloudBurstBytes,
+		MaxFPS:         cfg.CloudMaxFPS,
+	}
+	return cloudsink.NewWithConfig(client, creds.DeviceID, creds.Credential, sinkCfg, logging.Component(log, "cloud-sink"))
 }
