@@ -214,6 +214,14 @@ type CloudSink struct {
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
 	droppedOversize atomic.Uint64
+
+	// afterReplay, when non-nil, is invoked synchronously from drainLoop
+	// right after a buffered frame is successfully replayed and advanced.
+	// It exists only so tests can synchronize on "a replay just completed"
+	// via a channel instead of polling CloudBufferStats against a
+	// wall-clock deadline, which flakes under scheduler/GC pressure. Left
+	// nil in production: zero behavior change.
+	afterReplay func()
 }
 
 // Option configures optional CloudSink behavior at construction time.
@@ -529,6 +537,9 @@ func (s *CloudSink) drainLoop(ctx context.Context) {
 			s.buffer.Advance()
 			backoff = 0
 			s.logger.Debug("buffered frame replayed", "candidate_key", f.CandidateKey, "seq", f.Seq)
+			if s.afterReplay != nil {
+				s.afterReplay()
+			}
 		case errors.Is(err, context.Canceled):
 			return
 		case !isRecoverable(err):

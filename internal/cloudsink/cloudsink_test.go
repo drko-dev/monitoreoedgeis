@@ -723,6 +723,15 @@ func TestCloudSink_Replay_UploadsBufferedFramesInOrder(t *testing.T) {
 	sender := &fakeSender{err: transport.ErrSaaSUnavailable}
 	s, _ := newBufferedSink(t, sender, 10)
 
+	// Synchronize on drainLoop's own completion signal instead of polling
+	// CloudBufferStats against a wall-clock deadline: a fixed real-time
+	// budget races against drainPollInterval/backoff and flakes under
+	// scheduler or GC pressure (`-count=200`, `-race`) even though replay
+	// itself is correct. replayed is buffered for exactly the 2 frames
+	// this test queues, so drainLoop's non-blocking send never stalls it.
+	replayed := make(chan struct{}, 2)
+	s.afterReplay = func() { replayed <- struct{}{} }
+
 	if err := s.Route(testFrame("cam-1", 1)); err != nil {
 		t.Fatalf("Route(1) error = %v", err)
 	}
@@ -737,12 +746,12 @@ func TestCloudSink_Replay_UploadsBufferedFramesInOrder(t *testing.T) {
 	sender.err = nil
 	sender.mu.Unlock()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if s.CloudBufferStats().BufferedFrames == 0 {
-			break
+	for i := 0; i < 2; i++ {
+		select {
+		case <-replayed:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("timed out waiting for replay %d/2 (hang guard, not the correctness check)", i+1)
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
 
 	stats := s.CloudBufferStats()
@@ -825,9 +834,18 @@ func TestCloudSink_Replay_WaitsForLimiterInsteadOfDropping(t *testing.T) {
 
 	sender := &fakeSender{err: transport.ErrSaaSUnavailable}
 	dir := t.TempDir()
-	cfg := Config{MaxBytesPerSec: 200, BurstBytes: frameBytes}
+	// bytesPerSec is picked relative to frameBytes only to keep the refill
+	// short (well under a second) — the assertion below no longer depends
+	// on hitting that timing, only on the completion signal firing.
+	cfg := Config{MaxBytesPerSec: frameBytes * 10, BurstBytes: frameBytes}
 	s := New(sender, "dev-1", "cred-1", cfg, slog.Default(), nil, WithBuffer(dir, 1<<20, 10, 0))
 	t.Cleanup(s.Close)
+
+	// See TestCloudSink_Replay_UploadsBufferedFramesInOrder: synchronize on
+	// drainLoop's completion signal, not a wall-clock deadline racing the
+	// limiter's real refill timer.
+	replayed := make(chan struct{}, 1)
+	s.afterReplay = func() { replayed <- struct{}{} }
 
 	if err := s.Route(f); err != nil {
 		t.Fatalf("Route() error = %v", err)
@@ -842,9 +860,10 @@ func TestCloudSink_Replay_WaitsForLimiterInsteadOfDropping(t *testing.T) {
 	sender.err = nil
 	sender.mu.Unlock()
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && s.CloudBufferStats().BufferedFrames != 0 {
-		time.Sleep(20 * time.Millisecond)
+	select {
+	case <-replayed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for replay (hang guard): the limiter must have waited, not dropped it")
 	}
 	stats := s.CloudBufferStats()
 	if stats.BufferedFrames != 0 {
