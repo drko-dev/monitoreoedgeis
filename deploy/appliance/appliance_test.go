@@ -343,6 +343,109 @@ func TestInstallRejectsWrongArchitecture(t *testing.T) {
 	}
 }
 
+// hostArch mirrors lib.sh's host_arch() from the Go side, for tests that
+// need to know what the sandbox's own uname -m normalizes to.
+func hostArch(t *testing.T) string {
+	t.Helper()
+	out, err := exec.Command("uname", "-m").Output()
+	if err != nil {
+		t.Fatalf("uname -m: %v", err)
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "arm64", "aarch64":
+		return "arm64"
+	default:
+		return "amd64"
+	}
+}
+
+// otherArch returns the appliance architecture that is NOT a.
+func otherArch(a string) string {
+	if a == "amd64" {
+		return "arm64"
+	}
+	return "amd64"
+}
+
+// TestInstallRejectsArchMarkerBinaryMismatch covers the hardening gap: an
+// ARCH sidecar file that matches the host is no longer enough on its own —
+// install.sh must also check it against the binary's real, inspected
+// architecture (simulated here via the test-only GEOCAM_TEST_BINARY_ARCH,
+// since the fake fixture binary is a plain shell script) and reject if
+// they disagree, before touching releases/current.
+func TestInstallRejectsArchMarkerBinaryMismatch(t *testing.T) {
+	requireBash(t)
+	root := t.TempDir()
+	binDir := t.TempDir()
+	bin := fakeBinary(t, binDir, "geocam-edge")
+	host := hostArch(t)
+	// ARCH marker claims the host's own architecture (the check the old
+	// code relied on alone), but the real binary is reported as the other
+	// one — this must still be rejected.
+	if err := os.WriteFile(filepath.Join(binDir, "ARCH"), []byte(host), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runScript(t, root, "install.sh",
+		[]string{"GEOCAM_VERSION=1.0.0", "GEOCAM_TEST_BINARY_ARCH=" + otherArch(host)}, bin)
+	if err == nil {
+		t.Fatalf("install.sh with ARCH/binary mismatch should have failed; output:\n%s", out)
+	}
+	if _, statErr := os.Lstat(filepath.Join(root, "opt/geocam-edge/current")); !os.IsNotExist(statErr) {
+		t.Errorf("current symlink created despite rejected architecture: err=%v", statErr)
+	}
+}
+
+// TestInstallFailsClosedWhenArchUnverifiable covers the fail-closed
+// requirement: on a real Linux install target, if the binary's real
+// architecture can't be positively determined (no ARCH marker, and
+// file/readelf are inconclusive against the fake shell-script fixture),
+// install.sh must reject rather than silently skip the check.
+// GEOCAM_TEST_ARCH_CHECK_STRICT simulates "real Linux install target" from
+// this staged sandbox, where is_real_linux_target is otherwise always
+// false.
+func TestInstallFailsClosedWhenArchUnverifiable(t *testing.T) {
+	requireBash(t)
+	root := t.TempDir()
+	bin := fakeBinary(t, t.TempDir(), "geocam-edge")
+
+	out, err := runScript(t, root, "install.sh",
+		[]string{"GEOCAM_VERSION=1.0.0", "GEOCAM_TEST_ARCH_CHECK_STRICT=1"}, bin)
+	if err == nil {
+		t.Fatalf("install.sh should fail closed when arch can't be verified on a real target; output:\n%s", out)
+	}
+	if _, statErr := os.Lstat(filepath.Join(root, "opt/geocam-edge/current")); !os.IsNotExist(statErr) {
+		t.Errorf("current symlink created despite unverifiable architecture: err=%v", statErr)
+	}
+}
+
+// TestInstallAcceptsMatchingArchMarker is the valid path: the ARCH marker
+// matches the host, and matches the (simulated) binary's real architecture
+// too — install proceeds normally.
+func TestInstallAcceptsMatchingArchMarker(t *testing.T) {
+	requireBash(t)
+	root := t.TempDir()
+	binDir := t.TempDir()
+	bin := fakeBinary(t, binDir, "geocam-edge")
+	host := hostArch(t)
+	if err := os.WriteFile(filepath.Join(binDir, "ARCH"), []byte(host), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runScript(t, root, "install.sh",
+		[]string{"GEOCAM_VERSION=1.0.0", "GEOCAM_TEST_BINARY_ARCH=" + host}, bin)
+	if err != nil {
+		t.Fatalf("install.sh with matching architecture should have succeeded: %v\n%s", err, out)
+	}
+	target, rerr := os.Readlink(filepath.Join(root, "opt/geocam-edge/current"))
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if target != "releases/1.0.0" {
+		t.Errorf("current -> %q, want releases/1.0.0", target)
+	}
+}
+
 func TestInstallWithFfmpegPinsSystemdToPackagedFfmpeg(t *testing.T) {
 	requireBash(t)
 	root := t.TempDir()

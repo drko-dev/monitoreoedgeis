@@ -35,12 +35,23 @@ HOST_ARCH="$(host_arch)"
 log "target architecture: $HOST_ARCH"
 
 # Reject an incompatible-architecture binary BEFORE touching anything
-# installed — same check/style as update.sh's artifact validation. A
-# packaged tarball ships an ARCH marker file alongside the binary; a bare
-# dev binary (no ARCH file) skips this check and relies on host_arch's own
-# uname-based validation instead.
-ARTIFACT_ARCH="$(cat "$(dirname "$BIN_SRC")/ARCH" 2>/dev/null || echo "")"
-if [ -n "$ARTIFACT_ARCH" ] && [ "$ARTIFACT_ARCH" != "$HOST_ARCH" ]; then
+# installed. The ARCH sidecar file a packaged tarball ships is only
+# metadata; the binary's REAL architecture (inspected via `file`/`readelf`,
+# see lib.sh:detect_binary_arch) is the source of truth and must agree with
+# it. On a real Linux install target, if that inspection is inconclusive
+# (tools unavailable, unrecognized format), this fails closed — an
+# unverifiable binary must never be activated on a production target — same
+# check/style as update.sh's artifact validation.
+ARTIFACT_ARCH="$(normalize_arch "$(cat "$(dirname "$BIN_SRC")/ARCH" 2>/dev/null || echo "")")"
+BINARY_ARCH="$(detect_binary_arch "$BIN_SRC")"
+if [ -n "$BINARY_ARCH" ]; then
+    [ "$BINARY_ARCH" = "$HOST_ARCH" ] || die "binary architecture ($BINARY_ARCH) does not match host ($HOST_ARCH) — rejected, nothing installed"
+    if [ -n "$ARTIFACT_ARCH" ] && [ "$ARTIFACT_ARCH" != "$BINARY_ARCH" ]; then
+        die "ARCH marker ($ARTIFACT_ARCH) does not match the binary's actual architecture ($BINARY_ARCH) — rejected, nothing installed"
+    fi
+elif arch_check_required; then
+    die "cannot verify the binary's real architecture on this target ('file'/'readelf' unavailable or inconclusive) — refusing to install (fail closed)"
+elif [ -n "$ARTIFACT_ARCH" ] && [ "$ARTIFACT_ARCH" != "$HOST_ARCH" ]; then
     die "binary architecture ($ARTIFACT_ARCH) does not match host ($HOST_ARCH) — rejected, nothing installed"
 fi
 

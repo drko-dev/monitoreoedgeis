@@ -51,6 +51,63 @@ is_real_linux_target() {
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+# normalize_arch maps common uname/file/readelf spellings onto the two
+# architectures this appliance ships (amd64/arm64). Unrecognized input is
+# passed through unchanged so callers can still reject it with a clear
+# message instead of silently normalizing garbage to "".
+normalize_arch() {
+    case "$1" in
+        x86-64|x86_64) echo "amd64" ;;
+        aarch64) echo "arm64" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+# detect_binary_arch inspects the binary at $1 and prints amd64/arm64, or an
+# empty string if it cannot positively identify the architecture (missing
+# tools, or a format `file`/`readelf` don't recognize as ELF/Mach-O). It
+# never dies — callers decide whether an inconclusive result is fatal (see
+# install.sh's fail-closed check against arch_check_required).
+#
+# GEOCAM_TEST_BINARY_ARCH is a test-only override (not a documented
+# end-user knob): it lets the test suite simulate binaries of a given real
+# architecture without needing actual cross-arch ELF fixtures, since the
+# fake binaries built for tests are plain shell scripts.
+detect_binary_arch() {
+    if [ -n "${GEOCAM_TEST_BINARY_ARCH:-}" ]; then
+        printf '%s\n' "$GEOCAM_TEST_BINARY_ARCH"
+        return 0
+    fi
+
+    local bin="$1" out=""
+    if have_cmd file; then
+        out="$out $(file -b "$bin" 2>/dev/null || true)"
+    fi
+    if have_cmd readelf; then
+        out="$out $(readelf -h "$bin" 2>/dev/null || true)"
+    fi
+    out="$(printf '%s' "$out" | tr '[:upper:]' '[:lower:]')"
+
+    case "$out" in
+        *x86-64*|*x86_64*) echo "amd64" ;;
+        *aarch64*|*arm64*) echo "arm64" ;;
+        *) echo "" ;;
+    esac
+}
+
+# arch_check_required reports whether install.sh MUST be able to positively
+# verify a binary's real architecture, dying instead of silently skipping
+# the check if it can't. True on a real Linux install target — an
+# unverifiable binary must never be activated on a production appliance.
+#
+# GEOCAM_TEST_ARCH_CHECK_STRICT is a test-only override that lets the test
+# suite exercise this fail-closed path from the staged sandbox this suite
+# always runs in (is_real_linux_target is otherwise always false there).
+arch_check_required() {
+    [ "${GEOCAM_TEST_ARCH_CHECK_STRICT:-}" = "1" ] && return 0
+    is_real_linux_target
+}
+
 # atomic_symlink_swap points $1 (an existing or new symlink path) at $2
 # (target, relative to the symlink's directory).
 #
