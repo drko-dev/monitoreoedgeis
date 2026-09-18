@@ -27,6 +27,7 @@ type Executor interface {
 type Module struct {
 	client               Client
 	executor             Executor
+	ledger               *Ledger
 	deviceID, credential string
 	pollInterval         time.Duration
 	cancel               context.CancelFunc
@@ -42,8 +43,18 @@ type commandExecution struct {
 	errorCode string
 }
 
-func New(client Client, executor Executor, deviceID, credential string) *Module {
-	return &Module{
+// Option configures Module options.
+type Option func(*Module)
+
+// WithLedger injects a durable ledger for idempotency across restarts.
+func WithLedger(l *Ledger) Option {
+	return func(m *Module) {
+		m.ledger = l
+	}
+}
+
+func New(client Client, executor Executor, deviceID, credential string, opts ...Option) *Module {
+	m := &Module{
 		client:       client,
 		executor:     executor,
 		deviceID:     deviceID,
@@ -51,6 +62,10 @@ func New(client Client, executor Executor, deviceID, credential string) *Module 
 		pollInterval: defaultInterval,
 		executed:     make(map[string]commandExecution),
 	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // SetPollInterval sets the interval between polls (useful for testing).
@@ -139,6 +154,14 @@ func (m *Module) execute(ctx context.Context, cmd *transport.ControlCommand) (st
 		return "failed", nil, "INVALID_COMMAND"
 	}
 
+	// 1. Check durable ledger if available
+	if m.ledger != nil {
+		if record, found := m.ledger.Get(cmd.ID); found {
+			return record.Status, record.Result, record.ErrorCode
+		}
+	}
+
+	// 2. Check in-memory map
 	m.mu.Lock()
 	if existing, seen := m.executed[cmd.ID]; seen {
 		m.mu.Unlock()
@@ -164,6 +187,15 @@ func (m *Module) execute(ctx context.Context, cmd *transport.ControlCommand) (st
 		state, code = "failed", "UNSUPPORTED"
 	default:
 		state, code = "failed", "UNKNOWN_COMMAND"
+	}
+
+	// Persist to durable ledger atomically BEFORE returning to report
+	if m.ledger != nil {
+		_ = m.ledger.Record(cmd.ID, CommandExecution{
+			Status:    state,
+			Result:    result,
+			ErrorCode: code,
+		})
 	}
 
 	m.mu.Lock()

@@ -40,5 +40,14 @@ func newControlModule(cfg *config.Config, creds credentials.Credentials, reporte
 	if err != nil {
 		return nil, fmt.Errorf("control transport: %w", err)
 	}
-	return control.New(client, controlExecutor{reporter: reporter, discovery: discoveryModule}, creds.DeviceID, creds.Credential), nil
+	var opts []control.Option
+	if cfg.DataDir != "" {
+		ledger, err := control.OpenLedger(cfg.DataDir, 100)
+		if err != nil {
+			log.Warn("control: failed to open ledger", slog.Any("error", err))
+		} else {
+			opts = append(opts, control.WithLedger(ledger))
+		}
+	}
+	return control.New(client, controlExecutor{reporter: reporter, discovery: discoveryModule}, creds.DeviceID, creds.Credential, opts...), nil
 }
