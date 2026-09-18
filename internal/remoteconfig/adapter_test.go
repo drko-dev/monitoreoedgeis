@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -621,5 +622,150 @@ func TestTargeted_12_PartialConfigNeverActive(t *testing.T) {
 	_, err = ParseAndValidateJSON(disallowedJSON, []string{"cam-front", "cam-back"})
 	if err == nil {
 		t.Fatal("expected rejection of disallowed tenant_id in JSON, got nil")
+	}
+}
+
+// 4. Partial config merge conserves effective config
+func TestTargeted_04_PartialConfigMergeConservesEffectiveConfig(t *testing.T) {
+	adapter, videoMgr, _, _, _ := setupTestRuntime(t, config.ModeHybrid)
+	pipe := videoMgr.Pipeline("cam-front")
+	ctx := context.Background()
+
+	// Apply 1: only TargetFPS = 15.0
+	fps1 := 15.0
+	if err := adapter.Apply(ctx, Config{TargetFPS: &fps1}); err != nil {
+		t.Fatalf("first apply failed: %v", err)
+	}
+
+	cur1 := adapter.CurrentConfig()
+	if cur1.TargetFPS == nil || *cur1.TargetFPS != 15.0 {
+		t.Fatalf("TargetFPS = %v, want 15.0", cur1.TargetFPS)
+	}
+	if cur1.OutputWidth == nil || *cur1.OutputWidth != 640 {
+		t.Fatalf("OutputWidth = %v, want 640 (preserved)", cur1.OutputWidth)
+	}
+	if cur1.OutputHeight == nil || *cur1.OutputHeight != 360 {
+		t.Fatalf("OutputHeight = %v, want 360 (preserved)", cur1.OutputHeight)
+	}
+
+	// Apply 2: only resolution change (1280x720)
+	w2, h2 := 1280, 720
+	if err := adapter.Apply(ctx, Config{OutputWidth: &w2, OutputHeight: &h2}); err != nil {
+		t.Fatalf("second apply failed: %v", err)
+	}
+
+	// Verify effective configuration merged: both TargetFPS (15.0) AND Resolution (1280x720) are present
+	cur2 := adapter.CurrentConfig()
+	if cur2.TargetFPS == nil || *cur2.TargetFPS != 15.0 {
+		t.Fatalf("TargetFPS = %v, want 15.0 (conserved from apply 1)", cur2.TargetFPS)
+	}
+	if cur2.OutputWidth == nil || *cur2.OutputWidth != 1280 {
+		t.Fatalf("OutputWidth = %v, want 1280", cur2.OutputWidth)
+	}
+	if cur2.OutputHeight == nil || *cur2.OutputHeight != 720 {
+		t.Fatalf("OutputHeight = %v, want 720", cur2.OutputHeight)
+	}
+	if got := pipe.Sampler().TargetFPS(); got != 15.0 {
+		t.Fatalf("runtime pipe TargetFPS = %f, want 15.0", got)
+	}
+}
+
+// 5. Failed second partial apply restores previous effective config
+func TestTargeted_05_FailedSecondPartialApplyRestoresPreviousEffectiveConfig(t *testing.T) {
+	adapter, videoMgr, _, _, _ := setupTestRuntime(t, config.ModeHybrid)
+	pipe := videoMgr.Pipeline("cam-front")
+	ctx := context.Background()
+
+	// Apply 1: change TargetFPS to 20.0
+	fps1 := 20.0
+	if err := adapter.Apply(ctx, Config{TargetFPS: &fps1}); err != nil {
+		t.Fatalf("first apply failed: %v", err)
+	}
+	if got := pipe.Sampler().TargetFPS(); got != 20.0 {
+		t.Fatalf("pipe TargetFPS = %f, want 20.0", got)
+	}
+
+	// Apply 2: try to apply invalid ROI that fails validation
+	badROI := []config.HybridROI{{XMin: 2.0, YMin: 0.1, XMax: 3.0, YMax: 0.5}}
+	err := adapter.Apply(ctx, Config{
+		HybridROIs: badROI,
+	})
+	if err == nil {
+		t.Fatal("expected apply failure due to invalid ROI")
+	}
+
+	// Verify effective config is still the state from Apply 1
+	cur := adapter.CurrentConfig()
+	if cur.TargetFPS == nil || *cur.TargetFPS != 20.0 {
+		t.Fatalf("TargetFPS = %v, want 20.0 preserved", cur.TargetFPS)
+	}
+	if got := pipe.Sampler().TargetFPS(); got != 20.0 {
+		t.Fatalf("runtime pipe TargetFPS = %f, want 20.0 preserved", got)
+	}
+
+	// Also test health check failure rollback restores previous effective config
+	failAdapter := NewRuntimeAdapter(
+		config.ModeHybrid,
+		adapter.videoManager,
+		adapter.rtspManager,
+		adapter.modelManager,
+		slog.Default(),
+		WithHealthCheck(func(ctx context.Context) error {
+			return fmt.Errorf("simulated health check failure")
+		}),
+	)
+	// Try applying a change on failAdapter
+	fps3 := 25.0
+	err = failAdapter.Apply(ctx, Config{TargetFPS: &fps3})
+	if err == nil {
+		t.Fatal("expected error from health check failure")
+	}
+	// Verify current config on failAdapter was rolled back to initial effective config
+	curFail := failAdapter.CurrentConfig()
+	if curFail.TargetFPS == nil || *curFail.TargetFPS != 20.0 {
+		t.Fatalf("TargetFPS after failed apply = %v, want 20.0", curFail.TargetFPS)
+	}
+}
+
+// 10. knownCameras empty + camera override = reject
+func TestTargeted_10_KnownCamerasEmptyRejectsCameraOverride(t *testing.T) {
+	// 1. Standalone Validate with knownCameras = nil or empty
+	camFPS := 15.0
+	cfg := Config{
+		Cameras: map[string]CameraConfig{
+			"cam-any": {
+				TargetFPS: &camFPS,
+			},
+		},
+	}
+
+	err := Validate(cfg, nil)
+	if err == nil {
+		t.Fatal("expected error when validating camera override against empty knownCameras, got nil")
+	}
+	if !strings.Contains(err.Error(), "camera \"cam-any\" is not known by runtime") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	err = Validate(cfg, []string{})
+	if err == nil {
+		t.Fatal("expected error when validating camera override against []string{}, got nil")
+	}
+
+	// 2. RuntimeAdapter with no known cameras must reject camera override
+	adapterNoCameras := NewRuntimeAdapter(
+		config.ModeCloud,
+		nil,
+		nil,
+		nil,
+		slog.Default(),
+	)
+
+	err = adapterNoCameras.Apply(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected adapter.Apply to reject camera override when runtime knows no cameras")
+	}
+	if !strings.Contains(err.Error(), "camera \"cam-any\" is not known by runtime") {
+		t.Fatalf("unexpected adapter.Apply error message: %v", err)
 	}
 }

@@ -11,9 +11,9 @@ import (
 )
 
 // newFullEdgeService builds the Milestone K Full Edge event and evidence subsystem
-// when the agent is configured in edge processing mode.
+// when DataDir is configured, enabling runtime transition to edge mode.
 func newFullEdgeService(cfg *config.Config, ident identity.Identity, creds credentials.Credentials, reporter *health.Reporter, log *slog.Logger) *fulledge.Service {
-	if cfg.ProcessingMode != config.ModeEdge {
+	if cfg.DataDir == "" {
 		return nil
 	}
 

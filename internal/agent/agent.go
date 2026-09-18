@@ -43,6 +43,7 @@ type Agent struct {
 	rtspManager      *rtsp.Manager
 	videoManager     *processing.Manager
 	visionSink       *vision.Sink
+	modelManager     *vision.ModelManager
 	runtimeApplier   remoteconfig.Applier
 	fullEdgeService  *fulledge.Service
 	fullEdgeConsumer *fullEdgeEventConsumer
@@ -197,6 +198,9 @@ func New(cfg *config.Config) *Agent {
 					IdleAfter:       cfg.HybridIdleAfter,
 				},
 			}
+			modelMgr := vision.NewModelManager(cfg.EdgeYOLOModelsDir, cfg.EdgeYOLOPersonModel, cfg.EdgeYOLOVehicleModel)
+			a.modelManager = modelMgr
+
 			var extraSinks []processing.Sink
 			if cs := newCloudSink(cfg, creds, reporter, log); cs != nil {
 				extraSinks = append(extraSinks, cs)
@@ -215,7 +219,7 @@ func New(cfg *config.Config) *Agent {
 			if a.fullEdgeConsumer != nil {
 				consumer = a.fullEdgeConsumer
 			}
-			if vs, mod := newVisionSink(cfg, reporter, consumer, log); vs != nil {
+			if vs, mod := newVisionSink(cfg, reporter, consumer, log, modelMgr); vs != nil {
 				extraSinks = append(extraSinks, vs)
 				mods = append(mods, mod)
 				a.visionSink = vs
@@ -228,7 +232,6 @@ func New(cfg *config.Config) *Agent {
 				a.fullEdgeConsumer.SetHistoryProvider(videoMgr)
 			}
 
-			modelMgr := vision.NewModelManager(cfg.EdgeYOLOModelsDir, cfg.EdgeYOLOPersonModel, cfg.EdgeYOLOVehicleModel)
 			a.runtimeApplier = remoteconfig.NewRuntimeAdapter(
 				cfg.ProcessingMode,
 				videoMgr,
@@ -236,14 +239,21 @@ func New(cfg *config.Config) *Agent {
 				modelMgr,
 				logging.Component(log, "remote-config"),
 				remoteconfig.WithCloudSinkFactory(func() processing.Sink {
-					return newCloudSink(cfg, creds, reporter, log)
+					return buildCloudSink(cfg, creds, reporter, log)
 				}),
 				remoteconfig.WithVisionSinkFactory(func() (processing.Sink, func(ctx context.Context) error, func(ctx context.Context) error) {
-					vs, mod := newVisionSink(cfg, reporter, consumer, log)
+					var c vision.EventConsumer
+					if a.fullEdgeConsumer != nil {
+						c = a.fullEdgeConsumer
+					}
+					vs, mod := buildVisionSink(cfg, reporter, c, modelMgr, log)
 					if mod == nil {
 						return vs, nil, nil
 					}
 					return vs, mod.Start, mod.Stop
+				}),
+				remoteconfig.WithModeChangeCallback(func(mode string) {
+					reporter.SetProcessingMode(mode)
 				}),
 			)
 		}
@@ -283,7 +293,18 @@ func (a *Agent) VisionStatus() *vision.Status {
 }
 
 // FullEdgeService exposes the Full Edge service (nil if processing mode is not edge).
-func (a *Agent) FullEdgeService() *fulledge.Service { return a.fullEdgeService }
+func (a *Agent) FullEdgeService() *fulledge.Service {
+	if a.health != nil && a.health.ProcessingMode() != string(config.ModeEdge) {
+		return nil
+	}
+	return a.fullEdgeService
+}
+
+// FullEdgeConsumer exposes the Full Edge event consumer.
+func (a *Agent) FullEdgeConsumer() vision.EventConsumer { return a.fullEdgeConsumer }
+
+// ModelManager returns the shared ModelManager.
+func (a *Agent) ModelManager() *vision.ModelManager { return a.modelManager }
 
 // LocalEventProducer exposes the narrow durable submission interface a
 // local event/evidence producer uses to enqueue for SaaS sync. It is nil

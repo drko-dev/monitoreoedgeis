@@ -28,9 +28,11 @@ type RuntimeAdapter struct {
 	modelManager *vision.ModelManager
 	logger       *slog.Logger
 
-	cloudSinkFn  func() processing.Sink
-	visionSinkFn func() (processing.Sink, func(ctx context.Context) error, func(ctx context.Context) error)
-	healthCheck  func(ctx context.Context) error
+	cloudSinkFn         func() processing.Sink
+	visionSinkFn        func() (processing.Sink, func(ctx context.Context) error, func(ctx context.Context) error)
+	currentVisionStopFn func(ctx context.Context) error
+	healthCheck         func(ctx context.Context) error
+	onModeChange        func(string)
 
 	currentCfg  Config
 	previousCfg Config
@@ -54,6 +56,13 @@ func WithCloudSinkFactory(fn func() processing.Sink) Option {
 func WithVisionSinkFactory(fn func() (processing.Sink, func(ctx context.Context) error, func(ctx context.Context) error)) Option {
 	return func(a *RuntimeAdapter) {
 		a.visionSinkFn = fn
+	}
+}
+
+// WithModeChangeCallback registers a callback invoked when processing mode is committed or rolled back.
+func WithModeChangeCallback(fn func(mode string)) Option {
+	return func(a *RuntimeAdapter) {
+		a.onModeChange = fn
 	}
 }
 
@@ -152,49 +161,56 @@ func (a *RuntimeAdapter) CurrentConfig() Config {
 	return copyConfig(a.currentCfg)
 }
 
-// Validate verifies cfg against technical constraints and known cameras without modifying runtime.
-func (a *RuntimeAdapter) Validate(cfg Config) error {
+// Validate verifies patch merged against current configuration without modifying runtime.
+func (a *RuntimeAdapter) Validate(patch Config) error {
 	a.mu.Lock()
+	effective := MergeConfig(a.currentCfg, patch)
 	cameras := a.knownCameras()
 	a.mu.Unlock()
-	return Validate(cfg, cameras)
+	return Validate(effective, cameras)
 }
 
 // Apply atomically validates and applies the new remote configuration to the Edge runtime.
 // If applying the configuration causes a health check failure, it automatically rolls back
 // to the previous working state and returns a descriptive error.
-func (a *RuntimeAdapter) Apply(ctx context.Context, cfg Config) error {
+func (a *RuntimeAdapter) Apply(ctx context.Context, patch Config) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// 1. Validate: all or nothing
-	if err := Validate(cfg, a.knownCameras()); err != nil {
+	// 1. Calculate effective configuration
+	effective := MergeConfig(a.currentCfg, patch)
+
+	// 2. Validate: all or nothing
+	if err := Validate(effective, a.knownCameras()); err != nil {
 		return fmt.Errorf("remoteconfig: validation failed: %w", err)
 	}
 
-	// 2. Save previous state for rollback
+	// 3. Save previous state for rollback
 	oldCfg := copyConfig(a.currentCfg)
 
-	// 3. Apply changes to runtime
-	if err := a.applyState(ctx, cfg); err != nil {
+	// 4. Apply changes to runtime
+	if err := a.applyState(ctx, effective); err != nil {
 		// Failure during transition: rollback
 		_ = a.applyState(ctx, oldCfg)
 		return fmt.Errorf("remoteconfig: apply transition failed: %w; rolled back", err)
 	}
 
-	// 4. Health check
+	// 5. Health check
 	if err := a.runHealthCheck(ctx); err != nil {
 		a.logger.Warn("remoteconfig: health check failed after apply, rolling back", "error", err)
 		_ = a.applyState(ctx, oldCfg)
 		return fmt.Errorf("remoteconfig: post-apply health check failed: %w; rolled back to previous configuration", err)
 	}
 
-	// 5. Commit state
+	// 6. Commit state
 	a.previousCfg = oldCfg
 	a.hasPrevious = true
-	a.currentCfg = copyConfig(cfg)
-	if cfg.ProcessingMode != nil {
-		a.currentMode = *cfg.ProcessingMode
+	a.currentCfg = effective
+	if effective.ProcessingMode != nil {
+		a.currentMode = *effective.ProcessingMode
+		if a.onModeChange != nil {
+			a.onModeChange(string(a.currentMode))
+		}
 	}
 
 	a.logger.Info("remoteconfig: successfully applied new configuration")
@@ -222,6 +238,9 @@ func (a *RuntimeAdapter) Rollback(ctx context.Context) error {
 	a.currentCfg = targetCfg
 	if targetCfg.ProcessingMode != nil {
 		a.currentMode = *targetCfg.ProcessingMode
+		if a.onModeChange != nil {
+			a.onModeChange(string(a.currentMode))
+		}
 	}
 	a.hasPrevious = false
 
@@ -347,6 +366,11 @@ func (a *RuntimeAdapter) transitionMode(ctx context.Context, from, to config.Pro
 
 	switch to {
 	case config.ModeCloud, config.ModeHybrid:
+		// Stop running vision worker if any
+		if a.currentVisionStopFn != nil {
+			_ = a.currentVisionStopFn(ctx)
+			a.currentVisionStopFn = nil
+		}
 		// Sinks: CloudSink active, VisionSink stopped
 		var cloudSink processing.Sink
 		if a.cloudSinkFn != nil {
@@ -362,12 +386,13 @@ func (a *RuntimeAdapter) transitionMode(ctx context.Context, from, to config.Pro
 		// Sinks: VisionSink active, CloudSink stopped
 		var visionSink processing.Sink
 		if a.visionSinkFn != nil {
-			sink, startFn, _ := a.visionSinkFn()
+			sink, startFn, stopFn := a.visionSinkFn()
 			if startFn != nil {
 				if err := startFn(ctx); err != nil {
 					return fmt.Errorf("start vision worker: %w", err)
 				}
 			}
+			a.currentVisionStopFn = stopFn
 			visionSink = sink
 		}
 		if visionSink != nil {
@@ -460,4 +485,70 @@ func copyConfig(c Config) Config {
 		}
 	}
 	return out
+}
+
+// MergeConfig creates an effective configuration by overlaying patch onto base.
+// Non-nil scalar fields and non-nil slices in patch overwrite base.
+// For Cameras map, camera overrides are merged per-camera key.
+func MergeConfig(base, patch Config) Config {
+	res := copyConfig(base)
+
+	if patch.ProcessingMode != nil {
+		m := *patch.ProcessingMode
+		res.ProcessingMode = &m
+	}
+	if patch.TargetFPS != nil {
+		fps := *patch.TargetFPS
+		res.TargetFPS = &fps
+	}
+	if patch.OutputWidth != nil {
+		w := *patch.OutputWidth
+		res.OutputWidth = &w
+	}
+	if patch.OutputHeight != nil {
+		h := *patch.OutputHeight
+		res.OutputHeight = &h
+	}
+	if patch.HybridROIs != nil {
+		res.HybridROIs = make([]config.HybridROI, len(patch.HybridROIs))
+		copy(res.HybridROIs, patch.HybridROIs)
+	}
+	if patch.PersonModel != nil {
+		p := *patch.PersonModel
+		res.PersonModel = &p
+	}
+	if patch.VehicleModel != nil {
+		v := *patch.VehicleModel
+		res.VehicleModel = &v
+	}
+	if patch.Cameras != nil {
+		if res.Cameras == nil {
+			res.Cameras = make(map[string]CameraConfig, len(patch.Cameras))
+		}
+		for camKey, patchCam := range patch.Cameras {
+			baseCam, exists := res.Cameras[camKey]
+			if !exists {
+				baseCam = CameraConfig{}
+			}
+			if patchCam.TargetFPS != nil {
+				f := *patchCam.TargetFPS
+				baseCam.TargetFPS = &f
+			}
+			if patchCam.OutputWidth != nil {
+				w := *patchCam.OutputWidth
+				baseCam.OutputWidth = &w
+			}
+			if patchCam.OutputHeight != nil {
+				h := *patchCam.OutputHeight
+				baseCam.OutputHeight = &h
+			}
+			if patchCam.HybridROIs != nil {
+				baseCam.HybridROIs = make([]config.HybridROI, len(patchCam.HybridROIs))
+				copy(baseCam.HybridROIs, patchCam.HybridROIs)
+			}
+			res.Cameras[camKey] = baseCam
+		}
+	}
+
+	return res
 }

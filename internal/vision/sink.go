@@ -78,6 +78,12 @@ func NewSink(worker *Worker, models *ModelManager, health HealthReporter, consum
 	return s
 }
 
+// ModelManager returns the ModelManager used by this sink.
+func (s *Sink) ModelManager() *ModelManager { return s.models }
+
+// Worker returns the underlying Worker.
+func (s *Sink) Worker() *Worker { return s.worker }
+
 // Name implements processing.Sink.
 func (s *Sink) Name() string { return "edge-vision" }
 

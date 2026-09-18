@@ -164,23 +164,29 @@ type Reporter struct {
 	cpuSampler        *platform.CPUSampler
 	sample            *platform.Sample
 
-	version string
-	cfg     *config.Config
-	ident   identity.Identity
-	host    platform.Info
+	processingMode string
+	version        string
+	cfg            *config.Config
+	ident          identity.Identity
+	host           platform.Info
 }
 
 // New creates a Reporter in the STARTING state.
 func New(version string, cfg *config.Config, ident identity.Identity, host platform.Info) *Reporter {
+	var pm string
+	if cfg != nil {
+		pm = cfg.ProcessingMode.String()
+	}
 	return &Reporter{
-		state:      StateStarting,
-		startedAt:  time.Now(),
-		modules:    make(map[string]string),
-		version:    version,
-		cfg:        cfg,
-		ident:      ident,
-		host:       host,
-		cpuSampler: &platform.CPUSampler{},
+		state:          StateStarting,
+		startedAt:      time.Now(),
+		modules:        make(map[string]string),
+		version:        version,
+		cfg:            cfg,
+		ident:          ident,
+		host:           host,
+		cpuSampler:     &platform.CPUSampler{},
+		processingMode: pm,
 	}
 }
 
@@ -331,6 +337,11 @@ func (r *Reporter) Snapshot() Snapshot {
 		q = buildQueuesStatus(vp, cloud, backlog, fe, vis)
 	}
 
+	pm := r.processingMode
+	if pm == "" && r.cfg != nil {
+		pm = r.cfg.ProcessingMode.String()
+	}
+
 	return Snapshot{
 		Status:              r.state,
 		Version:             r.version,
@@ -340,7 +351,7 @@ func (r *Reporter) Snapshot() Snapshot {
 		Hostname:            r.host.Hostname,
 		OS:                  r.host.OS,
 		Architecture:        r.host.GOARCH,
-		ProcessingMode:      r.cfg.ProcessingMode.String(),
+		ProcessingMode:      pm,
 		UptimeSeconds:       int64(uptime.Seconds()),
 		Uptime:              uptime.Round(time.Second).String(),
 		Modules:             modules,
@@ -356,6 +367,26 @@ func (r *Reporter) Snapshot() Snapshot {
 		Queues:              q,
 		InsecureHTTPAllowed: r.cfg.AllowInsecureHTTP,
 	}
+}
+
+// SetProcessingMode updates the active processing mode for runtime reporting.
+func (r *Reporter) SetProcessingMode(mode string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.processingMode = mode
+}
+
+// ProcessingMode returns the active processing mode.
+func (r *Reporter) ProcessingMode() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.processingMode != "" {
+		return r.processingMode
+	}
+	if r.cfg != nil {
+		return r.cfg.ProcessingMode.String()
+	}
+	return ""
 }
 
 // SetVideoPipeline records the latest video pipeline status summary
@@ -402,7 +433,11 @@ func (r *Reporter) VisionStatus() *vision.Status {
 func (r *Reporter) EdgeVisionReady() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if r.cfg == nil || r.cfg.ProcessingMode != config.ModeEdge {
+	mode := r.processingMode
+	if mode == "" && r.cfg != nil {
+		mode = r.cfg.ProcessingMode.String()
+	}
+	if mode != string(config.ModeEdge) {
 		return true
 	}
 	return r.vision != nil && r.vision.Worker.State == vision.StateReady

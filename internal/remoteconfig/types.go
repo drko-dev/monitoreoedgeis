@@ -146,7 +146,7 @@ func Validate(cfg Config, knownCameras []string) error {
 		if containsPathOrURL(candidateKey) {
 			return fmt.Errorf("remoteconfig: invalid camera candidate_key %q", candidateKey)
 		}
-		if len(knownCameras) > 0 && !knownMap[candidateKey] {
+		if !knownMap[candidateKey] {
 			return fmt.Errorf("remoteconfig: camera %q is not known by runtime", candidateKey)
 		}
 

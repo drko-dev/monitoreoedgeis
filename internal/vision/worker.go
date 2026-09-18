@@ -118,6 +118,9 @@ func NewWorker(cfg Config, models *ModelManager, logger *slog.Logger) *Worker {
 	return w
 }
 
+// ModelManager returns the ModelManager used by this worker.
+func (w *Worker) ModelManager() *ModelManager { return w.models }
+
 // Ready reports whether the worker currently has a live, health-checked
 // connection ready to accept inference requests.
 func (w *Worker) Ready() bool {
