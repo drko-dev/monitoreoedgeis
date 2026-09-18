@@ -2,32 +2,9 @@ package transport
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
-	"time"
 )
-
-// ErrRateLimited is returned for HTTP 429. Callers should honour the
-// RetryAfter carried by RateLimitError rather than applying their own backoff
-// when the server stated one.
-var ErrRateLimited = errors.New("transport: rate limited by SaaS")
-
-// RateLimitError carries the server-stated cooldown from a 429 response.
-// RetryAfter is zero when the response omitted or malformed the header.
-type RateLimitError struct {
-	RetryAfter time.Duration
-}
-
-func (e *RateLimitError) Error() string {
-	if e.RetryAfter > 0 {
-		return fmt.Sprintf("%v (retry after %s)", ErrRateLimited, e.RetryAfter)
-	}
-	return ErrRateLimited.Error()
-}
-
-func (e *RateLimitError) Unwrap() error { return ErrRateLimited }
 
 // HeartbeatSystem is the resource snapshot nested under "metrics" in a
 // heartbeat. Every field is optional: a host that cannot measure something
@@ -125,19 +102,4 @@ func (c *Client) Heartbeat(ctx context.Context, deviceID, credential string, req
 	default:
 		return fmt.Errorf("%w: status %d", ErrUnexpectedStatus, status)
 	}
-}
-
-// parseRetryAfter reads a Retry-After header in its delta-seconds form, the
-// only form the SaaS emits. An absent, malformed or negative value yields 0,
-// which tells the caller to fall back to its own backoff.
-func parseRetryAfter(h http.Header) time.Duration {
-	raw := h.Get("Retry-After")
-	if raw == "" {
-		return 0
-	}
-	secs, err := strconv.Atoi(raw)
-	if err != nil || secs <= 0 {
-		return 0
-	}
-	return time.Duration(secs) * time.Second
 }

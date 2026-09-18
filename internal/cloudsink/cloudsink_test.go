@@ -1223,3 +1223,76 @@ func TestCloudSink_HybridCandidate_BufferedAndReplayed(t *testing.T) {
 		t.Errorf("replayed CorrelationID=%q, want 'corr-buffered-999'", sender.gotMeta.CorrelationID)
 	}
 }
+
+func TestCloudSink_Replay_UnauthorizedPreservesFrame(t *testing.T) {
+	drainPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { drainPollInterval = 2 * time.Second })
+
+	sender := &fakeSender{err: transport.ErrSaaSUnavailable}
+	s, _ := newBufferedSink(t, sender, 10)
+	defer s.Close()
+
+	if err := s.Route(testFrame("cam-1", 1)); err != nil {
+		t.Fatalf("Route(1) error = %v", err)
+	}
+	if got := s.CloudBufferStats().BufferedFrames; got != 1 {
+		t.Fatalf("BufferedFrames = %d, want 1", got)
+	}
+
+	// Switch sender error to 401 Unauthorized
+	sender.mu.Lock()
+	sender.err = transport.ErrUnauthorized
+	sender.mu.Unlock()
+
+	// Wait for a few replay attempts. The frame MUST NOT be discarded.
+	time.Sleep(100 * time.Millisecond)
+
+	stats := s.CloudBufferStats()
+	if stats.BufferedFrames != 1 {
+		t.Fatalf("BufferedFrames = %d, want 1 (auth failure must preserve frame)", stats.BufferedFrames)
+	}
+}
+
+func TestCloudSink_Replay_RateLimitedWithRetryAfter(t *testing.T) {
+	drainPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { drainPollInterval = 2 * time.Second })
+
+	sender := &fakeSender{err: transport.ErrSaaSUnavailable}
+	s, _ := newBufferedSink(t, sender, 10)
+	defer s.Close()
+
+	if err := s.Route(testFrame("cam-1", 1)); err != nil {
+		t.Fatalf("Route(1) error = %v", err)
+	}
+	if got := s.CloudBufferStats().BufferedFrames; got != 1 {
+		t.Fatalf("BufferedFrames = %d, want 1", got)
+	}
+
+	// Rate limit with 100ms Retry-After
+	sender.mu.Lock()
+	sender.err = &transport.RateLimitError{RetryAfter: 100 * time.Millisecond}
+	sender.mu.Unlock()
+
+	time.Sleep(30 * time.Millisecond)
+	// Frame still buffered
+	if got := s.CloudBufferStats().BufferedFrames; got != 1 {
+		t.Fatalf("BufferedFrames = %d, want 1", got)
+	}
+
+	// Allow upload to succeed
+	sender.mu.Lock()
+	sender.err = nil
+	sender.mu.Unlock()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.CloudBufferStats().BufferedFrames == 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if got := s.CloudBufferStats().BufferedFrames; got != 0 {
+		t.Fatalf("BufferedFrames after cooldown = %d, want 0 (replayed successfully)", got)
+	}
+}

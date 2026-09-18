@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestLocalEventContractAndEvidenceHeaders(t *testing.T) {
@@ -58,18 +59,27 @@ func TestClassifyLocalEventStatus(t *testing.T) {
 	tests := []struct {
 		name   string
 		status int
+		header http.Header
 		want   error
 	}{
 		{name: "created", status: http.StatusCreated},
 		{name: "idempotent", status: http.StatusOK},
+		{name: "unauthorized is auth error", status: http.StatusUnauthorized, want: ErrUnauthorized},
 		{name: "conflict is permanent", status: http.StatusConflict, want: ErrInvalidRequest},
 		{name: "service unavailable is retryable", status: http.StatusServiceUnavailable, want: ErrRetryableStatus},
+		{name: "rate limited with header", status: http.StatusTooManyRequests, header: http.Header{"Retry-After": []string{"20"}}, want: ErrRateLimited},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := classifyLocalEventStatus(tt.status)
+			err := classifyLocalEventStatus(tt.status, tt.header)
 			if !errors.Is(err, tt.want) {
 				t.Errorf("classifyLocalEventStatus(%d) = %v, want error wrapping %v", tt.status, err, tt.want)
+			}
+			if tt.status == http.StatusTooManyRequests {
+				var rle *RateLimitError
+				if !errors.As(err, &rle) || rle.RetryAfter != 20*time.Second {
+					t.Errorf("RateLimitError = %+v, want RetryAfter 20s", rle)
+				}
 			}
 		})
 	}

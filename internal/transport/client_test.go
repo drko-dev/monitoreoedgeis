@@ -500,3 +500,35 @@ func TestPostFrameWithMetadata(t *testing.T) {
 		t.Errorf("X-Correlation-Id = %q, want 'corr-abc-xyz'", got)
 	}
 }
+
+func TestPostFrameRateLimitedRetryAfter(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "15")
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+
+	c, err := New(srv.URL, true, 2*time.Second, "test")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = c.PostFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{1})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !errors.Is(err, ErrRateLimited) {
+		t.Errorf("expected errors.Is(err, ErrRateLimited) == true, got %v", err)
+	}
+	if !errors.Is(err, ErrRetryableStatus) {
+		t.Errorf("expected errors.Is(err, ErrRetryableStatus) == true, got %v", err)
+	}
+
+	var rle *RateLimitError
+	if !errors.As(err, &rle) {
+		t.Fatalf("expected errors.As(err, &rle) == true, got %v", err)
+	}
+	if rle.RetryAfter != 15*time.Second {
+		t.Errorf("RetryAfter = %v, want 15s", rle.RetryAfter)
+	}
+}

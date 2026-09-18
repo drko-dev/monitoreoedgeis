@@ -287,9 +287,9 @@ edge-mode-only gating, model cleanup) and what remains genuinely BLOCKED
 - L2. WSS si corresponde.
 - L3. Auth por Edge.
 - L4. TLS.
-- L5. Retry/backoff.
-- L6. Cola offline.
-- L7. Reanudación.
+- L5. Retry/backoff. **CODE DONE / UNIT-TESTED** — Unified error classification & backoff across transport channels (`internal/transport`: Heartbeat, Discovery, Cloud frames, Hybrid candidates, Local events/evidence). 429 parses and honors `Retry-After` delta-seconds via `RateLimitError`. 401/403 preserves durable data, avoids aggressive retries and never auto-reenrolls or wipes credentials.
+- L6. Cola offline. **CODE DONE / UNIT-TESTED** — Verified dual-channel bounded disk storage without artificial merging: `internal/cloudsink.Buffer` (Cloud/Hybrid video frames) and `internal/edgebacklog.Backlog` (Full Edge events/evidence). Bounded capacities, atomic writes, restart-safe, drop-tail metrics.
+- L7. Reanudación. **CODE DONE / UNIT-TESTED** — Deterministic replay upon reconnection. Cloud/Hybrid preserves metadata and `CorrelationID`; Full Edge replays in strict sequence (`metadata` -> `capture` -> `clip` -> `complete`), idempotency preserved, quarantine on unrecoverable 4xx, and clean cancellation on agent shutdown.
 - L8. Comandos SaaS → Edge sobre conexión iniciada por Edge.
 - L9. Sin inbound requerido en cliente.
 - L10. VPN site-to-site opcional.
