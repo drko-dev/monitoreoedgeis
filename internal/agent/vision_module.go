@@ -33,12 +33,12 @@ func (m *visionModule) Stop(ctx context.Context) error  { return m.worker.Stop(c
 // fatal here: the worker reports StateNotConfigured/StateModelMissing under
 // /status and every frame Route sees is counted as dropped-not-ready,
 // exactly the explicit "NOT_READY / model_missing" contract Milestone K3
-// asks for, rather than crashing agent startup.
-func newVisionSink(cfg *config.Config, reporter *health.Reporter, consumer vision.EventConsumer, log *slog.Logger) (*vision.Sink, Module) {
-	if cfg.ProcessingMode != config.ModeEdge {
-		return nil, nil
+// buildVisionSink builds Milestone K's local-inference routing destination
+// and its Module wrapper using the provided ModelManager, without gating on cfg.ProcessingMode.
+func buildVisionSink(cfg *config.Config, reporter *health.Reporter, consumer vision.EventConsumer, models *vision.ModelManager, log *slog.Logger) (*vision.Sink, Module) {
+	if models == nil {
+		models = vision.NewModelManager(cfg.EdgeYOLOModelsDir, cfg.EdgeYOLOPersonModel, cfg.EdgeYOLOVehicleModel)
 	}
-	models := vision.NewModelManager(cfg.EdgeYOLOModelsDir, cfg.EdgeYOLOPersonModel, cfg.EdgeYOLOVehicleModel)
 	if cfg.EdgeYOLOWorkerCmd == "" {
 		log.Warn("edge vision worker disabled: GEOCAM_EDGE_YOLO_WORKER_CMD is not configured")
 	}
@@ -60,4 +60,18 @@ func newVisionSink(cfg *config.Config, reporter *health.Reporter, consumer visio
 
 	sink := vision.NewSink(worker, models, reporter, consumer, log)
 	return sink, &visionModule{worker: worker}
+}
+
+// newVisionSink builds Milestone K's local-inference routing destination
+// and its Module wrapper, or returns a nil sink when this Edge isn't
+// configured for edge processing mode.
+func newVisionSink(cfg *config.Config, reporter *health.Reporter, consumer vision.EventConsumer, log *slog.Logger, models ...*vision.ModelManager) (*vision.Sink, Module) {
+	if cfg.ProcessingMode != config.ModeEdge {
+		return nil, nil
+	}
+	var mm *vision.ModelManager
+	if len(models) > 0 {
+		mm = models[0]
+	}
+	return buildVisionSink(cfg, reporter, consumer, mm, log)
 }

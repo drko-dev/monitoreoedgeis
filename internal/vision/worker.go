@@ -118,6 +118,9 @@ func NewWorker(cfg Config, models *ModelManager, logger *slog.Logger) *Worker {
 	return w
 }
 
+// ModelManager returns the ModelManager used by this worker.
+func (w *Worker) ModelManager() *ModelManager { return w.models }
+
 // Ready reports whether the worker currently has a live, health-checked
 // connection ready to accept inference requests.
 func (w *Worker) Ready() bool {
@@ -156,8 +159,46 @@ func (w *Worker) Start(ctx context.Context) error {
 	}
 	w.stopCh = make(chan struct{})
 	w.doneCh = make(chan struct{})
+	w.setState(StateStarting)
 	go w.supervise(ctx)
 	return nil
+}
+
+// WaitForReady blocks until the worker reaches StateReady, ctx is cancelled,
+// or a terminal unready state (StateNotConfigured, StateModelMissing, StateError)
+// is detected without reaching ready.
+func (w *Worker) WaitForReady(ctx context.Context) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		w.mu.Lock()
+		state := w.state
+		lastErr := w.lastError
+		w.mu.Unlock()
+
+		switch state {
+		case StateReady:
+			return nil
+		case StateNotConfigured:
+			return errors.New("vision worker: GEOCAM_EDGE_YOLO_WORKER_CMD is not configured (state=not_configured)")
+		case StateModelMissing:
+			return errors.New("vision worker: model weights missing or unready (state=model_missing)")
+		case StateError:
+			if lastErr != "" {
+				return fmt.Errorf("vision worker: startup error (state=error): %s", lastErr)
+			}
+			return errors.New("vision worker: startup error (state=error)")
+		case StateStopped:
+			return errors.New("vision worker: worker is stopped")
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("vision worker: timed out waiting for ready state (current state=%s): %w", state, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 // Stop signals the supervisor loop to exit, closes any live connection, and
@@ -263,9 +304,9 @@ func (w *Worker) supervise(ctx context.Context) {
 			w.shutdownProcess()
 			return
 		case <-died:
+			w.restarts.Add(1)
 			w.setState(StateRestarting)
 			w.logger.Warn("edge vision worker process exited, restarting")
-			w.restarts.Add(1)
 			w.shutdownProcess()
 			if !w.sleep(ctx, backoff) {
 				return

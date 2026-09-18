@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
+	"github.com/drko-dev/monitoreoedgeis/internal/control"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/edgebacklog"
 	"github.com/drko-dev/monitoreoedgeis/internal/evidence"
@@ -21,6 +22,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/logging"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
+	"github.com/drko-dev/monitoreoedgeis/internal/remoteconfig"
 	"github.com/drko-dev/monitoreoedgeis/internal/rtsp"
 	"github.com/drko-dev/monitoreoedgeis/internal/vision"
 )
@@ -38,10 +40,15 @@ type Agent struct {
 	heartbeatErr     error
 	discoveryErr     error
 	controlErr       error
+	remoteConfigErr  error
 	localEventsErr   error
 	rtspManager      *rtsp.Manager
 	videoManager     *processing.Manager
 	visionSink       *vision.Sink
+	modelManager     *vision.ModelManager
+	runtimeApplier   remoteconfig.Applier
+	remoteConfig     *remoteconfig.Module
+	control          *control.Module
 	fullEdgeService  *fulledge.Service
 	fullEdgeConsumer *fullEdgeEventConsumer
 	localEvents      *edgebacklog.Backlog
@@ -91,10 +98,7 @@ func New(cfg *config.Config) *Agent {
 	if disc != nil {
 		mods = append(mods, disc)
 	}
-	controlModule, controlErr := newControlModule(cfg, creds, reporter, disc, logging.Component(log, "control"))
-	if controlModule != nil {
-		mods = append(mods, controlModule)
-	}
+
 	localEvents, localEventsErr := newLocalEventsModule(cfg, creds, reporter, logging.Component(log, "local-events"))
 	if localEvents != nil {
 		mods = append(mods, localEvents)
@@ -195,6 +199,9 @@ func New(cfg *config.Config) *Agent {
 					IdleAfter:       cfg.HybridIdleAfter,
 				},
 			}
+			modelMgr := vision.NewModelManager(cfg.EdgeYOLOModelsDir, cfg.EdgeYOLOPersonModel, cfg.EdgeYOLOVehicleModel)
+			a.modelManager = modelMgr
+
 			var extraSinks []processing.Sink
 			if cs := newCloudSink(cfg, creds, reporter, log); cs != nil {
 				extraSinks = append(extraSinks, cs)
@@ -213,10 +220,14 @@ func New(cfg *config.Config) *Agent {
 			if a.fullEdgeConsumer != nil {
 				consumer = a.fullEdgeConsumer
 			}
-			if vs, mod := newVisionSink(cfg, reporter, consumer, log); vs != nil {
+			var initialVisionStop func(ctx context.Context) error
+			if vs, mod := newVisionSink(cfg, reporter, consumer, log, modelMgr); vs != nil {
 				extraSinks = append(extraSinks, vs)
 				mods = append(mods, mod)
 				a.visionSink = vs
+				if mod != nil {
+					initialVisionStop = mod.Stop
+				}
 			}
 
 			videoMgr := processing.NewManager(procCfg, rtspMgr, reporter, logging.Component(log, "video-pipeline"), extraSinks...)
@@ -225,12 +236,49 @@ func New(cfg *config.Config) *Agent {
 			if a.fullEdgeConsumer != nil {
 				a.fullEdgeConsumer.SetHistoryProvider(videoMgr)
 			}
+
+			a.runtimeApplier = remoteconfig.NewRuntimeAdapter(
+				cfg.ProcessingMode,
+				videoMgr,
+				rtspMgr,
+				modelMgr,
+				logging.Component(log, "remote-config"),
+				remoteconfig.WithStartTimeout(cfg.EdgeYOLOStartTimeout),
+				remoteconfig.WithInitialVisionStop(initialVisionStop),
+				remoteconfig.WithCloudSinkFactory(func() processing.Sink {
+					return buildCloudSink(cfg, creds, reporter, log)
+				}),
+				remoteconfig.WithVisionSinkFactory(func() (processing.Sink, func(ctx context.Context) error, func(ctx context.Context) error) {
+					var c vision.EventConsumer
+					if a.fullEdgeConsumer != nil {
+						c = a.fullEdgeConsumer
+					}
+					vs, mod := buildVisionSink(cfg, reporter, c, modelMgr, log)
+					if mod == nil {
+						return vs, nil, nil
+					}
+					return vs, mod.Start, mod.Stop
+				}),
+				remoteconfig.WithModeChangeCallback(func(mode string) {
+					reporter.SetProcessingMode(mode)
+				}),
+			)
 		}
+	}
+
+	remoteConfig, remoteConfigErr := newRemoteConfigModule(cfg, creds, reporter, a.runtimeApplier, logging.Component(log, "remote-config"))
+	a.remoteConfig = remoteConfig
+
+	ctrl, controlErr := newControlModule(cfg, creds, reporter, disc, remoteConfig, logging.Component(log, "control"))
+	if ctrl != nil {
+		mods = append(mods, ctrl)
+		a.control = ctrl
 	}
 
 	a.heartbeatErr = hbErr
 	a.discoveryErr = discErr
 	a.controlErr = controlErr
+	a.remoteConfigErr = remoteConfigErr
 	a.localEventsErr = localEventsErr
 	a.modules = newModuleManager(reporter.SetModuleState, mods...)
 	return a
@@ -246,6 +294,17 @@ func (a *Agent) RTSPManager() *rtsp.Manager { return a.rtspManager }
 // pipeline or RTSP connectivity is disabled).
 func (a *Agent) VideoManager() *processing.Manager { return a.videoManager }
 
+// RuntimeApplier exposes the remote configuration runtime applier (nil if video
+// pipeline or RTSP connectivity is disabled).
+func (a *Agent) RuntimeApplier() remoteconfig.Applier { return a.runtimeApplier }
+
+// RemoteConfig exposes the remote configuration sync module (nil if unenrolled
+// or SaaSURL is empty).
+func (a *Agent) RemoteConfig() *remoteconfig.Module { return a.remoteConfig }
+
+// Control exposes the control module (nil if unenrolled or SaaSURL is empty).
+func (a *Agent) Control() *control.Module { return a.control }
+
 // VisionStatus returns Milestone K's local-inference status block, or nil
 // when this Edge is not in ModeEdge (the vision sink/worker are never
 // constructed outside it).
@@ -258,7 +317,18 @@ func (a *Agent) VisionStatus() *vision.Status {
 }
 
 // FullEdgeService exposes the Full Edge service (nil if processing mode is not edge).
-func (a *Agent) FullEdgeService() *fulledge.Service { return a.fullEdgeService }
+func (a *Agent) FullEdgeService() *fulledge.Service {
+	if a.health != nil && a.health.ProcessingMode() != string(config.ModeEdge) {
+		return nil
+	}
+	return a.fullEdgeService
+}
+
+// FullEdgeConsumer exposes the Full Edge event consumer.
+func (a *Agent) FullEdgeConsumer() vision.EventConsumer { return a.fullEdgeConsumer }
+
+// ModelManager returns the shared ModelManager.
+func (a *Agent) ModelManager() *vision.ModelManager { return a.modelManager }
 
 // LocalEventProducer exposes the narrow durable submission interface a
 // local event/evidence producer uses to enqueue for SaaS sync. It is nil
@@ -299,6 +369,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	case a.controlErr != nil:
 		a.log.Error("agent will not become ready: control module could not be built",
 			slog.Any("error", a.controlErr))
+		a.health.Set(health.StateDegraded)
+	case a.remoteConfigErr != nil:
+		a.log.Error("agent will not become ready: remote config module could not be built",
+			slog.Any("error", a.remoteConfigErr))
 		a.health.Set(health.StateDegraded)
 	case a.localEventsErr != nil:
 		a.log.Error("agent will not become ready: local event backlog could not be built",

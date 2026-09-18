@@ -104,6 +104,14 @@ func (s *Supervisor) Descriptor() (StreamDescriptor, bool) {
 	return s.descriptor, s.descReady
 }
 
+// SetDescriptor sets the stream descriptor (used in tests and simulation).
+func (s *Supervisor) SetDescriptor(desc StreamDescriptor) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.descriptor = desc
+	s.descReady = true
+}
+
 // Snapshot returns a copy of the current camera stream status.
 func (s *Supervisor) Snapshot() CameraStreamStatus {
 	s.mu.RLock()

@@ -9,8 +9,11 @@ The channel reuses transport retry/credential handling and the discovery module'
 serialized scan lifecycle. L6 frame and event buffers are not part of this
 channel and remain unchanged. Commands are UUID-addressed and allowlisted:
 `request_status` reads local state and `rediscovery` calls the existing scan.
-`reload_config` and `restart_video_pipeline` are reported as unsupported because
-there is no safe live lifecycle primitive. Payloads are empty and no command is
+`reload_config` (Hito O) triggers `internal/remoteconfig.Module.SyncOnce` --
+fetching and applying the current SaaS-assigned remote config over this same
+outbound channel, never a second poller (see `docs/REMOTE_CONFIG.md`).
+`restart_video_pipeline` is reported as unsupported because there is no safe
+live lifecycle primitive for it yet. Payloads are empty and no command is
 sent to a shell.
 
 Site-to-site VPN, Tailscale subnet routing, or a WireGuard gateway may carry the

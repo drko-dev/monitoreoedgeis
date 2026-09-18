@@ -35,10 +35,9 @@ const cloudBufferDirName = "cloud-buffer"
 // evaluator) lives entirely upstream, in
 // internal/processing.cameraPipeline.readLoop, ahead of router.Dispatch —
 // never here.
-func newCloudSink(cfg *config.Config, creds credentials.Credentials, reporter *health.Reporter, log *slog.Logger) processing.Sink {
-	if cfg.ProcessingMode != config.ModeCloud && cfg.ProcessingMode != config.ModeHybrid {
-		return nil
-	}
+// buildCloudSink builds the Milestone I video-frame-upload sink regardless of
+// startup ProcessingMode, returning nil when this Edge has nothing to push frames to.
+func buildCloudSink(cfg *config.Config, creds credentials.Credentials, reporter *health.Reporter, log *slog.Logger) processing.Sink {
 	if cfg.SaaSURL == "" {
 		log.Info("cloud video sink disabled: no GEOCAM_SAAS_URL configured")
 		return nil
@@ -71,4 +70,11 @@ func newCloudSink(cfg *config.Config, creds credentials.Credentials, reporter *h
 		MaxFPS:         cfg.CloudMaxFPS,
 	}
 	return cloudsink.New(client, creds.DeviceID, creds.Credential, sinkCfg, logging.Component(log, "cloud-sink"), reporter, opts...)
+}
+
+func newCloudSink(cfg *config.Config, creds credentials.Credentials, reporter *health.Reporter, log *slog.Logger) processing.Sink {
+	if cfg.ProcessingMode != config.ModeCloud && cfg.ProcessingMode != config.ModeHybrid {
+		return nil
+	}
+	return buildCloudSink(cfg, creds, reporter, log)
 }

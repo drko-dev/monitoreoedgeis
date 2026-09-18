@@ -3,6 +3,7 @@ package vision
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image/jpeg"
 	"log/slog"
@@ -76,6 +77,25 @@ func NewSink(worker *Worker, models *ModelManager, health HealthReporter, consum
 	s := &Sink{worker: worker, models: models, health: health, consumer: consumer, logger: logger}
 	worker.SetOnStateChange(s.publishStatus)
 	return s
+}
+
+// ModelManager returns the ModelManager used by this sink.
+func (s *Sink) ModelManager() *ModelManager { return s.models }
+
+// Worker returns the underlying Worker.
+func (s *Sink) Worker() *Worker { return s.worker }
+
+// WaitForReady blocks until the underlying worker reaches StateReady, or returns error.
+func (s *Sink) WaitForReady(ctx context.Context) error {
+	if s.worker == nil {
+		return errors.New("edge-vision: no worker attached")
+	}
+	return s.worker.WaitForReady(ctx)
+}
+
+// Ready reports whether the underlying worker is ready.
+func (s *Sink) Ready() bool {
+	return s.worker != nil && s.worker.Ready()
 }
 
 // Name implements processing.Sink.

@@ -102,6 +102,15 @@ func (m *Manager) DescriptorFor(candidateKey string) (StreamDescriptor, bool) {
 	return sup.Descriptor()
 }
 
+// SetDescriptorFor sets the stream descriptor for candidateKey (used in tests and simulation).
+func (m *Manager) SetDescriptorFor(candidateKey string, desc StreamDescriptor) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if sup, ok := m.supervisors[candidateKey]; ok {
+		sup.SetDescriptor(desc)
+	}
+}
+
 // SetTargets synchronizes the set of active supervisors to match desired targets.
 func (m *Manager) SetTargets(targets []CameraTarget) {
 	m.mu.Lock()
@@ -161,6 +170,25 @@ func (m *Manager) Snapshot() []CameraStreamStatus {
 		statuses = append(statuses, sup.Snapshot())
 	}
 	return statuses
+}
+
+// HasCamera reports whether candidateKey is configured in the RTSP manager.
+func (m *Manager) HasCamera(candidateKey string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.supervisors[candidateKey]
+	return ok
+}
+
+// KnownCameras returns the candidate keys of all configured camera supervisors.
+func (m *Manager) KnownCameras() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	keys := make([]string, 0, len(m.supervisors))
+	for k := range m.supervisors {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func (m *Manager) run() {
