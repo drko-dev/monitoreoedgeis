@@ -1,6 +1,9 @@
 package processing
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // Sampler gates decoded frames down to a target FPS by enforcing a minimum
 // inter-frame interval. It is a synchronous, allocation-free check — no
@@ -9,7 +12,10 @@ import "time"
 // Milestone J5 extends it (without changing NewSampler's behavior at all)
 // with an optional idle/active adaptive mode: see NewAdaptiveSampler.
 type Sampler struct {
-	interval time.Duration
+	mu sync.Mutex
+
+	targetFPS float64
+	interval  time.Duration
 
 	// idleInterval <= 0 means adaptive sampling is off: ShouldEmit behaves
 	// exactly as it did before Milestone J5, using interval alone. Set
@@ -27,7 +33,7 @@ type Sampler struct {
 // sampling: ShouldEmit always returns true. Unaffected by Milestone J5 —
 // this constructor never enables adaptive sampling.
 func NewSampler(targetFPS float64) *Sampler {
-	s := &Sampler{}
+	s := &Sampler{targetFPS: targetFPS}
 	if targetFPS > 0 {
 		s.interval = time.Duration(float64(time.Second) / targetFPS)
 	}
@@ -52,11 +58,32 @@ func NewAdaptiveSampler(activeFPS, idleFPS float64, idleAfter time.Duration) *Sa
 	return s
 }
 
+// SetTargetFPS dynamically updates the sampling target FPS. Safe for concurrent use.
+func (s *Sampler) SetTargetFPS(targetFPS float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.targetFPS = targetFPS
+	if targetFPS > 0 {
+		s.interval = time.Duration(float64(time.Second) / targetFPS)
+	} else {
+		s.interval = 0
+	}
+}
+
+// TargetFPS returns the currently configured target FPS ceiling.
+func (s *Sampler) TargetFPS() float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.targetFPS
+}
+
 // NoteMotion records the evaluator's most recent motion-candidate decision
 // (Milestone J5's feedback signal into adaptive sampling). Only the last
 // call's timestamp matters — no history is retained. A no-op when adaptive
 // sampling is disabled.
 func (s *Sampler) NoteMotion(t time.Time, candidate bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.idleInterval <= 0 || !candidate {
 		return
 	}
@@ -67,20 +94,22 @@ func (s *Sampler) NoteMotion(t time.Time, candidate bool) {
 // IsIdle reports whether, as of t, the Sampler is currently in its idle
 // adaptive state (always false when adaptive sampling is disabled).
 func (s *Sampler) IsIdle(t time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.idleInterval <= 0 {
 		return false
 	}
 	return !s.hasMotion || t.Sub(s.lastMotion) >= s.idleAfter
 }
 
-// currentInterval returns the minimum inter-frame interval that applies at
+// currentIntervalLocked returns the minimum inter-frame interval that applies at
 // t: the fixed interval when adaptive sampling is off, or the
-// active/idle interval depending on IsIdle when it's on.
-func (s *Sampler) currentInterval(t time.Time) time.Duration {
+// active/idle interval depending on IsIdle when it's on. Must be called with s.mu held.
+func (s *Sampler) currentIntervalLocked(t time.Time) time.Duration {
 	if s.idleInterval <= 0 {
 		return s.interval
 	}
-	if s.IsIdle(t) {
+	if !s.hasMotion || t.Sub(s.lastMotion) >= s.idleAfter {
 		return s.idleInterval
 	}
 	return s.interval
@@ -91,7 +120,9 @@ func (s *Sampler) currentInterval(t time.Time) time.Duration {
 // adaptive per NewAdaptiveSampler/NoteMotion). It never emits duplicates
 // faster than the currently applicable interval.
 func (s *Sampler) ShouldEmit(t time.Time) bool {
-	interval := s.currentInterval(t)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	interval := s.currentIntervalLocked(t)
 	if interval <= 0 {
 		return true
 	}

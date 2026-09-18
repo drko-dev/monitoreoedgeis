@@ -2,6 +2,7 @@ package processing
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -258,4 +259,168 @@ func (m *Manager) cloudBufferStats() *CloudBufferStats {
 		}
 	}
 	return nil
+}
+
+// RestartCameraPipeline terminates the existing pipeline for candidateKey (if any),
+// and creates a new pipeline with newCfg. Safe for concurrent use with OnPacket.
+func (m *Manager) RestartCameraPipeline(ctx context.Context, candidateKey string, newCfg Config) error {
+	m.mu.Lock()
+	oldPipeline, exists := m.pipelines[candidateKey]
+	var desc rtsp.StreamDescriptor
+	var hasDesc bool
+	if m.rtsp != nil {
+		desc, hasDesc = m.rtsp.DescriptorFor(candidateKey)
+	}
+	if !hasDesc && oldPipeline != nil {
+		desc = oldPipeline.descriptor
+		hasDesc = true
+	}
+	if !hasDesc && m.rtsp != nil && m.rtsp.HasCamera(candidateKey) {
+		desc = rtsp.StreamDescriptor{
+			CandidateKey: candidateKey,
+			Codec:        "H264",
+			Width:        m.cfg.OutputWidth,
+			Height:       m.cfg.OutputHeight,
+		}
+		hasDesc = true
+	}
+	if !hasDesc {
+		m.mu.Unlock()
+		return fmt.Errorf("processing: cannot restart pipeline for unknown camera %q", candidateKey)
+	}
+	router := m.router
+	m.mu.Unlock()
+
+	// 1. Controlled stop of the old pipeline
+	if exists && oldPipeline != nil {
+		if err := oldPipeline.Stop(ctx); err != nil {
+			m.logger.Warn("old pipeline stop encountered error", "candidate_key", candidateKey, "error", err)
+		}
+	}
+
+	// 2. Create new pipeline
+	newPipeline := newCameraPipeline(candidateKey, desc, newCfg, router, m.logger.With("candidate_key", candidateKey))
+	if exists && oldPipeline != nil && oldPipeline.decoderFactory != nil {
+		newPipeline.SetDecoderFactory(oldPipeline.decoderFactory)
+	}
+
+	// 3. Register and start new pipeline
+	m.mu.Lock()
+	m.pipelines[candidateKey] = newPipeline
+	if m.ctx != nil {
+		newPipeline.Start(m.ctx)
+	}
+	m.mu.Unlock()
+
+	return nil
+}
+
+// SetTargetFPS updates the frame sampling rate dynamically. If candidateKey is non-empty,
+// it updates only that camera's pipeline; otherwise, it updates the default config and
+// all active pipelines.
+func (m *Manager) SetTargetFPS(candidateKey string, fps float64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if candidateKey != "" {
+		p, ok := m.pipelines[candidateKey]
+		if !ok {
+			return fmt.Errorf("processing: camera pipeline %q not found", candidateKey)
+		}
+		p.SetTargetFPS(fps)
+		return nil
+	}
+	m.cfg.TargetFPS = fps
+	for _, p := range m.pipelines {
+		p.SetTargetFPS(fps)
+	}
+	return nil
+}
+
+// SetCameraROI updates the regions of interest for hybrid motion detection on candidateKey.
+func (m *Manager) SetCameraROI(candidateKey string, rois []ROI) error {
+	m.mu.Lock()
+	p, ok := m.pipelines[candidateKey]
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("processing: camera pipeline %q not found", candidateKey)
+	}
+	if p.MotionDetector() == nil {
+		return fmt.Errorf("processing: camera %q is not running in hybrid mode", candidateKey)
+	}
+	p.MotionDetector().SetROIs(rois)
+	return nil
+}
+
+// SetCameraResolution restarts the camera pipeline for candidateKey with new OutputWidth and OutputHeight.
+func (m *Manager) SetCameraResolution(ctx context.Context, candidateKey string, width, height int) error {
+	if err := ValidateOutputDimensions(width, height); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	p, ok := m.pipelines[candidateKey]
+	cfg := m.cfg
+	if ok && p != nil {
+		cfg = p.Config()
+	}
+	m.mu.Unlock()
+	cfg.OutputWidth = width
+	cfg.OutputHeight = height
+	return m.RestartCameraPipeline(ctx, candidateKey, cfg)
+}
+
+// UpdateRouterSinks stops the current router (draining in-flight frames) and replaces
+// it with a new router routing to NewDebugSink() + sinks.
+func (m *Manager) UpdateRouterSinks(sinks ...Sink) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.router != nil {
+		m.router.Stop()
+	}
+	m.extraSinks = sinks
+	allSinks := append([]Sink{NewDebugSink()}, sinks...)
+	m.router = NewRouter(allSinks, m.cfg.QueueDepth, m.logger)
+	for _, p := range m.pipelines {
+		p.SetRouter(m.router)
+	}
+}
+
+// ExtraSinks returns the list of current extra routing sinks.
+func (m *Manager) ExtraSinks() []Sink {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Sink, len(m.extraSinks))
+	copy(out, m.extraSinks)
+	return out
+}
+
+// Pipeline returns the cameraPipeline for candidateKey if active.
+func (m *Manager) Pipeline(candidateKey string) *cameraPipeline {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pipelines[candidateKey]
+}
+
+// ActivePipelines returns the list of candidate keys with active pipelines.
+func (m *Manager) ActivePipelines() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	keys := make([]string, 0, len(m.pipelines))
+	for k := range m.pipelines {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// Config returns the default pipeline manager configuration.
+func (m *Manager) Config() Config {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cfg
+}
+
+// SetConfig updates the default pipeline manager configuration for newly started pipelines.
+func (m *Manager) SetConfig(cfg Config) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cfg = cfg
 }

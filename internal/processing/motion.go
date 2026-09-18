@@ -1,6 +1,9 @@
 package processing
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // ROI is a normalized (0..1) region of interest, relative to frame width
 // and height, so a configured ROI never needs adjusting when
@@ -42,11 +45,8 @@ type MotionResult struct {
 // Block-based (rather than pixel-by-pixel) diffing trades a small amount
 // of spatial precision for resilience to per-pixel sensor/codec noise,
 // which would otherwise make a static camera "see" motion in every frame.
-//
-// Not safe for concurrent use: a MotionDetector is owned solely by one
-// cameraPipeline.readLoop goroutine, the same goroutine that decodes and
-// resizes every frame for that camera.
 type MotionDetector struct {
+	mu  sync.Mutex
 	cfg HybridConfig
 
 	// prevAvg holds exactly one frame's worth of per-block average luma --
@@ -66,11 +66,31 @@ func NewMotionDetector(cfg HybridConfig) *MotionDetector {
 	return &MotionDetector{cfg: cfg}
 }
 
+// SetROIs updates the configured ROIs safely.
+func (m *MotionDetector) SetROIs(rois []ROI) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cfg.ROIs = rois
+	// Invalidate mask so next Evaluate recomputes it
+	m.prevW, m.prevH = 0, 0
+}
+
+// ROIs returns a copy of the currently configured ROIs.
+func (m *MotionDetector) ROIs() []ROI {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]ROI, len(m.cfg.ROIs))
+	copy(out, m.cfg.ROIs)
+	return out
+}
+
 // Evaluate analyzes the Y (luma) plane of a decoded/resized yuv420p frame
 // and reports whether it contains motion. y must be at least width*height
 // bytes long -- the Y plane always comes first in yuv420p, so callers pass
 // frame.Data[:width*height] (or the full buffer; only the prefix is read).
 func (m *MotionDetector) Evaluate(y []byte, width, height int, seq uint64, ts time.Time) MotionResult {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	result := MotionResult{Timestamp: ts, Seq: seq}
 
 	block := m.cfg.BlockSize

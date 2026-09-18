@@ -319,6 +319,13 @@ edge-mode-only gating, model cleanup) and what remains genuinely BLOCKED
 
 - O1–O12: config desde SaaS, versionado, push/poll, rollback, cámara, FPS,
   resolución, mode, ROI, modelos y features por plan.
+- **Slice Runtime Apply (CODE DONE)**:
+  - Adapter e interfaz compatible (`remoteconfig.Applier`) con ciclo transaccional estricto: `Validate`, `Apply`, `Rollback` y `CurrentConfig`.
+  - Conexión de knobs reales: cámaras (`candidate_key`), FPS (`processing.Sampler`), resolución de procesamiento (`OutputWidth`/`OutputHeight`), modos (`cloud`, `hybrid`, `edge`), ROIs normalizadas, y modelos homologados (`yolo11s-pose.pt`, `yolo11n.pt`).
+  - Segregación técnica: hot-reload para FPS sin reinicio de decoder vs reinicio controlado por cámara para resolución/modos/ROIs sin reiniciar el agente.
+  - Rollback garantizado: reversión automática ante fallo de health check post-aplicación y soporte de rollback explícito.
+  - Seguridad estricta: rechazo rotundo de credenciales en texto plano, rutas de filesystem, URLs y campos de tenant/sitio.
+  - Ver `docs/remoteconfig/o-runtime-apply.md`.
 
 ## P — Packaging multi-plataforma
 

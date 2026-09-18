@@ -45,6 +45,7 @@ type cameraPipeline struct {
 
 	wg     sync.WaitGroup
 	doneCh chan struct{}
+	cancel context.CancelFunc
 
 	mu                sync.Mutex
 	state             string
@@ -126,7 +127,80 @@ func newCameraPipeline(candidateKey string, desc rtsp.StreamDescriptor, cfg Conf
 }
 
 // Start launches the pipeline's goroutines in the background.
-func (p *cameraPipeline) Start(ctx context.Context) { go p.run(ctx) }
+func (p *cameraPipeline) Start(ctx context.Context) {
+	p.mu.Lock()
+	pCtx, cancel := context.WithCancel(ctx)
+	p.cancel = cancel
+	p.mu.Unlock()
+	go p.run(pCtx)
+}
+
+// Stop terminates the pipeline cleanly and waits for goroutines to exit.
+func (p *cameraPipeline) Stop(ctx context.Context) error {
+	p.mu.Lock()
+	if p.cancel != nil {
+		p.cancel()
+	}
+	p.mu.Unlock()
+	return p.WaitContext(ctx)
+}
+
+// SetTargetFPS dynamically updates the pipeline's sampling target rate.
+func (p *cameraPipeline) SetTargetFPS(fps float64) {
+	p.mu.Lock()
+	p.cfg.TargetFPS = fps
+	p.mu.Unlock()
+	if p.sampler != nil {
+		p.sampler.SetTargetFPS(fps)
+	}
+}
+
+// Sampler returns the pipeline's frame sampler.
+func (p *cameraPipeline) Sampler() *Sampler {
+	return p.sampler
+}
+
+// MotionDetector returns the hybrid motion evaluator (nil if not in hybrid mode).
+func (p *cameraPipeline) MotionDetector() *MotionDetector {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.motion
+}
+
+// Config returns a copy of the pipeline configuration.
+func (p *cameraPipeline) Config() Config {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cfg
+}
+
+// SetRouter updates the destination router for sampled frames.
+func (p *cameraPipeline) SetRouter(r *Router) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.router = r
+}
+
+// Router returns the current destination router.
+func (p *cameraPipeline) Router() *Router {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.router
+}
+
+// State returns the current operational state string.
+func (p *cameraPipeline) State() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.state
+}
+
+// SetDecoderFactory overrides the decoder constructor (used in tests and transitions).
+func (p *cameraPipeline) SetDecoderFactory(f func() (VideoDecoder, error)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.decoderFactory = f
+}
 
 // Wait blocks until the pipeline has fully stopped (all goroutines exited).
 // Unbounded — callers on a shutdown path that must respect a deadline
@@ -326,7 +400,10 @@ func (p *cameraPipeline) readLoop(ctx context.Context, dec VideoDecoder) {
 			p.framesSampled.Add(1)
 
 			srcW, srcH := frame.Width, frame.Height
-			resized := Resize(frame, p.cfg.OutputWidth, p.cfg.OutputHeight)
+			p.mu.Lock()
+			outW, outH := p.cfg.OutputWidth, p.cfg.OutputHeight
+			p.mu.Unlock()
+			resized := Resize(frame, outW, outH)
 
 			f := Frame{
 				CandidateKey:     p.candidateKey,
@@ -403,8 +480,11 @@ func (p *cameraPipeline) readLoop(ctx context.Context, dec VideoDecoder) {
 			// is always pushed regardless of hybrid mode.
 			p.ring.Push(f)
 
-			if dispatch && p.router != nil {
-				p.router.Dispatch(f)
+			p.mu.Lock()
+			router := p.router
+			p.mu.Unlock()
+			if dispatch && router != nil {
+				router.Dispatch(f)
 			}
 		}
 	}

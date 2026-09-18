@@ -21,6 +21,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/logging"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
+	"github.com/drko-dev/monitoreoedgeis/internal/remoteconfig"
 	"github.com/drko-dev/monitoreoedgeis/internal/rtsp"
 	"github.com/drko-dev/monitoreoedgeis/internal/vision"
 )
@@ -42,6 +43,7 @@ type Agent struct {
 	rtspManager      *rtsp.Manager
 	videoManager     *processing.Manager
 	visionSink       *vision.Sink
+	runtimeApplier   remoteconfig.Applier
 	fullEdgeService  *fulledge.Service
 	fullEdgeConsumer *fullEdgeEventConsumer
 	localEvents      *edgebacklog.Backlog
@@ -225,6 +227,25 @@ func New(cfg *config.Config) *Agent {
 			if a.fullEdgeConsumer != nil {
 				a.fullEdgeConsumer.SetHistoryProvider(videoMgr)
 			}
+
+			modelMgr := vision.NewModelManager(cfg.EdgeYOLOModelsDir, cfg.EdgeYOLOPersonModel, cfg.EdgeYOLOVehicleModel)
+			a.runtimeApplier = remoteconfig.NewRuntimeAdapter(
+				cfg.ProcessingMode,
+				videoMgr,
+				rtspMgr,
+				modelMgr,
+				logging.Component(log, "remote-config"),
+				remoteconfig.WithCloudSinkFactory(func() processing.Sink {
+					return newCloudSink(cfg, creds, reporter, log)
+				}),
+				remoteconfig.WithVisionSinkFactory(func() (processing.Sink, func(ctx context.Context) error, func(ctx context.Context) error) {
+					vs, mod := newVisionSink(cfg, reporter, consumer, log)
+					if mod == nil {
+						return vs, nil, nil
+					}
+					return vs, mod.Start, mod.Stop
+				}),
+			)
 		}
 	}
 
@@ -245,6 +266,10 @@ func (a *Agent) RTSPManager() *rtsp.Manager { return a.rtspManager }
 // VideoManager exposes the video pipeline manager (nil if the video
 // pipeline or RTSP connectivity is disabled).
 func (a *Agent) VideoManager() *processing.Manager { return a.videoManager }
+
+// RuntimeApplier exposes the remote configuration runtime applier (nil if video
+// pipeline or RTSP connectivity is disabled).
+func (a *Agent) RuntimeApplier() remoteconfig.Applier { return a.runtimeApplier }
 
 // VisionStatus returns Milestone K's local-inference status block, or nil
 // when this Edge is not in ModeEdge (the vision sink/worker are never

@@ -99,8 +99,36 @@ func (m *ModelManager) Ready() bool {
 
 // PersonModelPath and VehicleModelPath are absolute paths passed to the
 // worker subprocess.
-func (m *ModelManager) PersonModelPath() string  { return filepath.Join(m.dir, m.personModel) }
-func (m *ModelManager) VehicleModelPath() string { return filepath.Join(m.dir, m.vehicleModel) }
+func (m *ModelManager) PersonModelPath() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return filepath.Join(m.dir, m.personModel)
+}
+
+func (m *ModelManager) VehicleModelPath() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return filepath.Join(m.dir, m.vehicleModel)
+}
+
+// SetModels updates the active person and vehicle model names.
+func (m *ModelManager) SetModels(person, vehicle string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if person != "" {
+		m.personModel = person
+	}
+	if vehicle != "" {
+		m.vehicleModel = vehicle
+	}
+}
+
+// Models returns the active person and vehicle model names.
+func (m *ModelManager) Models() (person, vehicle string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.personModel, m.vehicleModel
+}
 
 // Checksum returns the sha256 of the named model file, computed once and
 // cached until the file's (size, mtime) pair changes. Returns an error if
