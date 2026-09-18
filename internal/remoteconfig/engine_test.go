@@ -346,3 +346,238 @@ func TestStatus_NeverExposesPayload(t *testing.T) {
 		t.Fatalf("Status leaked payload content: %s", data)
 	}
 }
+
+// Blocker 2 / test A, and Blocker 3 / test 1: v1 -> v2 -> v3 fails.
+// Rollback must target v2 (the config actually live before v3's attempt),
+// never v1 (an older historical snapshot).
+func TestEngine_RollbackTargetsCurrentApplied_NotOlderSnapshot(t *testing.T) {
+	e, adapter := newTestEngine(t)
+	ctx := context.Background()
+
+	if _, _, err := e.ReceiveDesired(ctx, cfg(1, `{"a":1}`)); err != nil {
+		t.Fatalf("apply v1: %v", err)
+	}
+	if _, _, err := e.ReceiveDesired(ctx, cfg(2, `{"a":2}`)); err != nil {
+		t.Fatalf("apply v2: %v", err)
+	}
+
+	adapter.applyErr = errors.New("v3 rejected by runtime")
+	status, code, err := e.ReceiveDesired(ctx, cfg(3, `{"a":3}`))
+	if err != nil {
+		t.Fatalf("ReceiveDesired v3: %v", err)
+	}
+	if status != ApplyStatusRolledBack || code != ErrCodeApplyFailed {
+		t.Fatalf("status=%q code=%q, want rolled_back/%s", status, code, ErrCodeApplyFailed)
+	}
+
+	target, ok := adapter.lastRollback()
+	if !ok || target.Version != 2 {
+		t.Fatalf("rollback target = %+v (ok=%v), want v2 (the config live before v3), not v1", target, ok)
+	}
+	if st := e.store.Get(); st.AppliedVersion != 2 {
+		t.Fatalf("AppliedVersion = %d, want 2 (unchanged)", st.AppliedVersion)
+	}
+}
+
+// Blocker 2 / test B, and Blocker 3 / test 2: restart with
+// Applied=v2/PreviousKnownGood=v1/Staging=v3 (crash mid-apply of v3).
+// Recover must roll back to v2, not v1.
+func TestEngine_Recover_RollsBackToCurrentApplied_NotOlderSnapshot(t *testing.T) {
+	dir := t.TempDir()
+
+	store1, err := OpenStore(dir)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	e1 := NewEngine(store1, &fakeAdapter{})
+	ctx := context.Background()
+	if _, _, err := e1.ReceiveDesired(ctx, cfg(1, `{"a":1}`)); err != nil {
+		t.Fatalf("apply v1: %v", err)
+	}
+	if _, _, err := e1.ReceiveDesired(ctx, cfg(2, `{"a":2}`)); err != nil {
+		t.Fatalf("apply v2: %v", err)
+	}
+
+	// Simulate a crash mid-apply of v3: Staging set, never resolved.
+	if _, err := store1.Update(func(s State) State {
+		staged := cfg(3, `{"a":3}`)
+		s.Staging = &staged
+		s.LastApplyStatus = ApplyStatusApplying
+		return s
+	}); err != nil {
+		t.Fatalf("simulate crash state: %v", err)
+	}
+
+	store2, err := OpenStore(dir)
+	if err != nil {
+		t.Fatalf("OpenStore after restart: %v", err)
+	}
+	adapter2 := &fakeAdapter{}
+	e2 := NewEngine(store2, adapter2)
+	if err := e2.Recover(ctx); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	target, ok := adapter2.lastRollback()
+	if !ok || target.Version != 2 {
+		t.Fatalf("recovery rollback target = %+v (ok=%v), want v2, not v1", target, ok)
+	}
+	if st := e2.store.Get(); st.AppliedVersion != 2 {
+		t.Fatalf("AppliedVersion after recovery = %d, want 2", st.AppliedVersion)
+	}
+}
+
+// Blocker 3 / test 3: RollbackRuntimeConfig itself fails -> Staging must
+// be left in place, never cleared, since it's the only durable record
+// that the runtime's real state is unknown.
+func TestEngine_RollbackFailure_LeavesStagingUnresolved(t *testing.T) {
+	e, adapter := newTestEngine(t)
+	ctx := context.Background()
+
+	if _, _, err := e.ReceiveDesired(ctx, cfg(1, `{"a":1}`)); err != nil {
+		t.Fatalf("apply v1: %v", err)
+	}
+
+	adapter.applyErr = errors.New("v2 rejected")
+	adapter.rollbackErr = errors.New("rollback also rejected")
+	_, _, err := e.ReceiveDesired(ctx, cfg(2, `{"a":2}`))
+	if err == nil {
+		t.Fatal("expected a non-nil error when both apply and rollback fail")
+	}
+
+	st := e.store.Get()
+	if st.Staging == nil || st.Staging.Version != 2 {
+		t.Fatalf("Staging = %+v, want non-nil pointing at v2 (unresolved)", st.Staging)
+	}
+}
+
+// Blocker 3 / test 4: with Staging left unresolved (a prior rollback
+// failure), a new ReceiveDesired must refuse to apply at all -- it must
+// never call ApplyRuntimeConfig while the runtime's real state is
+// unknown.
+func TestEngine_UnresolvedStaging_RefusesNewApply(t *testing.T) {
+	e, adapter := newTestEngine(t)
+	ctx := context.Background()
+
+	if _, _, err := e.ReceiveDesired(ctx, cfg(1, `{"a":1}`)); err != nil {
+		t.Fatalf("apply v1: %v", err)
+	}
+	adapter.applyErr = errors.New("v2 rejected")
+	adapter.rollbackErr = errors.New("rollback also rejected")
+	if _, _, err := e.ReceiveDesired(ctx, cfg(2, `{"a":2}`)); err == nil {
+		t.Fatal("expected the v2 attempt itself to fail closed")
+	}
+
+	callsBefore := adapter.applyCallCount()
+	adapter.applyErr = nil
+	adapter.rollbackErr = nil
+	status, code, err := e.ReceiveDesired(ctx, cfg(3, `{"a":3}`))
+	if err != nil {
+		t.Fatalf("ReceiveDesired: %v", err)
+	}
+	if status != ApplyStatusFailed || code != ErrCodeStagingUnresolved {
+		t.Fatalf("status=%q code=%q, want failed/%s", status, code, ErrCodeStagingUnresolved)
+	}
+	if adapter.applyCallCount() != callsBefore {
+		t.Fatalf("ApplyRuntimeConfig was called while Staging was unresolved")
+	}
+}
+
+// Blocker 3 / test 5: the runtime apply succeeds, but the final durable
+// publish fails. The engine must roll back the runtime to what was live
+// before, and AppliedVersion must never advance.
+func TestEngine_PublishFailureAfterSuccessfulApply_RollsBackAndDoesNotAdvance(t *testing.T) {
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	adapter := &fakeAdapter{}
+	e := NewEngine(store, adapter)
+	ctx := context.Background()
+
+	if _, _, err := e.ReceiveDesired(ctx, cfg(1, `{"a":1}`)); err != nil {
+		t.Fatalf("apply v1: %v", err)
+	}
+
+	// Let exactly one more write through (v2's staging write, step 3),
+	// then fail every write after that (v2's publish write, step 6).
+	store.limitWrites = true
+	store.writeBudget = 1
+
+	_, _, err = e.ReceiveDesired(ctx, cfg(2, `{"a":2}`))
+	if err == nil {
+		t.Fatal("expected a non-nil error when the final publish cannot be persisted")
+	}
+
+	target, ok := adapter.lastRollback()
+	if !ok || target.Version != 1 {
+		t.Fatalf("rollback target after publish failure = %+v (ok=%v), want v1", target, ok)
+	}
+	if st := e.store.Get(); st.AppliedVersion != 1 {
+		t.Fatalf("AppliedVersion = %d, want 1 (must not advance without a durable commit)", st.AppliedVersion)
+	}
+}
+
+// Blocker 3 / test 6: a Store.Update write failure must leave the
+// in-memory state exactly as it was -- never a change without a durable
+// commit backing it.
+func TestStore_UpdateWriteFailureLeavesMemoryUnchanged(t *testing.T) {
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	if _, err := store.Update(func(s State) State { s.AppliedVersion = 1; return s }); err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+
+	before := store.Get()
+	store.limitWrites = true
+	store.writeBudget = 0
+
+	if _, err := store.Update(func(s State) State { s.AppliedVersion = 2; return s }); err == nil {
+		t.Fatal("expected the write to fail")
+	}
+
+	after := store.Get()
+	if after.AppliedVersion != before.AppliedVersion {
+		t.Fatalf("AppliedVersion changed despite a failed write: before=%d after=%d", before.AppliedVersion, after.AppliedVersion)
+	}
+}
+
+// Blocker 3 / test 7: after a persistence failure at the final publish
+// step, a fresh restart must still see the unresolved Staging on disk --
+// the last successful write (staging) is what's durable, not the failed
+// one.
+func TestEngine_RestartAfterPublishFailure_StillSeesStaging(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenStore(dir)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	e := NewEngine(store, &fakeAdapter{})
+	ctx := context.Background()
+
+	if _, _, err := e.ReceiveDesired(ctx, cfg(1, `{"a":1}`)); err != nil {
+		t.Fatalf("apply v1: %v", err)
+	}
+
+	store.limitWrites = true
+	store.writeBudget = 1 // let v2's staging write through, fail its publish
+	if _, _, err := e.ReceiveDesired(ctx, cfg(2, `{"a":2}`)); err == nil {
+		t.Fatal("expected the publish step to fail")
+	}
+
+	// Restart: open a fresh Store over the same dataDir (unaffected by the
+	// in-memory write-limiting on the old Store instance).
+	store2, err := OpenStore(dir)
+	if err != nil {
+		t.Fatalf("OpenStore after restart: %v", err)
+	}
+	st := store2.Get()
+	if st.Staging == nil || st.Staging.Version != 2 {
+		t.Fatalf("Staging after restart = %+v, want non-nil pointing at v2", st.Staging)
+	}
+	if st.AppliedVersion != 1 {
+		t.Fatalf("AppliedVersion after restart = %d, want 1", st.AppliedVersion)
+	}
+}

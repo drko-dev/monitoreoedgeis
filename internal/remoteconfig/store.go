@@ -53,6 +53,14 @@ type Store struct {
 
 	mu    sync.Mutex
 	state State
+
+	// limitWrites/writeBudget: test-only hook for exercising persistence
+	// failure paths without real disk faults. Zero value (limitWrites
+	// false) never limits writes -- production behavior is unaffected.
+	// When limitWrites is true, writeBudget further saveLocked calls
+	// succeed normally and every call after that fails synthetically.
+	limitWrites bool
+	writeBudget int
 }
 
 // OpenStore opens or creates the durable remote-config state in dataDir.
@@ -83,33 +91,49 @@ func (s *Store) Get() State {
 	return s.state
 }
 
-// Save persists a full state replacement atomically. Callers hold no lock
-// across this call; Save takes its own.
+// Save persists a full state replacement atomically. On a persistence
+// failure the in-memory state is left exactly as it was before the call --
+// a caller must never observe a state change that did not durably commit.
 func (s *Store) Save(st State) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.saveLocked(st); err != nil {
+		return err
+	}
 	s.state = st
-	return s.saveLocked()
+	return nil
 }
 
-// Update applies fn to a copy of the current state under lock and persists
-// the result atomically, returning the new state. fn must not block.
+// Update applies fn to a copy of the current state, persists the *result*
+// atomically first, and only then commits it to memory. If persistence
+// fails, the in-memory state is left completely unchanged -- fn's effect
+// never becomes visible without a durable commit backing it. Returns the
+// state that is now in effect (the candidate on success, the prior state
+// on failure) plus the error.
 func (s *Store) Update(fn func(State) State) (State, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.state = fn(s.state)
-	if err := s.saveLocked(); err != nil {
+	candidate := fn(s.state)
+	if err := s.saveLocked(candidate); err != nil {
 		return s.state, err
 	}
+	s.state = candidate
 	return s.state, nil
 }
 
-func (s *Store) saveLocked() error {
+func (s *Store) saveLocked(st State) error {
+	if s.limitWrites {
+		if s.writeBudget <= 0 {
+			return errors.New("remoteconfig: simulated write failure (test)")
+		}
+		s.writeBudget--
+	}
+
 	if err := os.MkdirAll(s.dataDir, 0o700); err != nil {
 		return fmt.Errorf("remoteconfig: create data dir %s: %w", s.dataDir, err)
 	}
 
-	data, err := json.MarshalIndent(s.state, "", "  ")
+	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return fmt.Errorf("remoteconfig: encode state: %w", err)
 	}

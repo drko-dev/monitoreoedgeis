@@ -24,6 +24,12 @@ type Client interface {
 type Executor interface {
 	Status() map[string]any
 	Rediscover(context.Context) error
+	// ReloadConfig fetches and applies the current SaaS-assigned remote
+	// config (Hito O). Triggered by the allowlisted "reload_config"
+	// command -- SaaS queues it whenever the desired config changes; the
+	// Edge fetches and applies it through this same outbound poll cadence,
+	// never a second poller.
+	ReloadConfig(context.Context) error
 }
 type Module struct {
 	client               Client
@@ -209,7 +215,14 @@ func (m *Module) execute(ctx context.Context, cmd *transport.ControlCommand) (st
 			state = StatusSucceeded
 			result = map[string]any{}
 		}
-	case "restart_video_pipeline", "reload_config":
+	case "reload_config":
+		if err := m.executor.ReloadConfig(ctx); err != nil {
+			state, code = StatusFailed, "RELOAD_CONFIG_FAILED"
+		} else {
+			state = StatusSucceeded
+			result = map[string]any{}
+		}
+	case "restart_video_pipeline":
 		state, code = StatusFailed, "UNSUPPORTED"
 	default:
 		state, code = StatusFailed, "UNKNOWN_COMMAND"

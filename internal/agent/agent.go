@@ -92,13 +92,14 @@ func New(cfg *config.Config) *Agent {
 	if disc != nil {
 		mods = append(mods, disc)
 	}
-	controlModule, controlErr := newControlModule(cfg, creds, reporter, disc, logging.Component(log, "control"))
+	// remoteConfigModule has no poll loop of its own (Hito O Blocker 1): it
+	// is a sync component driven by control.Module's existing outbound
+	// poll cadence via the "reload_config" command, so it must exist
+	// before newControlModule wires it into controlExecutor.
+	remoteConfigModule, remoteConfigErr := newRemoteConfigModule(cfg, creds, reporter, logging.Component(log, "remote-config"))
+	controlModule, controlErr := newControlModule(cfg, creds, reporter, disc, remoteConfigModule, logging.Component(log, "control"))
 	if controlModule != nil {
 		mods = append(mods, controlModule)
-	}
-	remoteConfigModule, remoteConfigErr := newRemoteConfigModule(cfg, creds, reporter, logging.Component(log, "remote-config"))
-	if remoteConfigModule != nil {
-		mods = append(mods, remoteConfigModule)
 	}
 	localEvents, localEventsErr := newLocalEventsModule(cfg, creds, reporter, logging.Component(log, "local-events"))
 	if localEvents != nil {

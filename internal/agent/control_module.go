@@ -10,12 +10,14 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
+	"github.com/drko-dev/monitoreoedgeis/internal/remoteconfig"
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
 
 type controlExecutor struct {
-	reporter  *health.Reporter
-	discovery *discovery.Module
+	reporter     *health.Reporter
+	discovery    *discovery.Module
+	remoteConfig *remoteconfig.Module
 }
 
 func (e controlExecutor) Status() map[string]any {
@@ -32,7 +34,18 @@ func (e controlExecutor) Rediscover(ctx context.Context) error {
 	return e.discovery.Rediscover(ctx)
 }
 
-func newControlModule(cfg *config.Config, creds credentials.Credentials, reporter *health.Reporter, discoveryModule *discovery.Module, log *slog.Logger) (*control.Module, error) {
+// ReloadConfig implements control.Executor for the "reload_config"
+// command (Hito O): SaaS queues it via the existing outbound control
+// channel whenever the desired remote config changes, and Edge fetches +
+// applies it here through the same poll cadence -- no second poller.
+func (e controlExecutor) ReloadConfig(ctx context.Context) error {
+	if e.remoteConfig == nil {
+		return fmt.Errorf("remote config unavailable")
+	}
+	return e.remoteConfig.SyncOnce(ctx)
+}
+
+func newControlModule(cfg *config.Config, creds credentials.Credentials, reporter *health.Reporter, discoveryModule *discovery.Module, remoteConfigModule *remoteconfig.Module, log *slog.Logger) (*control.Module, error) {
 	if cfg.SaaSURL == "" || !creds.IsEnrolled() || creds.DeviceID == "" || creds.Credential == "" {
 		return nil, nil
 	}
@@ -48,5 +61,5 @@ func newControlModule(cfg *config.Config, creds credentials.Credentials, reporte
 		}
 		opts = append(opts, control.WithLedger(ledger))
 	}
-	return control.New(client, controlExecutor{reporter: reporter, discovery: discoveryModule}, creds.DeviceID, creds.Credential, opts...), nil
+	return control.New(client, controlExecutor{reporter: reporter, discovery: discoveryModule, remoteConfig: remoteConfigModule}, creds.DeviceID, creds.Credential, opts...), nil
 }

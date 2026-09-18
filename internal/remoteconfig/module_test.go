@@ -3,7 +3,6 @@ package remoteconfig
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
@@ -38,7 +37,7 @@ func (f *fakeHealthSink) SetRemoteConfigStatus(s Status) {
 	}
 }
 
-func TestModule_PollApplyAckAndShutdown(t *testing.T) {
+func TestModule_SyncOnce_AppliesAndAcks(t *testing.T) {
 	acked := make(chan string, 1)
 	client := &fakeClient{
 		getFunc: func(ctx context.Context, deviceID, credential string) (*transport.RemoteConfig, error) {
@@ -57,10 +56,9 @@ func TestModule_PollApplyAckAndShutdown(t *testing.T) {
 	engine := NewEngine(store, &fakeAdapter{})
 	sink := &fakeHealthSink{statuses: make(chan Status, 4)}
 	m := New(client, engine, "device-1", "cred-1", nil, WithHealthSink(sink))
-	m.SetPollInterval(10 * time.Millisecond)
 
-	if err := m.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
+	if err := m.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("SyncOnce() error = %v", err)
 	}
 
 	select {
@@ -68,8 +66,8 @@ func TestModule_PollApplyAckAndShutdown(t *testing.T) {
 		if status != string(ApplyStatusApplied) {
 			t.Fatalf("acked status = %s, want %s", status, ApplyStatusApplied)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for poll/apply/ack")
+	default:
+		t.Fatal("SyncOnce did not ACK synchronously")
 	}
 
 	select {
@@ -77,18 +75,16 @@ func TestModule_PollApplyAckAndShutdown(t *testing.T) {
 		if s.AppliedVersion != 1 {
 			t.Fatalf("published status AppliedVersion = %d, want 1", s.AppliedVersion)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for health sink update")
+	default:
+		t.Fatal("SyncOnce did not publish a health status synchronously")
 	}
 
-	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := m.Stop(stopCtx); err != nil {
-		t.Fatalf("Stop() error = %v", err)
+	if got := m.Status().AppliedVersion; got != 1 {
+		t.Fatalf("m.Status().AppliedVersion = %d, want 1", got)
 	}
 }
 
-func TestModule_NoContentIsNotAcked(t *testing.T) {
+func TestModule_SyncOnce_NoContentIsNotAcked(t *testing.T) {
 	acks := 0
 	client := &fakeClient{
 		ackFunc: func(ctx context.Context, deviceID, credential string, version int64, status, errorCode string) error {
@@ -101,20 +97,41 @@ func TestModule_NoContentIsNotAcked(t *testing.T) {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	m := New(client, NewEngine(store, &fakeAdapter{}), "device-1", "cred-1", nil)
-	m.SetPollInterval(10 * time.Millisecond)
 
-	if err := m.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
+	if err := m.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("SyncOnce() error = %v", err)
 	}
-	time.Sleep(50 * time.Millisecond)
-
-	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := m.Stop(stopCtx); err != nil {
-		t.Fatalf("Stop() error = %v", err)
-	}
-
 	if acks != 0 {
 		t.Fatalf("acks = %d, want 0 (no config assigned)", acks)
+	}
+}
+
+// SyncOnce must not ACK a status it could not durably record -- a
+// persistence/unresolved-staging failure from Engine.ReceiveDesired
+// propagates as an error instead.
+func TestModule_SyncOnce_DoesNotAckOnEngineError(t *testing.T) {
+	acks := 0
+	client := &fakeClient{
+		getFunc: func(ctx context.Context, deviceID, credential string) (*transport.RemoteConfig, error) {
+			return &transport.RemoteConfig{Version: 1, Payload: []byte(`{"fps":10}`)}, nil
+		},
+		ackFunc: func(ctx context.Context, deviceID, credential string, version int64, status, errorCode string) error {
+			acks++
+			return nil
+		},
+	}
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	store.limitWrites = true
+	store.writeBudget = 0 // fail every persistence attempt
+
+	m := New(client, NewEngine(store, &fakeAdapter{}), "device-1", "cred-1", nil)
+	if err := m.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected SyncOnce to return an error when the engine cannot persist")
+	}
+	if acks != 0 {
+		t.Fatalf("acks = %d, want 0 (must not ACK an unrecorded status)", acks)
 	}
 }

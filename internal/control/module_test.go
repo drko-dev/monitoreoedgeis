@@ -15,6 +15,8 @@ import (
 type fakeExecutor struct {
 	rediscoveries int
 	rediscoverFn  func(context.Context) error
+	reloadConfigs int
+	reloadFn      func(context.Context) error
 }
 
 func (f *fakeExecutor) Status() map[string]any { return map[string]any{"health": "READY"} }
@@ -22,6 +24,13 @@ func (f *fakeExecutor) Rediscover(ctx context.Context) error {
 	f.rediscoveries++
 	if f.rediscoverFn != nil {
 		return f.rediscoverFn(ctx)
+	}
+	return nil
+}
+func (f *fakeExecutor) ReloadConfig(ctx context.Context) error {
+	f.reloadConfigs++
+	if f.reloadFn != nil {
+		return f.reloadFn(ctx)
 	}
 	return nil
 }
@@ -36,9 +45,10 @@ func TestExecuteAllowlistAndDuplicateSafety(t *testing.T) {
 	}{
 		{"status", "request_status", nil, "succeeded", ""},
 		{"rediscovery", "rediscovery", nil, "succeeded", ""},
+		{"reload_config", "reload_config", nil, "succeeded", ""},
 		{"unknown", "shell", nil, "failed", "UNKNOWN_COMMAND"},
 		{"payload", "request_status", map[string]any{"cmd": "x"}, "failed", "INVALID_COMMAND"},
-		{"unsupported", "reload_config", nil, "failed", "UNSUPPORTED"},
+		{"unsupported", "restart_video_pipeline", nil, "failed", "UNSUPPORTED"},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
