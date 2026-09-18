@@ -82,6 +82,11 @@ type Snapshot struct {
 	// LocalEventBacklog reports bounded transport state only; evidence paths
 	// and event payloads deliberately never appear on the health endpoint.
 	LocalEventBacklog *edgebacklog.Status `json:"local_event_backlog,omitempty"`
+	// InsecureHTTPAllowed is true only when GEOCAM_ALLOW_INSECURE_HTTP has
+	// been explicitly set, permitting an http:// (not https://) SaaS URL.
+	// Omitted (false) in the normal, secure case so the field only ever
+	// shows up on /status when this dev-only escape hatch is actually live.
+	InsecureHTTPAllowed bool `json:"insecure_http_allowed,omitempty"`
 }
 
 // Reporter holds the mutable health state of the agent, including per-module
@@ -243,26 +248,27 @@ func (r *Reporter) Snapshot() Snapshot {
 	}
 
 	return Snapshot{
-		Status:            r.state,
-		Version:           r.version,
-		EdgeID:            r.ident.EdgeID,
-		EnrollmentStatus:  r.ident.Status.String(),
-		CredentialStatus:  r.credentialStatus,
-		Hostname:          r.host.Hostname,
-		OS:                r.host.OS,
-		Architecture:      r.host.GOARCH,
-		ProcessingMode:    r.cfg.ProcessingMode.String(),
-		UptimeSeconds:     int64(uptime.Seconds()),
-		Uptime:            uptime.Round(time.Second).String(),
-		Modules:           modules,
-		Heartbeat:         hb,
-		Discovery:         disc,
-		Cameras:           cams,
-		VideoPipeline:     vp,
-		Cloud:             cloud,
-		Vision:            vis,
-		FullEdge:          fe,
-		LocalEventBacklog: backlog,
+		Status:              r.state,
+		Version:             r.version,
+		EdgeID:              r.ident.EdgeID,
+		EnrollmentStatus:    r.ident.Status.String(),
+		CredentialStatus:    r.credentialStatus,
+		Hostname:            r.host.Hostname,
+		OS:                  r.host.OS,
+		Architecture:        r.host.GOARCH,
+		ProcessingMode:      r.cfg.ProcessingMode.String(),
+		UptimeSeconds:       int64(uptime.Seconds()),
+		Uptime:              uptime.Round(time.Second).String(),
+		Modules:             modules,
+		Heartbeat:           hb,
+		Discovery:           disc,
+		Cameras:             cams,
+		VideoPipeline:       vp,
+		Cloud:               cloud,
+		Vision:              vis,
+		FullEdge:            fe,
+		LocalEventBacklog:   backlog,
+		InsecureHTTPAllowed: r.cfg.AllowInsecureHTTP,
 	}
 }
 
