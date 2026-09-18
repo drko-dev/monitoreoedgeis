@@ -476,7 +476,11 @@ func formatResources(s platform.Sample) *ResourcesStatus {
 			TotalBytes:     s.DiskTotalBytes,
 			AvailableBytes: s.DiskAvailableBytes,
 		}
-		if disk.AvailableBytes == 0 && s.DiskTotalBytes > s.DiskUsedBytes {
+		// Only fall back to total-used when the real metric is actually
+		// unavailable — a known 0 (disk full) must be reported as 0, not
+		// silently replaced with a number that can include root-reserved
+		// blocks.
+		if !s.DiskAvailableKnown && s.DiskTotalBytes > s.DiskUsedBytes {
 			disk.AvailableBytes = s.DiskTotalBytes - s.DiskUsedBytes
 		}
 		used := s.DiskUsedBytes

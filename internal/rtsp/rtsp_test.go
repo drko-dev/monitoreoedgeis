@@ -462,10 +462,20 @@ func TestSupervisorReconnectAndTimeoutMonotonicity(t *testing.T) {
 		t.Errorf("expected ReconnectCount=2, got %d", snap.ReconnectCount)
 	}
 
-	// Increment timeout / stall count
+	// A dial timeout (Dial() fails before the stream is ever connected)
+	// must count as a timeout but NOT as a stall.
 	sup.incrementTimeout()
-	if snap := sup.Snapshot(); snap.TimeoutCount != 1 || snap.StallCount != 1 {
-		t.Errorf("expected TimeoutCount=1 StallCount=1, got timeout=%d stall=%d", snap.TimeoutCount, snap.StallCount)
+	if snap := sup.Snapshot(); snap.TimeoutCount != 1 || snap.StallCount != 0 {
+		t.Errorf("dial timeout: expected TimeoutCount=1 StallCount=0, got timeout=%d stall=%d", snap.TimeoutCount, snap.StallCount)
+	}
+
+	// A timeout/silence on an already-connected stream (streamLoop exit)
+	// counts as both -- mirrors the real call site in reconnectLoop, which
+	// calls both helpers together.
+	sup.incrementTimeout()
+	sup.incrementStreamStall()
+	if snap := sup.Snapshot(); snap.TimeoutCount != 2 || snap.StallCount != 1 {
+		t.Errorf("stream stall: expected TimeoutCount=2 StallCount=1, got timeout=%d stall=%d", snap.TimeoutCount, snap.StallCount)
 	}
 
 	// Setting error or connecting should NOT reset ReconnectCount or TimeoutCount
@@ -474,7 +484,7 @@ func TestSupervisorReconnectAndTimeoutMonotonicity(t *testing.T) {
 	if snap.ReconnectCount != 2 {
 		t.Errorf("ReconnectCount was reset on recordError! got %d, want 2", snap.ReconnectCount)
 	}
-	if snap.TimeoutCount != 1 || snap.StallCount != 1 {
+	if snap.TimeoutCount != 2 || snap.StallCount != 1 {
 		t.Errorf("TimeoutCount/StallCount reset on recordError! got %d / %d", snap.TimeoutCount, snap.StallCount)
 	}
 	if strings.Contains(snap.LastErrorSafe, "pass123") {

@@ -183,6 +183,7 @@ func TestSnapshot_ResourcesNoFalseZeros(t *testing.T) {
 		DiskTotalBytes:     100 * 1024 * 1024 * 1024,
 		DiskUsedBytes:      40 * 1024 * 1024 * 1024,
 		DiskAvailableBytes: 60 * 1024 * 1024 * 1024,
+		DiskAvailableKnown: true,
 		DiskDataDir:        "/var/lib/geocam-edge",
 		TemperatureC:       nil, // no thermal sensor
 	})
@@ -208,6 +209,30 @@ func TestSnapshot_ResourcesNoFalseZeros(t *testing.T) {
 	}
 	if snap.Resources.Disk.DataDir != "/var/lib/geocam-edge" {
 		t.Errorf("unexpected Disk data dir: %s", snap.Resources.Disk.DataDir)
+	}
+}
+
+// TestSnapshot_DiskAvailableZeroIsReal is Blocker 1's required test: a
+// filesystem that is genuinely full for an unprivileged writer (Bavail==0,
+// but statfs succeeded) must report available_bytes=0 — never fall back to
+// total-used, which can include root-reserved blocks and would mask a real
+// out-of-space condition.
+func TestSnapshot_DiskAvailableZeroIsReal(t *testing.T) {
+	r := newTestReporter()
+	r.SetPlatformSample(platform.Sample{
+		DiskTotalBytes:     100,
+		DiskUsedBytes:      90,
+		DiskAvailableBytes: 0,
+		DiskAvailableKnown: true,
+		DiskDataDir:        "/var/lib/geocam-edge",
+	})
+
+	snap := r.Snapshot()
+	if snap.Resources == nil || snap.Resources.Disk == nil {
+		t.Fatalf("expected non-nil Resources.Disk in Snapshot")
+	}
+	if got := snap.Resources.Disk.AvailableBytes; got != 0 {
+		t.Errorf("AvailableBytes = %d, want 0 (real, known available -- not the total-used fallback of 10)", got)
 	}
 }
 

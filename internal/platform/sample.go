@@ -25,6 +25,12 @@ type Sample struct {
 	DiskTotalBytes     uint64
 	DiskUsedBytes      uint64
 	DiskAvailableBytes uint64
+	// DiskAvailableKnown is true only when the underlying statfs(2) call
+	// actually succeeded — including when DiskAvailableBytes is genuinely
+	// 0. false means the metric could not be read at all (unsupported
+	// platform, empty path, failed syscall); callers must not conflate the
+	// two (a real 0 must never be treated as "missing").
+	DiskAvailableKnown bool
 	DiskDataDir        string
 	// TemperatureC is the hottest readable thermal zone in degrees Celsius,
 	// or nil where the host exposes none. Absence is normal (most VMs and
@@ -148,7 +154,7 @@ func Collect(dataDir string, cpu *CPUSampler) Sample {
 	s.MemTotalBytes, s.MemUsedBytes, s.MemAvailableBytes = memoryBytes()
 	target := diskTarget(dataDir)
 	s.DiskDataDir = target
-	s.DiskTotalBytes, s.DiskUsedBytes, s.DiskAvailableBytes = diskBytes(target)
+	s.DiskTotalBytes, s.DiskUsedBytes, s.DiskAvailableBytes, s.DiskAvailableKnown = diskBytes(target)
 	s.TemperatureC = temperatureC()
 	return s
 }

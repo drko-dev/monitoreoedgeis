@@ -21,10 +21,10 @@ Expuestas en `GET /status` bajo la clave `resources`. Ningún valor ausente o no
 ### Almacenamiento en Disco (`disk`)
 - **`data_dir`**: Directorio raíz efectivo observado que aloja `GEOCAM_DATA_DIR` (obtenido resolviendo ancestros existentes, sin exponer rutas sensibles).
 - **`total_bytes`**: Capacidad total del sistema de archivos en bytes.
-- **`available_bytes`**: Espacio disponible real para escritura por procesos sin privilegios de root (`bavail * bsize` de `statfs`).
+- **`available_bytes`**: Espacio disponible real para escritura por procesos sin privilegios de root (`bavail * bsize` de `statfs`). Puede ser genuinamente `0` (disco lleno) — eso es distinto de "la métrica no se pudo leer". `platform.Sample.DiskAvailableKnown` distingue ambos casos internamente; sólo cuando es `false` (statfs falló o plataforma no soportada) se usa el fallback `total_bytes - used_bytes`, que nunca reemplaza un `available_bytes == 0` real.
 - **`used_bytes`**: Espacio consumido en bytes (`(blocks - bfree) * bsize`).
 - **`used_percent`**: Porcentaje de utilización del disco (`(used_bytes / total_bytes) * 100.0`).
-- **Alineación con Full Edge**: `PlatformDiskChecker.FreeBytes` utiliza prioritariamente `available_bytes` para validar umbrales antes de persistir evidencias.
+- **Alineación con Full Edge**: `PlatformDiskChecker.FreeBytes` utiliza prioritariamente `available_bytes` para validar umbrales antes de persistir evidencias — también respeta `DiskAvailableKnown`, nunca trata un `available_bytes == 0` conocido como espacio libre falso.
 
 ### Térmico (`thermal`)
 - **`temperature_c`**: Temperatura de la zona térmica más caliente en grados Celsius (`float64`).
@@ -79,7 +79,9 @@ Supervisión de cada stream RTSP vía `rtsp.Supervisor` expuesta en `cameras`:
 - **`reconnect_count`**: Contador estrictamente monótono de reconexiones intentadas. Nunca se resetea a cero al reconectar o fallar.
 - **`packets_received` / `bytes_received`**: Volumen de tráfico recibido del stream.
 - **`last_packet_at`**: Timestamp UTC del último paquete de red procesado.
-- **`timeout_count` / `stall_count`**: Contador acumulativo de silencios o interrupciones por timeout en el socket RTSP (`PacketTimeout`).
+- **`timeout_count`**: Contador acumulativo de TODO fallo clasificado como timeout — dial timeout, handshake timeout (ambos dentro de `Dial()`) y timeout de lectura de stream ya conectado.
+- **`stall_count`**: Subconjunto de `timeout_count`. Sólo cuenta timeouts/silencios de paquetes en un stream que YA estaba conectado/reproduciendo (`streamLoop` + `PacketTimeout`). Un dial timeout inicial incrementa `timeout_count` pero NO `stall_count` — no hubo stream establecido que se haya interrumpido.
+  - `timeout_count != stall_count` en general: `stall_count <= timeout_count` siempre.
 - **`last_error_safe`**: Último error sanitizado.
   - Se eliminan credenciales en URIs (`rtsp://usuario:password@host...` -> `rtsp://[REDACTED]@host...`).
   - Se redactan parámetros sensibles en queries (`password=`, `token=`, etc.).

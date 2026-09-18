@@ -43,7 +43,10 @@ func (PlatformDiskChecker) FreeBytes(dataDir string) (uint64, error) {
 	if s.DiskTotalBytes == 0 {
 		return 0, fmt.Errorf("disk capacity cannot be determined for %s", dataDir)
 	}
-	if s.DiskAvailableBytes > 0 {
+	// A known available figure wins even when it is genuinely 0 (disk full
+	// for an unprivileged writer) — only fall back to total-used when the
+	// metric truly could not be read.
+	if s.DiskAvailableKnown {
 		return s.DiskAvailableBytes, nil
 	}
 	if s.DiskTotalBytes < s.DiskUsedBytes {
