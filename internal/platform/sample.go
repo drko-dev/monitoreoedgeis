@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Sample is a point-in-time reading of host resource usage, as opposed to
@@ -17,11 +18,14 @@ import (
 type Sample struct {
 	// CPUPercent is whole-host CPU utilisation in [0,100], or nil where it
 	// cannot be measured without cgo (see CPUSampler).
-	CPUPercent     *float64
-	MemTotalBytes  uint64
-	MemUsedBytes   uint64
-	DiskTotalBytes uint64
-	DiskUsedBytes  uint64
+	CPUPercent         *float64
+	MemTotalBytes      uint64
+	MemUsedBytes       uint64
+	MemAvailableBytes  uint64
+	DiskTotalBytes     uint64
+	DiskUsedBytes      uint64
+	DiskAvailableBytes uint64
+	DiskDataDir        string
 	// TemperatureC is the hottest readable thermal zone in degrees Celsius,
 	// or nil where the host exposes none. Absence is normal (most VMs and
 	// every non-Linux host) and is never on its own a degraded condition.
@@ -32,14 +36,14 @@ type Sample struct {
 // consecutive /proc/stat readings. A single reading cannot yield a rate, so
 // the first Percent call after construction always returns nil ("priming");
 // every later call reports utilisation over the interval since the previous
-// call. It is not safe for concurrent use — the heartbeat module owns one
-// and calls it from its single scheduling goroutine.
+// call. It is safe for concurrent use.
 //
 // On hosts without procfs (macOS dev machines, Windows) Percent always
 // returns nil: measuring host CPU there needs cgo, and the Go core is built
 // CGO_ENABLED=0. Linux amd64/arm64 — the actual deployment targets — are
 // fully covered.
 type CPUSampler struct {
+	mu        sync.Mutex
 	prevIdle  uint64
 	prevTotal uint64
 	primed    bool
@@ -48,6 +52,12 @@ type CPUSampler struct {
 // Percent returns host CPU utilisation since the previous call, or nil when
 // unavailable or still priming.
 func (s *CPUSampler) Percent() *float64 {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	idle, total, ok := readProcStat()
 	if !ok {
 		return nil
@@ -135,8 +145,10 @@ func Collect(dataDir string, cpu *CPUSampler) Sample {
 	if cpu != nil {
 		s.CPUPercent = cpu.Percent()
 	}
-	s.MemTotalBytes, s.MemUsedBytes = memoryBytes()
-	s.DiskTotalBytes, s.DiskUsedBytes = diskBytes(diskTarget(dataDir))
+	s.MemTotalBytes, s.MemUsedBytes, s.MemAvailableBytes = memoryBytes()
+	target := diskTarget(dataDir)
+	s.DiskDataDir = target
+	s.DiskTotalBytes, s.DiskUsedBytes, s.DiskAvailableBytes = diskBytes(target)
 	s.TemperatureC = temperatureC()
 	return s
 }
@@ -161,18 +173,18 @@ func diskTarget(dataDir string) string {
 	}
 }
 
-// memoryBytes returns (total, used) RAM in bytes, or (0, 0) when the host
-// does not expose it. "Used" is total minus MemAvailable, which counts
+// memoryBytes returns (total, used, available) RAM in bytes, or (0, 0, 0) when
+// the host does not expose it. "Used" is total minus MemAvailable, which counts
 // reclaimable page cache as free — the figure an operator actually cares
 // about, not MemFree.
-func memoryBytes() (total, used uint64) {
+func memoryBytes() (total, used, available uint64) {
 	data, err := os.ReadFile("/proc/meminfo")
 	if err != nil {
 		// No procfs (macOS/Windows dev hosts): fall back to whatever the
 		// platform-specific file can determine, usually total only.
-		return memTotalFallback(), 0
+		return memTotalFallback(), 0, 0
 	}
-	var available uint64
+	var avail uint64
 	var haveAvailable bool
 	for _, line := range strings.Split(string(data), "\n") {
 		key, value, ok := strings.Cut(line, ":")
@@ -183,14 +195,15 @@ func memoryBytes() (total, used uint64) {
 		case "MemTotal":
 			total = parseMeminfoBytes(value)
 		case "MemAvailable":
-			available = parseMeminfoBytes(value)
+			avail = parseMeminfoBytes(value)
 			haveAvailable = true
 		}
 	}
-	if total > 0 && haveAvailable && available <= total {
-		used = total - available
+	if total > 0 && haveAvailable && avail <= total {
+		used = total - avail
+		available = avail
 	}
-	return total, used
+	return total, used, available
 }
 
 // parseMeminfoBytes converts a /proc/meminfo value ("  16384000 kB") to bytes.

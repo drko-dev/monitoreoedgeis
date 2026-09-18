@@ -70,6 +70,8 @@ type CameraStreamStatus struct {
 	BytesReceived   int64      `json:"bytes_received"`
 	LastPacketAt    *time.Time `json:"last_packet_at,omitempty"`
 	LastErrorSafe   string     `json:"last_error_safe,omitempty"`
+	TimeoutCount    int64      `json:"timeout_count"`
+	StallCount      int64      `json:"stall_count"`
 }
 
 // Config holds timing and behavior parameters for RTSP stream supervisors.

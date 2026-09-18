@@ -130,9 +130,12 @@ func TestParseMeminfoBytes(t *testing.T) {
 
 // D10/D12: a host without procfs must degrade, never panic.
 func TestMemoryBytesDegradesWithoutProcfs(t *testing.T) {
-	total, used := memoryBytes()
+	total, used, available := memoryBytes()
 	if used > total && total != 0 {
 		t.Errorf("used (%d) exceeds total (%d)", used, total)
+	}
+	if available > total && total != 0 {
+		t.Errorf("available (%d) exceeds total (%d)", available, total)
 	}
 	if runtime.GOOS == "linux" && total == 0 {
 		t.Error("expected /proc/meminfo to yield a total on Linux")
@@ -143,7 +146,7 @@ func TestMemoryBytesDegradesWithoutProcfs(t *testing.T) {
 
 func TestDiskBytesForDataDir(t *testing.T) {
 	dir := t.TempDir()
-	total, used := diskBytes(dir)
+	total, used, available := diskBytes(dir)
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("statfs is only wired for linux and darwin")
 	}
@@ -153,11 +156,14 @@ func TestDiskBytesForDataDir(t *testing.T) {
 	if used > total {
 		t.Errorf("used (%d) exceeds total (%d)", used, total)
 	}
+	if available > total {
+		t.Errorf("available (%d) exceeds total (%d)", available, total)
+	}
 }
 
 func TestDiskBytesOnEmptyPathIsZero(t *testing.T) {
-	if total, used := diskBytes(""); total != 0 || used != 0 {
-		t.Errorf("diskBytes(\"\") = (%d, %d), want (0, 0)", total, used)
+	if total, used, available := diskBytes(""); total != 0 || used != 0 || available != 0 {
+		t.Errorf("diskBytes(\"\") = (%d, %d, %d), want (0, 0, 0)", total, used, available)
 	}
 }
 

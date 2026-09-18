@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -397,5 +399,85 @@ func TestRTSP_CredentialSafety(t *testing.T) {
 	}
 	if strings.Contains(fmt.Sprintf("%+v", status), "password") {
 		t.Error("CameraStreamStatus has password field")
+	}
+}
+
+func TestSanitizeError(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    string
+		contains string
+		omits    []string
+	}{
+		{
+			name:     "rtsp url with password",
+			input:    "dial rtsp://admin:secret123@192.168.1.50:554/live: connection refused",
+			contains: "rtsp://[REDACTED]@192.168.1.50:554/live",
+			omits:    []string{"secret123", "admin:"},
+		},
+		{
+			name:     "query params with token and password",
+			input:    "GET /stream?token=abc123xyz&password=supersecret failed",
+			contains: "[REDACTED]",
+			omits:    []string{"abc123xyz", "supersecret"},
+		},
+		{
+			name:     "control characters stripped",
+			input:    "error\x00with\r\nnewlines\tand\x1bcontrol",
+			contains: "error with newlines and control",
+			omits:    []string{"\x00", "\x1b"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SanitizeErrorMessage(tc.input)
+			if tc.contains != "" && !strings.Contains(got, tc.contains) {
+				t.Errorf("expected %q to contain %q", got, tc.contains)
+			}
+			for _, omit := range tc.omits {
+				if strings.Contains(got, omit) {
+					t.Errorf("expected %q NOT to contain %q", got, omit)
+				}
+			}
+			if len(got) > 255 {
+				t.Errorf("sanitized error length %d exceeds 255 bytes", len(got))
+			}
+		})
+	}
+}
+
+func TestSupervisorReconnectAndTimeoutMonotonicity(t *testing.T) {
+	sup := NewSupervisor(CameraTarget{CandidateKey: "cam-test"}, Config{}, slog.Default())
+
+	if snap := sup.Snapshot(); snap.ReconnectCount != 0 || snap.TimeoutCount != 0 || snap.StallCount != 0 {
+		t.Fatalf("expected initial counts to be 0, got reconnect=%d timeout=%d stall=%d",
+			snap.ReconnectCount, snap.TimeoutCount, snap.StallCount)
+	}
+
+	// Increment reconnect count and verify it increases
+	sup.incrementReconnect()
+	sup.incrementReconnect()
+	if snap := sup.Snapshot(); snap.ReconnectCount != 2 {
+		t.Errorf("expected ReconnectCount=2, got %d", snap.ReconnectCount)
+	}
+
+	// Increment timeout / stall count
+	sup.incrementTimeout()
+	if snap := sup.Snapshot(); snap.TimeoutCount != 1 || snap.StallCount != 1 {
+		t.Errorf("expected TimeoutCount=1 StallCount=1, got timeout=%d stall=%d", snap.TimeoutCount, snap.StallCount)
+	}
+
+	// Setting error or connecting should NOT reset ReconnectCount or TimeoutCount
+	sup.recordError(errors.New("dial rtsp://user:pass123@host/path failed"), StateDegraded)
+	snap := sup.Snapshot()
+	if snap.ReconnectCount != 2 {
+		t.Errorf("ReconnectCount was reset on recordError! got %d, want 2", snap.ReconnectCount)
+	}
+	if snap.TimeoutCount != 1 || snap.StallCount != 1 {
+		t.Errorf("TimeoutCount/StallCount reset on recordError! got %d / %d", snap.TimeoutCount, snap.StallCount)
+	}
+	if strings.Contains(snap.LastErrorSafe, "pass123") {
+		t.Errorf("password leaked in LastErrorSafe: %s", snap.LastErrorSafe)
 	}
 }

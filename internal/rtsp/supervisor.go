@@ -2,6 +2,7 @@ package rtsp
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -148,6 +149,9 @@ func (s *Supervisor) run(ctx context.Context) {
 
 		session, err := Dial(ctx, s.target.Addr, s.target.RTSPPath, s.target.Username, s.target.Password, s.cfg.DialTimeout)
 		if err != nil {
+			if errors.Is(err, ErrTimeout) || isTimeout(err) || errors.Is(err, context.DeadlineExceeded) {
+				s.incrementTimeout()
+			}
 			s.recordError(err, StateDegraded)
 			s.logger.Warn("stream dial failed, backing off", "error", s.safeError(err), "backoff", backoff)
 
@@ -198,6 +202,9 @@ func (s *Supervisor) run(ctx context.Context) {
 		}
 
 		// Loop exited due to error or silent stream
+		if errors.Is(err, ErrTimeout) || isTimeout(err) || errors.Is(err, context.DeadlineExceeded) {
+			s.incrementTimeout()
+		}
 		s.recordError(err, StateDegraded)
 		s.incrementReconnect()
 		s.logger.Warn("stream interrupted, reconnecting", "error", s.safeError(err), "backoff", backoff)
@@ -268,15 +275,15 @@ func (s *Supervisor) incrementReconnect() {
 	s.status.ReconnectCount++
 }
 
+func (s *Supervisor) incrementTimeout() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.status.TimeoutCount++
+	s.status.StallCount++
+}
+
 func (s *Supervisor) safeError(err error) string {
-	if err == nil {
-		return ""
-	}
-	msg := err.Error()
-	if len(msg) > 255 {
-		msg = msg[:255]
-	}
-	return msg
+	return SanitizeError(err)
 }
 
 func min(a, b time.Duration) time.Duration {

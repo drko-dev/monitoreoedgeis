@@ -122,7 +122,8 @@ type VideoPipelineSummary struct {
 	Cameras     []PipelineStatus `json:"cameras"`
 	// CloudBuffer is nil unless a registered Sink implements
 	// CloudBufferReporter and reports buffering as active (Milestone I6).
-	CloudBuffer *CloudBufferStats `json:"cloud_buffer,omitempty"`
+	CloudBuffer  *CloudBufferStats  `json:"cloud_buffer,omitempty"`
+	RouterQueues []RouterQueueStats `json:"router_queues,omitempty"`
 }
 
 // CloudBufferStats is a point-in-time snapshot of Milestone I6's offline
@@ -142,7 +143,9 @@ type CloudBufferStats struct {
 	// it can never be sent under that config, no matter how long the drain
 	// loop waits. Distinct from DroppedFull (a live buffer that was full at
 	// enqueue time): this is a replay-time, config-driven discard.
-	DroppedOversize int64 `json:"dropped_oversize"`
+	DroppedOversize int64      `json:"dropped_oversize"`
+	Capacity        int        `json:"capacity,omitempty"`
+	OldestPending   *time.Time `json:"oldest_pending,omitempty"`
 }
 
 // CloudBufferReporter is implemented by a Sink that exposes I6 buffer
