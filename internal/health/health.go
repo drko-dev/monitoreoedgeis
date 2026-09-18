@@ -82,11 +82,64 @@ type Snapshot struct {
 	// LocalEventBacklog reports bounded transport state only; evidence paths
 	// and event payloads deliberately never appear on the health endpoint.
 	LocalEventBacklog *edgebacklog.Status `json:"local_event_backlog,omitempty"`
+	// Resources exposes whole-host CPU, memory and disk metrics (Milestone N).
+	Resources *ResourcesStatus `json:"resources,omitempty"`
+	// Queues consolidates queue depth and backpressure telemetry per component (Milestone N).
+	Queues *QueuesStatus `json:"queues,omitempty"`
 	// InsecureHTTPAllowed is true only when GEOCAM_ALLOW_INSECURE_HTTP has
 	// been explicitly set, permitting an http:// (not https://) SaaS URL.
 	// Omitted (false) in the normal, secure case so the field only ever
 	// shows up on /status when this dev-only escape hatch is actually live.
 	InsecureHTTPAllowed bool `json:"insecure_http_allowed,omitempty"`
+}
+
+// ResourcesStatus exposes real host resource telemetry (Milestone N).
+type ResourcesStatus struct {
+	CPU     *CPUStatus     `json:"cpu,omitempty"`
+	Memory  *MemoryStatus  `json:"memory,omitempty"`
+	Disk    *DiskStatus    `json:"disk,omitempty"`
+	Thermal *ThermalStatus `json:"thermal,omitempty"`
+}
+
+type CPUStatus struct {
+	Percent *float64 `json:"percent,omitempty"`
+}
+
+type MemoryStatus struct {
+	TotalBytes     uint64   `json:"total_bytes,omitempty"`
+	UsedBytes      *uint64  `json:"used_bytes,omitempty"`
+	AvailableBytes *uint64  `json:"available_bytes,omitempty"`
+	UsedPercent    *float64 `json:"used_percent,omitempty"`
+}
+
+type DiskStatus struct {
+	DataDir        string   `json:"data_dir,omitempty"`
+	TotalBytes     uint64   `json:"total_bytes,omitempty"`
+	AvailableBytes uint64   `json:"available_bytes,omitempty"`
+	UsedBytes      *uint64  `json:"used_bytes,omitempty"`
+	UsedPercent    *float64 `json:"used_percent,omitempty"`
+}
+
+type ThermalStatus struct {
+	TemperatureC *float64 `json:"temperature_c,omitempty"`
+}
+
+// QueuesStatus consolidates queue depth and backpressure telemetry per component (Milestone N).
+type QueuesStatus struct {
+	Router      []QueueComponentStatus `json:"router,omitempty"`
+	CloudBuffer *QueueComponentStatus  `json:"cloud_buffer,omitempty"`
+	EdgeBacklog *QueueComponentStatus  `json:"edge_backlog,omitempty"`
+	Vision      *QueueComponentStatus  `json:"vision,omitempty"`
+}
+
+type QueueComponentStatus struct {
+	Name          string     `json:"name"`
+	Depth         int        `json:"depth"`
+	Capacity      int        `json:"capacity"`
+	Drops         int64      `json:"drops"`
+	OldestPending *time.Time `json:"oldest_pending,omitempty"`
+	Degraded      bool       `json:"degraded"`
+	Quarantined   int        `json:"quarantined,omitempty"`
 }
 
 // Reporter holds the mutable health state of the agent, including per-module
@@ -106,6 +159,10 @@ type Reporter struct {
 	vision            *vision.Status
 	fullEdge          *fulledge.Status
 	localEventBacklog *edgebacklog.Status
+	resources         *ResourcesStatus
+	queues            *QueuesStatus
+	cpuSampler        *platform.CPUSampler
+	sample            *platform.Sample
 
 	version string
 	cfg     *config.Config
@@ -116,13 +173,14 @@ type Reporter struct {
 // New creates a Reporter in the STARTING state.
 func New(version string, cfg *config.Config, ident identity.Identity, host platform.Info) *Reporter {
 	return &Reporter{
-		state:     StateStarting,
-		startedAt: time.Now(),
-		modules:   make(map[string]string),
-		version:   version,
-		cfg:       cfg,
-		ident:     ident,
-		host:      host,
+		state:      StateStarting,
+		startedAt:  time.Now(),
+		modules:    make(map[string]string),
+		version:    version,
+		cfg:        cfg,
+		ident:      ident,
+		host:       host,
+		cpuSampler: &platform.CPUSampler{},
 	}
 }
 
@@ -247,6 +305,32 @@ func (r *Reporter) Snapshot() Snapshot {
 		backlog = &copied
 	}
 
+	var res *ResourcesStatus
+	if r.resources != nil {
+		copied := *r.resources
+		res = &copied
+	} else {
+		var smp platform.Sample
+		if r.sample != nil {
+			smp = *r.sample
+		} else {
+			dataDir := ""
+			if r.cfg != nil {
+				dataDir = r.cfg.DataDir
+			}
+			smp = platform.Collect(dataDir, r.cpuSampler)
+		}
+		res = formatResources(smp)
+	}
+
+	var q *QueuesStatus
+	if r.queues != nil {
+		copied := *r.queues
+		q = &copied
+	} else {
+		q = buildQueuesStatus(vp, cloud, backlog, fe, vis)
+	}
+
 	return Snapshot{
 		Status:              r.state,
 		Version:             r.version,
@@ -268,6 +352,8 @@ func (r *Reporter) Snapshot() Snapshot {
 		Vision:              vis,
 		FullEdge:            fe,
 		LocalEventBacklog:   backlog,
+		Resources:           res,
+		Queues:              q,
 		InsecureHTTPAllowed: r.cfg.AllowInsecureHTTP,
 	}
 }
@@ -335,4 +421,153 @@ func (r *Reporter) SetLocalEventBacklogStatus(s edgebacklog.Status) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.localEventBacklog = &s
+}
+
+// SetPlatformSample records host telemetry gathered by platform.Collect (Milestone N).
+func (r *Reporter) SetPlatformSample(s platform.Sample) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	copied := s
+	r.sample = &copied
+}
+
+// SetResources records explicit whole-host resource metrics (Milestone N).
+func (r *Reporter) SetResources(res ResourcesStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	copied := res
+	r.resources = &copied
+}
+
+// SetQueues records explicit queue status (Milestone N).
+func (r *Reporter) SetQueues(q QueuesStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	copied := q
+	r.queues = &copied
+}
+
+func formatResources(s platform.Sample) *ResourcesStatus {
+	res := &ResourcesStatus{}
+	hasAny := false
+
+	if s.CPUPercent != nil {
+		res.CPU = &CPUStatus{Percent: s.CPUPercent}
+		hasAny = true
+	}
+
+	if s.MemTotalBytes > 0 {
+		mem := &MemoryStatus{TotalBytes: s.MemTotalBytes}
+		if s.MemAvailableBytes > 0 || s.MemUsedBytes > 0 {
+			avail := s.MemAvailableBytes
+			used := s.MemUsedBytes
+			mem.AvailableBytes = &avail
+			mem.UsedBytes = &used
+			pct := (float64(used) / float64(s.MemTotalBytes)) * 100.0
+			mem.UsedPercent = &pct
+		}
+		res.Memory = mem
+		hasAny = true
+	}
+
+	if s.DiskTotalBytes > 0 {
+		disk := &DiskStatus{
+			DataDir:        s.DiskDataDir,
+			TotalBytes:     s.DiskTotalBytes,
+			AvailableBytes: s.DiskAvailableBytes,
+		}
+		// Only fall back to total-used when the real metric is actually
+		// unavailable — a known 0 (disk full) must be reported as 0, not
+		// silently replaced with a number that can include root-reserved
+		// blocks.
+		if !s.DiskAvailableKnown && s.DiskTotalBytes > s.DiskUsedBytes {
+			disk.AvailableBytes = s.DiskTotalBytes - s.DiskUsedBytes
+		}
+		used := s.DiskUsedBytes
+		disk.UsedBytes = &used
+		pct := (float64(used) / float64(s.DiskTotalBytes)) * 100.0
+		disk.UsedPercent = &pct
+		res.Disk = disk
+		hasAny = true
+	}
+
+	if s.TemperatureC != nil {
+		res.Thermal = &ThermalStatus{TemperatureC: s.TemperatureC}
+		hasAny = true
+	}
+
+	if !hasAny {
+		return nil
+	}
+	return res
+}
+
+func buildQueuesStatus(
+	vp *processing.VideoPipelineSummary,
+	cloud *cloudsink.Status,
+	backlog *edgebacklog.Status,
+	fullEdge *fulledge.Status,
+	vis *vision.Status,
+) *QueuesStatus {
+	qs := &QueuesStatus{}
+	hasAny := false
+
+	if vp != nil {
+		if len(vp.RouterQueues) > 0 {
+			for _, rq := range vp.RouterQueues {
+				qs.Router = append(qs.Router, QueueComponentStatus{
+					Name:     rq.SinkName,
+					Depth:    rq.Depth,
+					Capacity: rq.Capacity,
+					Drops:    rq.Drops,
+				})
+			}
+			hasAny = true
+		}
+		if vp.CloudBuffer != nil {
+			cb := vp.CloudBuffer
+			qs.CloudBuffer = &QueueComponentStatus{
+				Name:          "cloud_buffer",
+				Depth:         cb.BufferedFrames,
+				Capacity:      cb.Capacity,
+				Drops:         cb.DroppedFull + cb.DroppedOversize,
+				OldestPending: cb.OldestPending,
+				Degraded:      cb.DroppedFull > 0,
+			}
+			hasAny = true
+		}
+	}
+
+	if backlog != nil {
+		qs.EdgeBacklog = &QueueComponentStatus{
+			Name:          "edge_backlog",
+			Depth:         backlog.BacklogCount,
+			Capacity:      backlog.Capacity,
+			Drops:         backlog.Drops,
+			OldestPending: backlog.OldestPending,
+			Degraded:      backlog.Degraded,
+			Quarantined:   backlog.Quarantined,
+		}
+		hasAny = true
+	}
+
+	if fullEdge != nil {
+		isDegraded := fullEdge.Limits.DiskSaturated || fullEdge.Limits.MemoryPressure
+		if vis != nil && (vis.Worker.State == vision.StateError || vis.Worker.State == vision.StateRestarting) {
+			isDegraded = true
+		}
+		qs.Vision = &QueueComponentStatus{
+			Name:     "vision",
+			Depth:    fullEdge.Limits.InFlightInference,
+			Capacity: fullEdge.Limits.QueueDepth,
+			Drops:    fullEdge.Limits.QueueDropped,
+			Degraded: isDegraded,
+		}
+		hasAny = true
+	}
+
+	if !hasAny {
+		return nil
+	}
+	return qs
 }

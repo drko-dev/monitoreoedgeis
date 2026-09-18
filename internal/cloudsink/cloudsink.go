@@ -332,6 +332,8 @@ func (s *CloudSink) CloudBufferStats() processing.CloudBufferStats {
 		DroppedFull:     st.DroppedFull,
 		CorruptEntries:  st.CorruptEntries,
 		DroppedOversize: int64(s.droppedOversize.Load()),
+		Capacity:        st.Capacity,
+		OldestPending:   st.OldestPending,
 	}
 }
 

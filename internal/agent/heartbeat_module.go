@@ -70,6 +70,7 @@ func newHeartbeatModule(
 
 	build := func() transport.HeartbeatRequest {
 		sample := platform.Collect(cfg.DataDir, cpu)
+		reporter.SetPlatformSample(sample)
 		sequence++
 		snap := reporter.Snapshot()
 		var cams []transport.CameraStreamStatus
