@@ -127,13 +127,19 @@ func (s *Service) ProcessInference(res InferenceResult, optFrame *processing.Fra
 	for _, det := range res.Detections {
 		if err := det.BBox.Validate(0, 0); err != nil {
 			if s.logger != nil {
-				s.logger.Warn("dropping detection with invalid bbox", slog.Any("error", err))
+				s.logger.Warn("dropping detection with invalid bbox",
+					slog.String("candidate_key", res.CandidateKey),
+					slog.String("correlation_id", res.CorrelationID),
+					slog.Any("error", err))
 			}
 			continue
 		}
 		if err := det.ValidateConfidence(); err != nil {
 			if s.logger != nil {
-				s.logger.Warn("dropping detection with invalid confidence", slog.Any("error", err))
+				s.logger.Warn("dropping detection with invalid confidence",
+					slog.String("candidate_key", res.CandidateKey),
+					slog.String("correlation_id", res.CorrelationID),
+					slog.Any("error", err))
 			}
 			continue
 		}
@@ -195,13 +201,19 @@ func (s *Service) ProcessInferenceWithJPEG(res InferenceResult, jpegBytes []byte
 	for _, det := range res.Detections {
 		if err := det.BBox.Validate(0, 0); err != nil {
 			if s.logger != nil {
-				s.logger.Warn("dropping detection with invalid bbox", slog.Any("error", err))
+				s.logger.Warn("dropping detection with invalid bbox",
+					slog.String("candidate_key", res.CandidateKey),
+					slog.String("correlation_id", res.CorrelationID),
+					slog.Any("error", err))
 			}
 			continue
 		}
 		if err := det.ValidateConfidence(); err != nil {
 			if s.logger != nil {
-				s.logger.Warn("dropping detection with invalid confidence", slog.Any("error", err))
+				s.logger.Warn("dropping detection with invalid confidence",
+					slog.String("candidate_key", res.CandidateKey),
+					slog.String("correlation_id", res.CorrelationID),
+					slog.Any("error", err))
 			}
 			continue
 		}

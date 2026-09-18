@@ -111,12 +111,13 @@ func (s *Sink) Route(f processing.Frame) error {
 	defer cancel()
 
 	result, err := s.worker.Infer(ctx, InferRequest{
-		CandidateKey: f.CandidateKey,
-		FrameSeq:     f.Seq,
-		Timestamp:    f.Timestamp,
-		Width:        f.OutputWidth,
-		Height:       f.OutputHeight,
-		JPEG:         buf.Bytes(),
+		CandidateKey:  f.CandidateKey,
+		FrameSeq:      f.Seq,
+		Timestamp:     f.Timestamp,
+		Width:         f.OutputWidth,
+		Height:        f.OutputHeight,
+		JPEG:          buf.Bytes(),
+		CorrelationID: f.CorrelationID,
 	})
 	if err != nil {
 		return fmt.Errorf("edge-vision: infer: %w", err)

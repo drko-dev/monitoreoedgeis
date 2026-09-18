@@ -1,7 +1,10 @@
 package processing
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -105,6 +108,49 @@ func TestRouter_SinkErrorDoesNotStopWorker(t *testing.T) {
 		r.Dispatch(Frame{Seq: uint64(i)})
 	}
 	time.Sleep(50 * time.Millisecond)
+}
+
+// TestRouter_SinkErrorLogsCorrelation is Hito N's targeted test for item 1
+// (structured logs): a failed sink route must log the frame's candidate_key,
+// seq and correlation_id — the identifiers needed to trace a dropped frame
+// back through RTSP -> inference -> local event -> transport — not just the
+// bare error.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func TestRouter_SinkErrorLogsCorrelation(t *testing.T) {
+	buf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(buf, nil))
+	r := NewRouter([]Sink{erroringSink{}}, 4, logger)
+	defer r.Stop()
+
+	r.Dispatch(Frame{CandidateKey: "cam-9", Seq: 7, CorrelationID: "cam-9-7"})
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(buf.String(), "sink route failed") {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	out := buf.String()
+	for _, want := range []string{"candidate_key=cam-9", "seq=7", "correlation_id=cam-9-7"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log output missing %q, got: %s", want, out)
+		}
+	}
 }
 
 // closingSink implements the optional sinkCloser hook (Milestone I6 uses

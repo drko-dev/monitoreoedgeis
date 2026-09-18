@@ -8,6 +8,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/fulledge"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
+	"github.com/drko-dev/monitoreoedgeis/internal/processing"
 )
 
 func TestReporterStartsInStarting(t *testing.T) {
@@ -163,5 +164,49 @@ func TestReporterFullEdgeStatus(t *testing.T) {
 	}
 	if snap.FullEdge.Hardware.NPU.Status != fulledge.NPUStatusMessage {
 		t.Errorf("unexpected NPU status: %s", snap.FullEdge.Hardware.NPU.Status)
+	}
+}
+
+// TestReporterVideoPipelineStatus is Hito N's targeted test for item 4
+// (status exposes the expected metrics): the real, reused frames/FPS/latency
+// counters from internal/processing (built in earlier hitos) must reach the
+// /status snapshot unchanged, with no invented precision.
+func TestReporterVideoPipelineStatus(t *testing.T) {
+	r := newTestReporter()
+	if r.Snapshot().VideoPipeline != nil {
+		t.Errorf("VideoPipeline should be nil initially")
+	}
+
+	r.SetVideoPipeline(processing.VideoPipelineSummary{
+		CameraCount: 1,
+		Cameras: []processing.PipelineStatus{
+			{
+				CandidateKey:    "cam-1",
+				State:           "running",
+				InputFPS:        15.0,
+				DecodedFPS:      14.8,
+				OutputFPS:       5.0,
+				FramesReceived:  100,
+				FramesDecoded:   98,
+				FramesSampled:   33,
+				FramesDropped:   2,
+				DecodeLatencyMs: 12.5,
+			},
+		},
+	})
+
+	snap := r.Snapshot()
+	if snap.VideoPipeline == nil {
+		t.Fatalf("expected non-nil VideoPipeline in snapshot")
+	}
+	if snap.VideoPipeline.CameraCount != 1 || len(snap.VideoPipeline.Cameras) != 1 {
+		t.Fatalf("unexpected VideoPipeline shape: %+v", snap.VideoPipeline)
+	}
+	cam := snap.VideoPipeline.Cameras[0]
+	if cam.CandidateKey != "cam-1" || cam.FramesDecoded != 98 || cam.FramesDropped != 2 {
+		t.Errorf("unexpected per-camera counters: %+v", cam)
+	}
+	if cam.DecodeLatencyMs != 12.5 {
+		t.Errorf("DecodeLatencyMs = %v, want 12.5 (real measurement, not invented)", cam.DecodeLatencyMs)
 	}
 }

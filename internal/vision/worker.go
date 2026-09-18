@@ -382,13 +382,14 @@ func (w *Worker) Infer(ctx context.Context, req InferRequest) (InferenceResult, 
 	w.inferenceCount.Add(1)
 	w.lastInferenceMs.Store(resp.InferenceMS)
 	return InferenceResult{
-		CandidateKey: req.CandidateKey,
-		FrameSeq:     resp.FrameSeq,
-		Timestamp:    req.Timestamp,
-		InferenceMS:  resp.InferenceMS,
-		Device:       w.deviceName(),
-		ModelsLoaded: w.modelsLoadedNames(),
-		Detections:   resp.Detections,
+		CandidateKey:  req.CandidateKey,
+		FrameSeq:      resp.FrameSeq,
+		Timestamp:     req.Timestamp,
+		InferenceMS:   resp.InferenceMS,
+		Device:        w.deviceName(),
+		ModelsLoaded:  w.modelsLoadedNames(),
+		Detections:    resp.Detections,
+		CorrelationID: req.CorrelationID,
 	}, nil
 }
 
