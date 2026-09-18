@@ -163,7 +163,9 @@ func TestDetectionToLocalEvent(t *testing.T) {
 	if evt.TenantID != "tenant-100" || evt.SiteID != "site-200" {
 		t.Errorf("unexpected tenant/site: %s / %s", evt.TenantID, evt.SiteID)
 	}
-	if evt.Tipo != "persona" || evt.ClassID != 0 || evt.Confidence != 0.92 {
+	// M4: the specific Label ("person") wins over the generic Tipo
+	// ("persona") when both are present.
+	if evt.Tipo != "person" || evt.ClassID != 0 || evt.Confidence != 0.92 {
 		t.Errorf("detection fields mismatch: tipo=%s class=%d conf=%f", evt.Tipo, evt.ClassID, evt.Confidence)
 	}
 	if evt.ProcessingMode != "edge" {

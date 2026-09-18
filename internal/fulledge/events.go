@@ -51,9 +51,13 @@ func NewLocalEvent(edgeID, tenantID, siteID, model string, res InferenceResult, 
 		return nil, fmt.Errorf("fulledge: generate event uuid: %w", err)
 	}
 
-	tipo := primary.Tipo
+	// M4: prefer the model's specific label (car/motorcycle/bus/truck) over
+	// the generic Tipo (person/vehicle) when the worker already provides one
+	// (deploy/vision-worker/backend.py:VEHICLE_CLASS_IDS) — never invented,
+	// just not discarded.
+	tipo := primary.Label
 	if tipo == "" {
-		tipo = primary.Label
+		tipo = primary.Tipo
 	}
 
 	return &LocalEvent{

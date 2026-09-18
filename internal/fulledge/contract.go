@@ -58,6 +58,18 @@ type LocalDetection struct {
 	BBox       BoundingBox `json:"bbox"`
 }
 
+// ValidateConfidence checks the model's real score is finite and in [0,1] —
+// it is never rounded or otherwise transformed (M5).
+func (d LocalDetection) ValidateConfidence() error {
+	if math.IsNaN(d.Confidence) || math.IsInf(d.Confidence, 0) {
+		return fmt.Errorf("fulledge: confidence is not finite: %v", d.Confidence)
+	}
+	if d.Confidence < 0 || d.Confidence > 1 {
+		return fmt.Errorf("fulledge: confidence out of range [0,1]: %v", d.Confidence)
+	}
+	return nil
+}
+
 // InferenceResult is the structured payload delivered by local YOLO inference (K1-K4).
 type InferenceResult struct {
 	CandidateKey       string           `json:"candidate_key"`
