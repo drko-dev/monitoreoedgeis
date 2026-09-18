@@ -131,6 +131,12 @@ func (s *Service) ProcessInference(res InferenceResult, optFrame *processing.Fra
 			}
 			continue
 		}
+		if err := det.ValidateConfidence(); err != nil {
+			if s.logger != nil {
+				s.logger.Warn("dropping detection with invalid confidence", slog.Any("error", err))
+			}
+			continue
+		}
 		evt, err := NewLocalEvent(s.cfg.EdgeID, s.cfg.TenantID, s.cfg.SiteID, s.cfg.ModelName, res, det, evRef)
 		if err != nil {
 			return created, fmt.Errorf("fulledge: create local event: %w", err)
@@ -190,6 +196,12 @@ func (s *Service) ProcessInferenceWithJPEG(res InferenceResult, jpegBytes []byte
 		if err := det.BBox.Validate(0, 0); err != nil {
 			if s.logger != nil {
 				s.logger.Warn("dropping detection with invalid bbox", slog.Any("error", err))
+			}
+			continue
+		}
+		if err := det.ValidateConfidence(); err != nil {
+			if s.logger != nil {
+				s.logger.Warn("dropping detection with invalid confidence", slog.Any("error", err))
 			}
 			continue
 		}

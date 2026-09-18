@@ -16,11 +16,13 @@ import (
 // fakeLocalEventSender implements transport.LocalEventSender entirely
 // in-memory, matching the pattern internal/edgebacklog's own tests use.
 type fakeLocalEventSender struct {
-	calls []string
+	calls  []string
+	events []transport.LocalEvent
 }
 
 func (s *fakeLocalEventSender) PostLocalEvent(_ context.Context, _, _ string, e transport.LocalEvent) error {
 	s.calls = append(s.calls, "metadata:"+e.EventUUID)
+	s.events = append(s.events, e)
 	return nil
 }
 
@@ -71,15 +73,19 @@ func TestFullEdgeWiring_VisionToSyncedEndToEnd(t *testing.T) {
 	consumer := newFullEdgeEventConsumer(svc, backlog, dataDir, logger)
 
 	// Fake vision inference result with one real detection — the same
-	// shape internal/vision.Sink.Route produces from a real worker.
+	// shape internal/vision.Sink.Route produces from a real worker. Uses a
+	// fixed, non-"now" frame timestamp (M2) and a vehicle detection whose
+	// Label ("car") is more specific than its Type ("vehicle") (M4), the
+	// same shape deploy/vision-worker/backend.py's VEHICLE_CLASS_IDS emits.
+	frameTimestamp := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
 	result := vision.InferenceResult{
 		CandidateKey: "cam-1",
 		FrameSeq:     42,
-		Timestamp:    time.Now(),
+		Timestamp:    frameTimestamp,
 		InferenceMS:  12.5,
 		Device:       "cpu",
 		Detections: []vision.Detection{
-			{ClassID: vision.ClassIDPerson, Label: "person", Type: vision.DetectionTypePerson, Confidence: 0.91, BBox: [4]float64{10, 20, 110, 220}},
+			{ClassID: vision.ClassIDCar, Label: "car", Type: vision.DetectionTypeVehicle, Confidence: 0.91, BBox: [4]float64{10, 20, 110, 220}},
 		},
 	}
 	fakeJPEG := []byte("fake-jpeg-bytes-not-a-real-image")
@@ -130,5 +136,26 @@ func TestFullEdgeWiring_VisionToSyncedEndToEnd(t *testing.T) {
 	}
 	if evt.SyncStatus != fulledge.SyncStatusSynced {
 		t.Fatalf("event SyncStatus = %q, want %q", evt.SyncStatus, fulledge.SyncStatusSynced)
+	}
+
+	// M2: the frame's own timestamp must survive Frame -> YOLO result ->
+	// LocalEvent -> transport.LocalEvent unchanged (RFC3339 at the wire
+	// boundary only), never replaced by time.Now().
+	if len(sender.events) == 0 {
+		t.Fatal("fake sender captured no transport.LocalEvent")
+	}
+	wireEvent := sender.events[0]
+	if wireEvent.Timestamp != frameTimestamp.UTC().Format(rfc3339Milli) {
+		t.Errorf("wire Timestamp = %q, want frame timestamp %q", wireEvent.Timestamp, frameTimestamp.UTC().Format(rfc3339Milli))
+	}
+	// M3: Edge never sends org/tenant/site/camera IDs — only what
+	// transport.LocalEvent declares.
+	if wireEvent.CandidateKey != "cam-1" {
+		t.Errorf("wire CandidateKey = %q, want cam-1", wireEvent.CandidateKey)
+	}
+	// M4: the specific label ("car") must survive to the wire Class field,
+	// not the generic Type ("vehicle").
+	if wireEvent.Class != "car" {
+		t.Errorf("wire Class = %q, want car (specific label, not generic type)", wireEvent.Class)
 	}
 }
