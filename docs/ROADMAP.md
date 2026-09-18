@@ -16,6 +16,7 @@
 | F     | DONE / MERGED         |
 | G     | DONE / VALIDATED LOCAL|
 | H     | NEXT                  |
+| O     | CODE DONE / INTEGRATED TESTED / MERGED |
 | I–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
@@ -316,6 +317,8 @@ edge-mode-only gating, model cleanup) and what remains genuinely BLOCKED
   - Estado del Agente: `/status` expone estado global (`READY` vs `DEGRADED`) y modular; fallas de stream de cámara no degradan globalmente el agente. 100% retrocompatible. Ver `docs/observability/n-resources-queues.md`.
 
 ## O — Configuración remota
+
+**HITO O — CODE DONE / INTEGRATED TESTED / MERGED**
 
 - O1–O12: config desde SaaS, versionado, push/poll, rollback, cámara, FPS,
   resolución, mode, ROI, modelos y features por plan.
