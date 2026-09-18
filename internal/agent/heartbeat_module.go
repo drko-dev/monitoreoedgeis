@@ -101,7 +101,7 @@ func newHeartbeatModule(
 			EdgeVersion:    Version,
 			UptimeSeconds:  int64(reporter.Uptime().Seconds()),
 			Architecture:   snap.Architecture,
-			ProcessingMode: cfg.ProcessingMode.String(),
+			ProcessingMode: snap.ProcessingMode,
 			HealthStatus:   snap.Status.String(),
 			BootID:         bootID,
 			SequenceNumber: sequence,

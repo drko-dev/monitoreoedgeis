@@ -21,12 +21,12 @@ const (
 // for the outbound sync it's driven by.
 type Engine struct {
 	store   *Store
-	adapter RuntimeAdapter
+	adapter Adapter
 }
 
 // NewEngine builds an Engine over store using adapter for the actual
 // runtime knobs.
-func NewEngine(store *Store, adapter RuntimeAdapter) *Engine {
+func NewEngine(store *Store, adapter Adapter) *Engine {
 	if adapter == nil {
 		adapter = NoopRuntimeAdapter{}
 	}

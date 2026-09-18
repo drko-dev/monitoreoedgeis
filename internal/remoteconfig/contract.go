@@ -15,6 +15,7 @@
 package remoteconfig
 
 import (
+	"context"
 	"encoding/json"
 )
 
@@ -67,3 +68,22 @@ const (
 	ApplyStatusFailed     ApplyStatus = "failed"
 	ApplyStatusRolledBack ApplyStatus = "rolled_back"
 )
+
+// Adapter is the minimal interface implemented by RuntimeAdapter to connect the
+// real runtime knobs (FPS, resolution, ROI, models, processing mode, ...)
+// to this engine.
+type Adapter interface {
+	ValidateRuntimeConfig(ctx context.Context, cfg Config) error
+	ApplyRuntimeConfig(ctx context.Context, cfg Config) error
+	RollbackRuntimeConfig(ctx context.Context, previous Config) error
+}
+
+// Applier defines the contract for validating, applying, and rolling back remote configuration.
+// It includes the Engine Adapter interface as well as typed convenience methods for tests/runtime.
+type Applier interface {
+	Adapter
+	Validate(cfg RuntimeConfig) error
+	Apply(ctx context.Context, cfg RuntimeConfig) error
+	Rollback(ctx context.Context) error
+	CurrentConfig() RuntimeConfig
+}

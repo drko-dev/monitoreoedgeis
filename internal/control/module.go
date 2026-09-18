@@ -250,3 +250,8 @@ func (m *Module) execute(ctx context.Context, cmd *transport.ControlCommand) (st
 
 	return state, result, code, nil
 }
+
+// ExecuteCommand executes a single control command directly (useful for tests).
+func (m *Module) ExecuteCommand(ctx context.Context, cmd *transport.ControlCommand) (string, map[string]any, string, error) {
+	return m.execute(ctx, cmd)
+}
