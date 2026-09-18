@@ -992,6 +992,34 @@ not available here):
 - Real CUDA/NPU hardware.
 - Physical benchmark.
 
+## Hito L — Control Channel Edge (L8–L10)
+
+Slice L8–L10 implements outbound-only control commands, zero-inbound connectivity, and optional site VPN compatibility.
+
+### L8 — Command Channel
+- Outbound polling via `internal/transport`:
+  - `GET /api/v1/edge/control/next` claims at most one pending command for the authenticated device.
+  - `POST /api/v1/edge/control/{command_id}/report` sends terminal status (`succeeded` / `failed`) with safe structured results.
+- `internal/control.Module`:
+  - Allowlisted safe command types: `request_status`, `rediscovery`, `restart_video_pipeline` (reported unsupported), `reload_config` (reported unsupported).
+  - Strictly empty payload validation (`INVALID_COMMAND`) to prevent remote shell or script execution.
+  - Idempotency & deduplication: client-side caching of executed command results prevents re-running duplicate commands on redelivery.
+  - Backoff on transient failures (SaaS unreachable, timeouts) and degradation on 401/403 auth errors.
+
+### L9 — Sin Inbound
+- Zero inbound listening ports for control operations.
+- All connections initiated outbound over HTTPS by the Edge client.
+- No NAT traversal, port forwarding, public IP, or customer-side inbound firewall rules required.
+
+### L10 — VPN Opcional
+- Compatible with optional site-to-site VPNs, WireGuard gateways, and Tailscale subnet routing.
+- Documented in `docs/CONTROL_CHANNEL.md`.
+- No mandatory VPN dependency.
+
+**Verification:**
+- Unit tests with `-race` on `internal/control` and `internal/transport`.
+- `go vet ./...` and `gofmt -l .` clean.
+
 ## HOW ANOTHER AI SHOULD CONTINUE
 
 1. Read `AGENTS.md`.

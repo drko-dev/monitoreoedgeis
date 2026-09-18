@@ -290,9 +290,9 @@ edge-mode-only gating, model cleanup) and what remains genuinely BLOCKED
 - L5. Retry/backoff.
 - L6. Cola offline.
 - L7. Reanudación.
-- L8. Comandos SaaS → Edge sobre conexión iniciada por Edge.
-- L9. Sin inbound requerido en cliente.
-- L10. VPN site-to-site opcional.
+- L8. Comandos SaaS → Edge sobre conexión iniciada por Edge. **CODE DONE / UNIT-TESTED** — Edge-initiated authenticated poll (`GET /api/v1/edge/control/next`) and report (`POST /api/v1/edge/control/{command_id}/report`). Allowlisted safe commands (`request_status`, `rediscovery`, `restart_video_pipeline`, `reload_config`) with empty payloads, no shell execution, client-side deduplication and safe failure reporting.
+- L9. Sin inbound requerido en cliente. **CODE DONE / DOCUMENTED** — Zero inbound ports required on Edge. No port forwarding, NAT traversal, or inbound firewall rules needed.
+- L10. VPN site-to-site opcional. **DOCUMENTED** — Documented compatibility with optional site-to-site VPNs, WireGuard gateways, and Tailscale subnet routing without introducing mandatory network tunnel dependencies.
 
 ## M — Eventos y evidencia
 

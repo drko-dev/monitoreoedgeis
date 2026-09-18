@@ -89,6 +89,10 @@ func New(cfg *config.Config) *Agent {
 	if disc != nil {
 		mods = append(mods, disc)
 	}
+	controlModule, controlErr := newControlModule(cfg, creds, reporter, disc, logging.Component(log, "control"))
+	if controlModule != nil {
+		mods = append(mods, controlModule)
+	}
 	localEvents, localEventsErr := newLocalEventsModule(cfg, creds, reporter, logging.Component(log, "local-events"))
 	if localEvents != nil {
 		mods = append(mods, localEvents)
@@ -204,6 +208,9 @@ func New(cfg *config.Config) *Agent {
 
 	a.heartbeatErr = hbErr
 	a.discoveryErr = discErr
+	if controlErr != nil {
+		a.discoveryErr = controlErr
+	}
 	a.localEventsErr = localEventsErr
 	a.modules = newModuleManager(reporter.SetModuleState, mods...)
 	return a
