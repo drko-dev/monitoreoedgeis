@@ -2,6 +2,7 @@ package processing
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -32,6 +33,10 @@ type cameraPipeline struct {
 	depack   *H264Depacketizer // owned solely by depacketizeLoop
 	sampler  *Sampler          // owned solely by readLoop
 	ring     *RingBuffer
+
+	// motion is nil unless cfg.Hybrid.Enabled; owned solely by readLoop,
+	// same as sampler (Milestone J).
+	motion *MotionDetector
 
 	// decoderFactory defaults to a real FFmpegDecoder; tests override it
 	// with a fake to exercise the pipeline without spawning ffmpeg — this
@@ -71,6 +76,20 @@ type cameraPipeline struct {
 	decoderRestarts    atomic.Int64
 	depackIncomplete   atomic.Int64
 	depackErrors       atomic.Int64
+
+	// Milestone J hybrid-filter counters. Separate from framesDropped
+	// (errors/full queues): a frame the hybrid evaluator filters out is a
+	// deliberate policy decision, never an error.
+	hybridFramesEvaluated atomic.Int64
+	hybridCandidates      atomic.Int64
+	hybridFiltered        atomic.Int64
+
+	// hybridMu guards the small bit of hybrid state Status() reads from a
+	// different goroutine than readLoop (which owns motion/sampler
+	// themselves and must never be touched concurrently).
+	hybridMu        sync.Mutex
+	hybridState     string // "idle" | "active", only meaningful when motion != nil
+	lastMotionScore float64
 }
 
 func newCameraPipeline(candidateKey string, desc rtsp.StreamDescriptor, cfg Config, router *Router, logger *slog.Logger) *cameraPipeline {
@@ -86,10 +105,14 @@ func newCameraPipeline(candidateKey string, desc rtsp.StreamDescriptor, cfg Conf
 		packetCh:     make(chan packetItem, cfg.QueueDepth),
 		auCh:         make(chan AccessUnit, cfg.QueueDepth),
 		depack:       NewH264Depacketizer(),
-		sampler:      NewSampler(cfg.TargetFPS),
+		sampler:      NewAdaptiveSampler(cfg.TargetFPS, cfg.Hybrid.IdleFPS, cfg.Hybrid.IdleAfter),
 		ring:         NewRingBuffer(cfg.RingBufferSize),
 		doneCh:       make(chan struct{}),
 		state:        "starting",
+	}
+	if cfg.Hybrid.Enabled {
+		p.motion = NewMotionDetector(cfg.Hybrid)
+		p.hybridState = "idle"
 	}
 	p.decoderFactory = func() (VideoDecoder, error) {
 		return NewFFmpegDecoder(
@@ -318,8 +341,64 @@ func (p *cameraPipeline) readLoop(ctx context.Context, dec VideoDecoder) {
 				StreamRole:       p.descriptor.StreamRole,
 				Data:             resized.Data,
 			}
+
+			dispatch := true
+			if p.motion != nil {
+				// Milestone J: análisis local liviano -> decisión
+				// candidato/no candidato, run on the Y (luma) plane of
+				// the already-resized frame (cheaper and at a fixed,
+				// configured resolution, unlike the source frame which
+				// can vary per camera).
+				yLen := resized.Width * resized.Height
+				y := resized.Data
+				if yLen < len(y) {
+					y = y[:yLen]
+				}
+				result := p.motion.Evaluate(y, resized.Width, resized.Height, resized.PipelineSeq, resized.DecodedAt)
+				p.hybridFramesEvaluated.Add(1)
+				p.sampler.NoteMotion(resized.DecodedAt, result.Candidate)
+
+				state := "active"
+				if p.sampler.IsIdle(resized.DecodedAt) {
+					state = "idle"
+				}
+				p.hybridMu.Lock()
+				p.hybridState = state
+				p.lastMotionScore = result.Score
+				p.hybridMu.Unlock()
+
+				// Connect the real local candidate decision to the transport
+				// metadata (Milestone J7-J9): every hybrid frame carries its
+				// mode, score, reason, and a deterministic correlation id so a
+				// buffered/replayed frame keeps the same id across retries.
+				f.ProcessingMode = ProcessingModeHybrid
+				f.CandidateScore = result.Score
+				f.CorrelationID = fmt.Sprintf("%s-%d", p.candidateKey, resized.PipelineSeq)
+
+				switch {
+				case result.Unevaluable:
+					// Fail-safe: the motion detector could not evaluate this
+					// frame safely. Never drop it silently -- treat it as a
+					// candidate and send it to Cloud.
+					f.CandidateReason = "failsafe_unevaluable"
+					p.hybridCandidates.Add(1)
+				case result.Candidate:
+					f.CandidateReason = "motion_detected"
+					p.hybridCandidates.Add(1)
+				default:
+					f.CandidateReason = "below_threshold"
+					p.hybridFiltered.Add(1)
+					dispatch = false
+				}
+			}
+
+			// The ring buffer is a small in-process debug/inspection
+			// buffer, never traffic sent anywhere -- Milestone J's
+			// candidate filter only governs router.Dispatch below, so it
+			// is always pushed regardless of hybrid mode.
 			p.ring.Push(f)
-			if p.router != nil {
+
+			if dispatch && p.router != nil {
 				p.router.Dispatch(f)
 			}
 		}
@@ -435,6 +514,25 @@ func (p *cameraPipeline) Status() PipelineStatus {
 
 	bufUsage, _ := p.ring.Usage()
 
+	var hybridStatus *HybridStatus
+	if p.motion != nil {
+		p.hybridMu.Lock()
+		state := p.hybridState
+		lastScore := p.lastMotionScore
+		p.hybridMu.Unlock()
+		hybridStatus = &HybridStatus{
+			Enabled:          true,
+			FramesEvaluated:  p.hybridFramesEvaluated.Load(),
+			MotionCandidates: p.hybridCandidates.Load(),
+			FramesFiltered:   p.hybridFiltered.Load(),
+			AdaptiveState:    state,
+			IdleFPS:          p.cfg.Hybrid.IdleFPS,
+			ActiveFPS:        p.cfg.TargetFPS,
+			ROICount:         len(p.cfg.Hybrid.ROIs),
+			LastMotionScore:  lastScore,
+		}
+	}
+
 	return PipelineStatus{
 		CandidateKey:       p.candidateKey,
 		State:              state,
@@ -452,5 +550,6 @@ func (p *cameraPipeline) Status() PipelineStatus {
 		BufferUsage:     bufUsage,
 		DecodeLatencyMs: latencyMs,
 		LastFrameAt:     lastFrameAt,
+		Hybrid:          hybridStatus,
 	}
 }

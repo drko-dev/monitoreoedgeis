@@ -49,13 +49,11 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full picture.
 
 ### Processing modes
 
-Modeled from day one, with no functional difference between them yet:
-
-| Mode     | Intent                                                 |
-| -------- | ------------------------------------------------------ |
-| `cloud`  | All processing in the SaaS. Agent stays minimal.        |
-| `hybrid` | Light local processing, heavy lifting in the SaaS.      |
-| `edge`   | Local inference via the (future) Python Vision Worker.  |
+| Mode     | Behavior                                                                                                                                                   |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cloud`  | All processing in the SaaS. Every sampled frame is dispatched, unfiltered.                                                                                    |
+| `hybrid` | Milestone J: a lightweight local motion evaluator runs ahead of the Router — only frames flagged as motion candidates reach the Cloud sink. Cloud remains the sole inference engine; this is not local object detection (see [docs/ROADMAP.md](docs/ROADMAP.md) for Hito K). |
+| `edge`   | Local inference via the (future) Python Vision Worker. Still modeled, no functional difference yet.                                                          |
 
 Default: `cloud`. An invalid value aborts startup with a clear error.
 
@@ -91,6 +89,12 @@ All configuration comes from environment variables:
 | `GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES` | `4`         | Max concurrent ffmpeg decode subprocesses (1–16) |
 | `GEOCAM_VIDEO_FFMPEG_PATH` | `ffmpeg`                | ffmpeg binary path, resolved via `PATH` lookup |
 | `GEOCAM_VIDEO_DECODE_TIMEOUT` | `10s`                | Decoder-related timeout bound (1s–60s) |
+| `GEOCAM_VIDEO_HYBRID_MOTION_THRESHOLD` | `8`         | Milestone J. Min per-block luma change (0–255) to count a block as "changed". No effect unless `GEOCAM_PROCESSING_MODE=hybrid` |
+| `GEOCAM_VIDEO_HYBRID_MIN_CHANGED_AREA` | `0.05`      | Milestone J. Min fraction (0–1) of evaluated blocks that must change for a frame to be a motion candidate |
+| `GEOCAM_VIDEO_HYBRID_BLOCK_SIZE` | `16`              | Milestone J. Block edge length in pixels for the block-based luma diff (4–128) |
+| `GEOCAM_VIDEO_HYBRID_ROI`  | *(empty)*               | Milestone J. `;`-separated rectangles `x_min,y_min,x_max,y_max` in normalized 0–1 coords. Empty analyzes the whole frame |
+| `GEOCAM_VIDEO_HYBRID_IDLE_FPS` | `0` (disabled)      | Milestone J. Adaptive sampling: emit rate once idle (no motion candidate for `..._IDLE_AFTER`). `0` disables adaptation |
+| `GEOCAM_VIDEO_HYBRID_IDLE_AFTER` | `5s`             | Milestone J. Time with no motion candidate before dropping to `..._IDLE_FPS`. Only meaningful when it is `>0` |
 
 No secrets or credentials are ever logged. The enrollment token and the
 device credential only ever touch: the request to the SaaS, and

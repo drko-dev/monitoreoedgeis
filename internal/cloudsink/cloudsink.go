@@ -28,6 +28,12 @@ type FrameSender interface {
 	PostFrame(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte) error
 }
 
+// MetadataFrameSender optionally extends FrameSender to deliver hybrid candidate
+// metadata (Milestone J7).
+type MetadataFrameSender interface {
+	PostFrameWithMetadata(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte, meta transport.FrameMetadata) error
+}
+
 // DefaultJPEGQuality is the standard compression quality for Cloud upload
 // (Milestone I; configurable per Milestone I7 via Config.JPEGQuality).
 const DefaultJPEGQuality = 85
@@ -404,7 +410,18 @@ func (s *CloudSink) upload(ctx context.Context, f processing.Frame, jpegBytes []
 
 	s.stats.uploadAttempted.Add(1)
 	uploadStart := time.Now()
-	err := s.sender.PostFrame(uploadCtx, s.deviceID, s.credential, f.CandidateKey, f.Seq, f.Timestamp, jpegBytes)
+	var err error
+	if ms, ok := s.sender.(MetadataFrameSender); ok {
+		meta := transport.FrameMetadata{
+			ProcessingMode:  f.ProcessingMode,
+			CandidateReason: f.CandidateReason,
+			CandidateScore:  f.CandidateScore,
+			CorrelationID:   f.CorrelationID,
+		}
+		err = ms.PostFrameWithMetadata(uploadCtx, s.deviceID, s.credential, f.CandidateKey, f.Seq, f.Timestamp, jpegBytes, meta)
+	} else {
+		err = s.sender.PostFrame(uploadCtx, s.deviceID, s.credential, f.CandidateKey, f.Seq, f.Timestamp, jpegBytes)
+	}
 	uploadLatency := time.Since(uploadStart)
 	s.stats.uploadLatencyNsSum.Add(uint64(uploadLatency.Nanoseconds()))
 	s.stats.uploadLatencySamples.Add(1)
@@ -435,10 +452,14 @@ func (s *CloudSink) publishStatus() {
 
 func (s *CloudSink) enqueue(f processing.Frame, jpegBytes []byte) error {
 	err := s.buffer.Enqueue(BufferedFrame{
-		CandidateKey: f.CandidateKey,
-		Seq:          f.Seq,
-		Timestamp:    f.Timestamp,
-		JPEG:         jpegBytes,
+		CandidateKey:    f.CandidateKey,
+		Seq:             f.Seq,
+		Timestamp:       f.Timestamp,
+		JPEG:            jpegBytes,
+		ProcessingMode:  f.ProcessingMode,
+		CandidateReason: f.CandidateReason,
+		CandidateScore:  f.CandidateScore,
+		CorrelationID:   f.CorrelationID,
 	})
 	if err != nil {
 		return fmt.Errorf("cloudsink: %w", err)
@@ -530,7 +551,15 @@ func (s *CloudSink) drainLoop(ctx context.Context) {
 			}
 		}
 
-		err = s.upload(ctx, processing.Frame{CandidateKey: f.CandidateKey, Seq: f.Seq, Timestamp: f.Timestamp}, f.JPEG)
+		err = s.upload(ctx, processing.Frame{
+			CandidateKey:    f.CandidateKey,
+			Seq:             f.Seq,
+			Timestamp:       f.Timestamp,
+			ProcessingMode:  f.ProcessingMode,
+			CandidateReason: f.CandidateReason,
+			CandidateScore:  f.CandidateScore,
+			CorrelationID:   f.CorrelationID,
+		}, f.JPEG)
 
 		switch {
 		case err == nil:

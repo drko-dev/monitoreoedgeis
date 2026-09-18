@@ -101,6 +101,10 @@ func New(cfg *config.Config) *Agent {
 		// stops them in reverse, so the video pipeline starts after RTSP
 		// connectivity exists and stops before it is torn down.
 		if cfg.VideoPipelineEnabled {
+			hybridROIs := make([]processing.ROI, len(cfg.HybridROIs))
+			for i, r := range cfg.HybridROIs {
+				hybridROIs[i] = processing.ROI{XMin: r.XMin, YMin: r.YMin, XMax: r.XMax, YMax: r.YMax}
+			}
 			procCfg := processing.Config{
 				Enabled:                true,
 				TargetFPS:              cfg.VideoTargetFPS,
@@ -112,6 +116,19 @@ func New(cfg *config.Config) *Agent {
 				MaxConcurrentPipelines: cfg.VideoMaxConcurrentPipelines,
 				FFmpegPath:             cfg.VideoFFmpegPath,
 				DecodeTimeout:          cfg.VideoDecodeTimeout,
+				// Hybrid.Enabled ties to ProcessingMode, not a separate
+				// knob (Milestone J1): cloud mode gets zero behavior
+				// change since cameraPipeline only builds a
+				// MotionDetector/adaptive Sampler when this is true.
+				Hybrid: processing.HybridConfig{
+					Enabled:         cfg.ProcessingMode == config.ModeHybrid,
+					MotionThreshold: cfg.HybridMotionThreshold,
+					MinChangedArea:  cfg.HybridMinChangedArea,
+					BlockSize:       cfg.HybridBlockSize,
+					ROIs:            hybridROIs,
+					IdleFPS:         cfg.HybridIdleFPS,
+					IdleAfter:       cfg.HybridIdleAfter,
+				},
 			}
 			var extraSinks []processing.Sink
 			if cs := newCloudSink(cfg, creds, reporter, log); cs != nil {

@@ -1124,3 +1124,102 @@ func TestCloudSink_Race_ConcurrentRouteAndDrain(t *testing.T) {
 	wg.Wait()
 	s.Close()
 }
+
+type fakeMetadataSender struct {
+	fakeSender
+	gotMeta transport.FrameMetadata
+}
+
+func (f *fakeMetadataSender) PostFrameWithMetadata(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte, meta transport.FrameMetadata) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.gotDeviceID = deviceID
+	f.gotCredential = credential
+	f.gotCandidate = candidateKey
+	f.gotSeq = seq
+	f.gotCapturedAt = capturedAt
+	f.gotJPEG = append([]byte(nil), jpeg...)
+	f.gotMeta = meta
+	return f.err
+}
+
+func TestCloudSink_HybridCandidate_DirectUpload(t *testing.T) {
+	sender := &fakeMetadataSender{}
+	s := New(sender, "dev-1", "cred-1", Config{}, slog.Default(), nil)
+	defer s.Close()
+
+	frame := testFrame("cam-1", 99)
+	frame.ProcessingMode = "hybrid"
+	frame.CandidateReason = "motion_detected"
+	frame.CandidateScore = 0.8877
+	frame.CorrelationID = "corr-test-123"
+
+	if err := s.Route(frame); err != nil {
+		t.Fatalf("Route() error: %v", err)
+	}
+
+	if sender.gotMeta.ProcessingMode != "hybrid" {
+		t.Errorf("got ProcessingMode=%q, want 'hybrid'", sender.gotMeta.ProcessingMode)
+	}
+	if sender.gotMeta.CandidateReason != "motion_detected" {
+		t.Errorf("got CandidateReason=%q, want 'motion_detected'", sender.gotMeta.CandidateReason)
+	}
+	if sender.gotMeta.CandidateScore != 0.8877 {
+		t.Errorf("got CandidateScore=%f, want 0.8877", sender.gotMeta.CandidateScore)
+	}
+	if sender.gotMeta.CorrelationID != "corr-test-123" {
+		t.Errorf("got CorrelationID=%q, want 'corr-test-123'", sender.gotMeta.CorrelationID)
+	}
+}
+
+func TestCloudSink_HybridCandidate_BufferedAndReplayed(t *testing.T) {
+	drainPollInterval = 5 * time.Millisecond
+	t.Cleanup(func() { drainPollInterval = 2 * time.Second })
+
+	sender := &fakeMetadataSender{fakeSender: fakeSender{err: transport.ErrSaaSUnavailable}}
+	s, _ := newBufferedSink(t, sender, 50)
+	defer s.Close()
+
+	frame := testFrame("cam-buffered", 101)
+	frame.ProcessingMode = "hybrid"
+	frame.CandidateReason = "classifier"
+	frame.CandidateScore = 0.95
+	frame.CorrelationID = "corr-buffered-999"
+
+	if err := s.Route(frame); err != nil {
+		t.Fatalf("Route() unexpected error: %v", err)
+	}
+
+	// Now allow replay
+	sender.mu.Lock()
+	sender.err = nil
+	sender.mu.Unlock()
+
+	// Wait for replay
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sender.mu.Lock()
+		calls := sender.calls
+		sender.mu.Unlock()
+		if calls >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if sender.gotMeta.ProcessingMode != "hybrid" {
+		t.Errorf("replayed ProcessingMode=%q, want 'hybrid'", sender.gotMeta.ProcessingMode)
+	}
+	if sender.gotMeta.CandidateReason != "classifier" {
+		t.Errorf("replayed CandidateReason=%q, want 'classifier'", sender.gotMeta.CandidateReason)
+	}
+	if sender.gotMeta.CandidateScore != 0.95 {
+		t.Errorf("replayed CandidateScore=%f, want 0.95", sender.gotMeta.CandidateScore)
+	}
+	if sender.gotMeta.CorrelationID != "corr-buffered-999" {
+		t.Errorf("replayed CorrelationID=%q, want 'corr-buffered-999'", sender.gotMeta.CorrelationID)
+	}
+}

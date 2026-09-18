@@ -25,20 +25,28 @@ var ErrBufferFull = errors.New("cloudsink: buffer full")
 // raw JPEG bytes. It never carries deviceID or credential: those are read
 // fresh from CloudSink at replay time, never persisted to disk.
 type bufferMeta struct {
-	CandidateKey string    `json:"candidate_key"`
-	Seq          uint64    `json:"seq"`
-	Timestamp    time.Time `json:"timestamp"`
-	Size         int       `json:"size"`
+	CandidateKey    string    `json:"candidate_key"`
+	Seq             uint64    `json:"seq"`
+	Timestamp       time.Time `json:"timestamp"`
+	Size            int       `json:"size"`
+	ProcessingMode  string    `json:"processing_mode,omitempty"`
+	CandidateReason string    `json:"candidate_reason,omitempty"`
+	CandidateScore  float64   `json:"candidate_score,omitempty"`
+	CorrelationID   string    `json:"correlation_id,omitempty"`
 }
 
 // BufferedFrame is one frame recovered from, or about to enter, the offline
 // spool. It carries the already-encoded JPEG (the exact bytes that would
 // have been uploaded), never the raw yuv420p.
 type BufferedFrame struct {
-	CandidateKey string
-	Seq          uint64
-	Timestamp    time.Time
-	JPEG         []byte
+	CandidateKey    string
+	Seq             uint64
+	Timestamp       time.Time
+	JPEG            []byte
+	ProcessingMode  string
+	CandidateReason string
+	CandidateScore  float64
+	CorrelationID   string
 }
 
 // BufferStats is a point-in-time snapshot of I6 metrics.
@@ -286,7 +294,16 @@ func (b *Buffer) Stats() BufferStats {
 // (including a future recovery pass) never observes a partially written
 // entry.
 func writeAtomic(finalPath string, f BufferedFrame) error {
-	meta := bufferMeta{CandidateKey: f.CandidateKey, Seq: f.Seq, Timestamp: f.Timestamp, Size: len(f.JPEG)}
+	meta := bufferMeta{
+		CandidateKey:    f.CandidateKey,
+		Seq:             f.Seq,
+		Timestamp:       f.Timestamp,
+		Size:            len(f.JPEG),
+		ProcessingMode:  f.ProcessingMode,
+		CandidateReason: f.CandidateReason,
+		CandidateScore:  f.CandidateScore,
+		CorrelationID:   f.CorrelationID,
+	}
 	header, err := json.Marshal(meta)
 	if err != nil {
 		return fmt.Errorf("cloudsink: encode buffer header: %w", err)
@@ -341,9 +358,13 @@ func readEntry(path string) (BufferedFrame, error) {
 			path, meta.Size, len(payload))
 	}
 	return BufferedFrame{
-		CandidateKey: meta.CandidateKey,
-		Seq:          meta.Seq,
-		Timestamp:    meta.Timestamp,
-		JPEG:         append([]byte(nil), payload...),
+		CandidateKey:    meta.CandidateKey,
+		Seq:             meta.Seq,
+		Timestamp:       meta.Timestamp,
+		JPEG:            append([]byte(nil), payload...),
+		ProcessingMode:  meta.ProcessingMode,
+		CandidateReason: meta.CandidateReason,
+		CandidateScore:  meta.CandidateScore,
+		CorrelationID:   meta.CorrelationID,
 	}, nil
 }

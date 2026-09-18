@@ -21,14 +21,22 @@ const cloudBufferDirName = "cloud-buffer"
 // when this Edge has nothing to push frames to or isn't configured for cloud
 // processing.
 //
-// Gated on cfg.ProcessingMode == config.ModeCloud (not a separate env var):
-// this reuses the mode the Edge already reports in every heartbeat, rather
-// than adding a second knob that could disagree with it. A camera the SaaS
-// has linked to this device (edge_device_cameras) only receives Edge-push
-// frames while this Edge itself is configured for cloud processing — never
-// both RTSP-pull (SaaS-side, legacy) and Edge-push for the same camera.
+// Gated on cfg.ProcessingMode being ModeCloud or ModeHybrid (not a separate
+// env var): this reuses the mode the Edge already reports in every
+// heartbeat, rather than adding a second knob that could disagree with it.
+// A camera the SaaS has linked to this device (edge_device_cameras) only
+// receives Edge-push frames while this Edge itself is configured for cloud
+// or hybrid processing — never both RTSP-pull (SaaS-side, legacy) and
+// Edge-push for the same camera.
+//
+// In ModeHybrid, CloudSink stays exactly what it was in ModeCloud: Cloud
+// remains the sole inference engine, and this sink has no idea frames were
+// pre-filtered. The filtering itself (Milestone J's local motion
+// evaluator) lives entirely upstream, in
+// internal/processing.cameraPipeline.readLoop, ahead of router.Dispatch —
+// never here.
 func newCloudSink(cfg *config.Config, creds credentials.Credentials, reporter *health.Reporter, log *slog.Logger) processing.Sink {
-	if cfg.ProcessingMode != config.ModeCloud {
+	if cfg.ProcessingMode != config.ModeCloud && cfg.ProcessingMode != config.ModeHybrid {
 		return nil
 	}
 	if cfg.SaaSURL == "" {

@@ -803,6 +803,87 @@ darwin only, no docker daemon either):
 - No installation happened on any real or virtual machine. No production
   infrastructure (Dattaweb/Hostinger/Geo Multa) was touched or referenced.
 
+## Hito J — Hybrid Core (J1–J11) — INTEGRATED, CODE DONE / TESTED
+
+**MERGED into `integration/hito-j-final`** from three independent branches
+(`feature/hybrid-core-j1-j5`, `feature/hybrid-candidate-transport-j6-j9`,
+`feature/hybrid-benchmark-j10-j11`), plus the integration fixes below that
+connect them end-to-end. Status per sub-milestone:
+
+- **J1–J5 (local motion filter, ROI, adaptive sampling): DONE.**
+  `processing_mode=hybrid` runs a lightweight local motion evaluator
+  (`internal/processing.MotionDetector`) in `cameraPipeline.readLoop`,
+  ahead of `Router.Dispatch`. Only frames flagged as motion candidates are
+  dispatched — including to the Cloud sink, which is unchanged and remains
+  the sole inference engine. `processing_mode=cloud` behavior is
+  byte-for-byte unchanged (no `MotionDetector`, no sampling change) when
+  `Config.Hybrid.Enabled == false` (zero value). Motion algorithm:
+  block-based luminance diff on the yuv420p Y plane, bounded to exactly one
+  prior frame (no history). ROI via `GEOCAM_VIDEO_HYBRID_ROI`. Adaptive
+  sampling via `NewAdaptiveSampler(activeFPS, idleFPS, idleAfter)`, fed by
+  the motion evaluator's candidate decisions. Telemetry in
+  `PipelineStatus.hybrid`. New env vars documented in `README.md` and
+  `internal/config/config.go`.
+
+- **J6 (Lightweight Classifier Adapter): ADAPTER DONE / real model
+  PENDING (intentional).** Decoupled `CandidateClassifier` interface,
+  `ClassificationResult`, and `NoopClassifier` in `internal/hybrid`. No real
+  model is integrated in this hito — the adapter exists so Hito K (or a
+  later slice) can plug one in without touching the transport path.
+
+- **J7–J9 (candidate metadata end-to-end): DONE.** The real local
+  candidate decision from J1–J5 is now connected to the transport metadata
+  from J6–J7: `cameraPipeline.readLoop` sets `Frame.ProcessingMode`,
+  `CandidateScore`, `CandidateReason`, and a deterministic
+  `CorrelationID` (`"<candidateKey>-<seq>"`, stable across offline-buffer
+  replay) on every hybrid frame before it reaches the ring buffer and
+  `Router.Dispatch`. `CandidateReason` is `"motion_detected"`,
+  `"below_threshold"`, or the fail-safe value below. In cloud mode
+  (`p.motion == nil`), `ProcessingMode` stays at its zero value (`""`), so
+  standard cloud sampling is unaffected. `internal/cloudsink` and
+  `internal/transport.Client` (`PostFrameWithMetadata`, headers
+  `X-Processing-Mode` / `X-Candidate-Reason` / `X-Candidate-Score` /
+  `X-Correlation-Id`) already carried this metadata through the offline
+  buffer and HTTP upload; this integration is what makes them carry *real*
+  values instead of always the zero value.
+  - **Fail-safe (integration fix)**: `MotionDetector.Evaluate` now reports
+    `MotionResult.Unevaluable` when a frame cannot be analyzed safely (bad
+    dimensions or a too-short buffer), instead of silently reporting "no
+    motion". `cameraPipeline.readLoop` treats an unevaluable frame as a
+    candidate unconditionally (`CandidateReason = "failsafe_unevaluable"`,
+    counted in `MotionCandidates`, never `FramesFiltered`) so a transient
+    local-analysis error never drops a frame that should have gone to
+    Cloud. Covered by
+    `TestPipeline_HybridFailSafeDispatchesUnevaluableFrame`.
+
+- **J10–J11 (bandwidth benchmark harness): HARNESS DONE.**
+  `internal/cameratest/hybrid_bandwidth_bench_test.go` (build tag
+  `localbench`) is a controlled-replay loopback benchmark comparing a Cloud
+  baseline against a **synthetic selectivity** candidate pattern (fixed
+  `i%3==0`, explicitly NOT the real J1–J5 motion algorithm), with exact
+  server-side byte accounting and results labeled as synthetic throughout
+  (`docs/performance/hybrid-j10-j11.md`). Candidate selection is factored
+  through a swappable `selectSyntheticCandidates` so a future benchmark can
+  inject the real `MotionResult.Candidate` decision without touching the
+  rest of the harness — not done in this hito.
+
+**HITO J = CODE DONE / INTEGRATED / TESTED.** `go build ./...`,
+`go test ./...`, `go test -race ./...`, `go vet ./...`, `gofmt -l .`, and
+`make build-linux` (linux/amd64 + linux/arm64, `CGO_ENABLED=0`) all pass
+clean on the merged `integration/hito-j-final` branch.
+
+**Pending, not blocking this close** (depends on hardware/environment not
+available in this sandbox):
+- Real TC70/RTSP camera validation of the motion detector and candidate
+  pipeline end-to-end.
+- Real bandwidth measurement against physical hardware (J10–J11's harness
+  is controlled-replay/synthetic only; **REAL CAMERA = BLOCKED /
+  NOT_EXECUTED**, no RTSP capture path in the benchmark harness).
+- Real detection-frame retention/precision measurement (J11's
+  precision/recall proxy is not validated against live footage).
+- A real optional classifier model behind the J6 `CandidateClassifier`
+  adapter (Hito K scope).
+
 ## HOW ANOTHER AI SHOULD CONTINUE
 
 1. Read `AGENTS.md`.
