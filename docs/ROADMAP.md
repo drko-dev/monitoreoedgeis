@@ -290,9 +290,9 @@ edge-mode-only gating, model cleanup) and what remains genuinely BLOCKED
 - L5. Retry/backoff. CODE DONE — Unified error classification & backoff across transport channels (`internal/transport`: Heartbeat, Discovery, Cloud frames, Hybrid candidates, Local events/evidence). 429 parses and honors `Retry-After` delta-seconds via `RateLimitError`. 401/403 preserves durable data, avoids aggressive retries and never auto-reenrolls or wipes credentials.
 - L6. Cola offline. CODE DONE — Verified dual-channel bounded disk storage without artificial merging: `internal/cloudsink.Buffer` (Cloud/Hybrid video frames) and `internal/edgebacklog.Backlog` (Full Edge events/evidence). Bounded capacities, atomic writes, restart-safe, drop-tail metrics.
 - L7. Reanudación. CODE DONE — Deterministic replay upon reconnection. Cloud/Hybrid preserves metadata and `CorrelationID`; Full Edge replays in strict sequence (`metadata` -> `capture` -> `clip` -> `complete`), idempotency preserved, quarantine on unrecoverable 4xx, and clean cancellation on agent shutdown.
-- L8. Comandos SaaS → Edge sobre conexión iniciada por Edge.
-- L9. Sin inbound requerido en cliente.
-- L10. VPN site-to-site opcional.
+- L8. Comandos SaaS → Edge sobre conexión iniciada por Edge. CODE DONE — Edge-initiated authenticated poll (`GET /api/v1/edge/control/next`) and report (`POST /api/v1/edge/control/{command_id}/report`). Safe allowlist (`request_status`, `rediscovery`), durable ledger under `control_ledger.json` with fail-closed and `INDETERMINATE_AFTER_RESTART` on interrupted execution.
+- L9. Sin inbound requerido en cliente. CODE DONE — Zero inbound ports required on Edge. No port forwarding, NAT traversal, or inbound firewall rules needed.
+- L10. VPN site-to-site opcional. DOCUMENTED — Documented compatibility with optional site-to-site VPNs, WireGuard gateways, and Tailscale subnet routing without introducing mandatory network tunnel dependencies.
 
 ## M — Eventos y evidencia
 
