@@ -35,7 +35,50 @@ var (
 	// ErrUnexpectedStatus, which stays non-retryable — see PostFrame.
 	ErrRetryableStatus  = errors.New("transport: SaaS reported a retryable failure")
 	ErrUnexpectedStatus = errors.New("transport: unexpected response from SaaS")
+
+	// ErrRateLimited is returned for HTTP 429. Callers should honour the
+	// RetryAfter carried by RateLimitError rather than applying their own backoff
+	// when the server stated one.
+	ErrRateLimited = errors.New("transport: rate limited by SaaS")
 )
+
+// RateLimitError carries the server-stated cooldown from a 429 response.
+// RetryAfter is zero when the response omitted or malformed the header.
+// It implements Is to match both ErrRateLimited and ErrRetryableStatus.
+type RateLimitError struct {
+	RetryAfter time.Duration
+}
+
+func (e *RateLimitError) Error() string {
+	if e.RetryAfter > 0 {
+		return fmt.Sprintf("%v (retry after %s)", ErrRateLimited, e.RetryAfter)
+	}
+	return ErrRateLimited.Error()
+}
+
+func (e *RateLimitError) Unwrap() error { return ErrRateLimited }
+
+func (e *RateLimitError) Is(target error) bool {
+	return target == ErrRateLimited || target == ErrRetryableStatus
+}
+
+// parseRetryAfter reads a Retry-After header in its delta-seconds form, the
+// only form the SaaS emits. An absent, malformed or negative value yields 0,
+// which tells the caller to fall back to its own backoff.
+func parseRetryAfter(h http.Header) time.Duration {
+	if h == nil {
+		return 0
+	}
+	raw := h.Get("Retry-After")
+	if raw == "" {
+		return 0
+	}
+	secs, err := strconv.Atoi(raw)
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
+}
 
 // DefaultTimeout is used when the caller does not set a positive timeout.
 const DefaultTimeout = 10 * time.Second
@@ -275,19 +318,27 @@ func (c *Client) PostFrameWithMetadata(ctx context.Context, deviceID, credential
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 
-	return classifyFrameStatus(resp.StatusCode)
+	return classifyFrameStatusWithHeader(resp.StatusCode, resp.Header)
 }
 
 // classifyFrameStatus maps a PostFrame HTTP status to a sentinel error by
 // status code alone — never by inferring from the response body — so
 // cloudsink's I6 offline buffer can tell a transient failure (worth
 // spooling for retry) from a permanent one (never worth retrying, buffered
-// or not):
+// or not).
+func classifyFrameStatus(status int) error {
+	return classifyFrameStatusWithHeader(status, nil)
+}
+
+// classifyFrameStatusWithHeader maps an HTTP status and optional headers
+// (notably Retry-After) to sentinel errors.
 //
 //   - 200/202: success, nil.
 //   - 401/403: ErrUnauthorized — the credential itself is rejected; no
 //     retry, buffered or not, will succeed until an operator fixes it.
-//   - 408/429/5xx: ErrRetryableStatus — the SaaS is explicitly telling us
+//   - 429: &RateLimitError{RetryAfter: ...} (matches ErrRateLimited and
+//     ErrRetryableStatus via Is).
+//   - 408/5xx: ErrRetryableStatus — the SaaS is explicitly telling us
 //     (or failing in a way that implies) this exact request may succeed
 //     later.
 //   - Any other 4xx (400/404/409/413/422/...): ErrInvalidRequest — the
@@ -295,13 +346,15 @@ func (c *Client) PostFrameWithMetadata(ctx context.Context, deviceID, credential
 //     would just repeat the same rejection forever.
 //   - Anything else (e.g. an unexpected 1xx/3xx): ErrUnexpectedStatus,
 //     treated as non-retryable since this package cannot say what it means.
-func classifyFrameStatus(status int) error {
+func classifyFrameStatusWithHeader(status int, header http.Header) error {
 	switch {
 	case status == http.StatusAccepted || status == http.StatusOK:
 		return nil
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
 		return fmt.Errorf("%w (status %d)", ErrUnauthorized, status)
-	case status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500:
+	case status == http.StatusTooManyRequests:
+		return &RateLimitError{RetryAfter: parseRetryAfter(header)}
+	case status == http.StatusRequestTimeout || status >= 500:
 		return fmt.Errorf("%w (status %d)", ErrRetryableStatus, status)
 	case status >= 400:
 		return fmt.Errorf("%w (status %d)", ErrInvalidRequest, status)

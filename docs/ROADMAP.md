@@ -283,21 +283,13 @@ edge-mode-only gating, model cleanup) and what remains genuinely BLOCKED
 
 ## L — Transporte seguro Edge ↔ SaaS
 
-- L1. HTTPS 443 — CODE DONE (`feature/secure-transport-l1-l4`, not merged).
-  Enforced/centralized in `internal/transport.New` +
-  `internal/config.Load` fail-fast; `GEOCAM_ALLOW_INSECURE_HTTP` is the
-  only escape hatch. See `docs/PROJECT_STATUS.md`.
+- L1. HTTPS 443 — CODE DONE. Enforced/centralized in `internal/transport.New` + `internal/config.Load` fail-fast; `GEOCAM_ALLOW_INSECURE_HTTP` is the only escape hatch.
 - L2. WSS si corresponde — N/A: no WebSocket channel exists in this repo.
-- L3. Auth por Edge — CODE DONE. Verified uniform Bearer + X-Device-Id
-  across every Edge→SaaS call; org_id/camera_id never trusted from Edge;
-  no credential/token ever logged.
-- L4. TLS — CODE DONE. stdlib default cert/hostname validation (no
-  `InsecureSkipVerify`, no custom `tls.Config`), bounded HTTP timeouts;
-  insecure-HTTP dev flag now visible on `/status`
-  (`insecure_http_allowed`).
-- L5. Retry/backoff.
-- L6. Cola offline.
-- L7. Reanudación.
+- L3. Auth por Edge — CODE DONE. Verified uniform Bearer + X-Device-Id across every Edge→SaaS call; org_id/camera_id never trusted from Edge; no credential/token ever logged.
+- L4. TLS — CODE DONE. stdlib default cert/hostname validation (no `InsecureSkipVerify`, no custom `tls.Config`), bounded HTTP timeouts; insecure-HTTP dev flag visible on `/status` (`insecure_http_allowed`).
+- L5. Retry/backoff. CODE DONE — Unified error classification & backoff across transport channels (`internal/transport`: Heartbeat, Discovery, Cloud frames, Hybrid candidates, Local events/evidence). 429 parses and honors `Retry-After` delta-seconds via `RateLimitError`. 401/403 preserves durable data, avoids aggressive retries and never auto-reenrolls or wipes credentials.
+- L6. Cola offline. CODE DONE — Verified dual-channel bounded disk storage without artificial merging: `internal/cloudsink.Buffer` (Cloud/Hybrid video frames) and `internal/edgebacklog.Backlog` (Full Edge events/evidence). Bounded capacities, atomic writes, restart-safe, drop-tail metrics.
+- L7. Reanudación. CODE DONE — Deterministic replay upon reconnection. Cloud/Hybrid preserves metadata and `CorrelationID`; Full Edge replays in strict sequence (`metadata` -> `capture` -> `clip` -> `complete`), idempotency preserved, quarantine on unrecoverable 4xx, and clean cancellation on agent shutdown.
 - L8. Comandos SaaS → Edge sobre conexión iniciada por Edge.
 - L9. Sin inbound requerido en cliente.
 - L10. VPN site-to-site opcional.

@@ -29,11 +29,11 @@ type LocalEventSender interface {
 }
 
 func (c *Client) PostLocalEvent(ctx context.Context, deviceID, credential string, event LocalEvent) error {
-	status, _, _, err := c.do(ctx, http.MethodPost, LocalEventsPath, deviceID, credential, event)
+	status, header, _, err := c.do(ctx, http.MethodPost, LocalEventsPath, deviceID, credential, event)
 	if err != nil {
 		return err
 	}
-	return classifyLocalEventStatus(status)
+	return classifyLocalEventStatus(status, header)
 }
 
 // PutLocalEventEvidence uploads raw JPEG or supported clip bytes. checksum is
@@ -63,14 +63,14 @@ func (c *Client) PutLocalEventEvidence(ctx context.Context, deviceID, credential
 		return fmt.Errorf("%w: PUT %s: %w", ErrSaaSUnavailable, path, err)
 	}
 	defer resp.Body.Close()
-	return classifyLocalEventStatus(resp.StatusCode)
+	return classifyLocalEventStatus(resp.StatusCode, resp.Header)
 }
 
-func classifyLocalEventStatus(status int) error {
+func classifyLocalEventStatus(status int, header http.Header) error {
 	if status == http.StatusCreated || status == http.StatusOK {
 		return nil
 	}
-	return classifyFrameStatus(status)
+	return classifyFrameStatusWithHeader(status, header)
 }
 
 // MarshalLocalEvent is useful to durable stores that need the exact metadata

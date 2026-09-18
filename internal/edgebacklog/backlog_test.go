@@ -48,7 +48,12 @@ func submission(t *testing.T, dir, id string) Submission {
 }
 func open(t *testing.T, dir string) *Backlog {
 	t.Helper()
-	b, err := Open(Config{Dir: dir, MaxOperations: 2, MaxBytes: 1024, RetryBase: time.Millisecond, RetryMax: time.Millisecond})
+	return openWithConfig(t, dir, time.Millisecond, time.Millisecond)
+}
+
+func openWithConfig(t *testing.T, dir string, retryBase, retryMax time.Duration) *Backlog {
+	t.Helper()
+	b, err := Open(Config{Dir: dir, MaxOperations: 2, MaxBytes: 1024, RetryBase: retryBase, RetryMax: retryMax})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,5 +148,33 @@ func TestBacklogBoundedAndShutdown(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("Run did not stop cleanly")
+	}
+}
+
+func TestBacklogRateLimitErrorWithRetryAfter(t *testing.T) {
+	d := t.TempDir()
+	b := openWithConfig(t, d, 100*time.Millisecond, time.Second)
+	if err := b.Enqueue(submission(t, d, "rate-limited")); err != nil {
+		t.Fatal(err)
+	}
+
+	rle := &transport.RateLimitError{RetryAfter: 250 * time.Millisecond}
+	s := &sender{errs: []error{rle}}
+
+	before := time.Now()
+	b.ProcessOne(context.Background(), s, "d", "c")
+
+	// Immediate next attempt should return false because NextAttempt is in the future
+	if b.ProcessOne(context.Background(), s, "d", "c") {
+		t.Fatal("ProcessOne should return false while backed off due to Retry-After")
+	}
+
+	b.mu.Lock()
+	nextAttempt := b.queue[0].NextAttempt
+	b.mu.Unlock()
+
+	expectedMin := before.Add(240 * time.Millisecond)
+	if nextAttempt.Before(expectedMin) {
+		t.Errorf("NextAttempt %v is before expected min %v", nextAttempt, expectedMin)
 	}
 }

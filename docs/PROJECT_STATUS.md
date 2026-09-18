@@ -994,9 +994,7 @@ not available here):
 
 ## HITO L1–L4 — Transporte seguro Edge ↔ SaaS — CODE DONE
 
-**Branch `feature/secure-transport-l1-l4`, based on `main` (45c8232). Not
-merged, not deployed.** Hardening pass over transport already built in
-prior hitos (C, D, E, I, J, K) — no rearchitecture, no new endpoints.
+**Hardening pass over transport already built in prior hitos (C, D, E, I, J, K) — no rearchitecture, no new endpoints.**
 
 - **L1 — HTTPS enforced.** All Edge→SaaS traffic (enrollment, heartbeat,
   discovery, Cloud/Hybrid frames, Full Edge local events, credential
@@ -1036,15 +1034,28 @@ prior hitos (C, D, E, I, J, K) — no rearchitecture, no new endpoints.
   (`internal/health.Snapshot.InsecureHTTPAllowed`,
   `internal/health/health.go`) — omitted (false) unless actually active.
 
-**Tests (targeted only)**:
-- `go test ./internal/transport/... ./internal/config/... ./internal/health/... ./internal/agent/...` — clean
-- `go test -race` on the same packages — clean
-- `go vet` on the same packages — clean; `gofmt -l` on touched files — clean
-- `go build ./...` — clean (full-repo compile check only)
+## Hito L — Resiliencia de Transporte (L5–L7)
 
-**HITO L1–L4 = CODE DONE. NOT MERGED, NOT DEPLOYED.** No mTLS added (not
-required by the current architecture). No new certificates, domains, or
-infrastructure introduced.
+Slice L5–L7 focuses on transport error classification, unified retry/backoff, bounded offline spooling, and deterministic resumption without inventing redundant retry or queue frameworks.
+
+### L5 — Retry and Backoff
+- Unification of transport error classifications (`internal/transport`):
+  - **Recoverable:** Network timeout (`ErrTimeout`), unreachable SaaS (`ErrSaaSUnavailable`), HTTP 408 / 5xx (`ErrRetryableStatus`), and HTTP 429 (`RateLimitError` matching both `ErrRateLimited` and `ErrRetryableStatus`).
+  - **Permanent:** Bad payloads / client validation errors (HTTP 400, 404, 409, 413, 422 -> `ErrInvalidRequest`), unexpected status codes -> `ErrUnexpectedStatus`.
+  - **Auth:** HTTP 401/403 (`ErrUnauthorized`) preserves durable frames and events on disk, halts aggressive retry storms, and forbids auto-reenrollment or credential deletion.
+  - **429 Rate Limiting:** Parses `Retry-After` (delta-seconds) in `internal/transport` across all endpoints (`Heartbeat`, `PostFrameWithMetadata`, `PostLocalEvent`, `PutLocalEventEvidence`, `Discovery`).
+  - Respected by callers: `internal/cloudsink` and `internal/edgebacklog` use server-provided `RetryAfter` cooldown when available, bounded by max backoff.
+
+### L6 — Offline Queues
+- Reused existing storage primitives without merging distinct operational concerns:
+  - **Cloud/Hybrid video queue:** `internal/cloudsink.Buffer` (FIFO ring buffer of JPEGs with metadata, bounded capacity, atomic write, drop-tail when full, honest metrics).
+  - **Full Edge events/evidence queue:** `internal/edgebacklog.Backlog` (durable JSON event records and raw evidence files, bounded operations and bytes, atomic temp-rename writes, crash-consistent).
+  - Validated bounded storage, disk leak protection, and metric fidelity.
+
+### L7 — Resumption and Reconnection
+- Deterministic replay behavior on reconnection:
+  - **Cloud/Hybrid:** Replays pending frames in order via rate limiter (`limiter.Wait`), retaining original `CorrelationID`, `CandidateReason`, `CandidateScore`, and `ProcessingMode`.
+  - **Full Edge:** Replays event stages strictly in order (`metadata` -> `capture` -> `clip` -> `complete`), ensuring idempotency, quarantining permanent 4xx failures, and gracefully cancelling without data loss on process shutdown.
 
 ## HOW ANOTHER AI SHOULD CONTINUE
 

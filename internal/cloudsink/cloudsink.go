@@ -570,13 +570,26 @@ func (s *CloudSink) drainLoop(ctx context.Context) {
 			}
 		case errors.Is(err, context.Canceled):
 			return
+		case errors.Is(err, transport.ErrUnauthorized):
+			// Auth failure: credential rejected or revoked. Degrade and preserve
+			// durable data without discarding the frame or performing an aggressive
+			// retry storm. Back off to maxDrainBackoff until credentials are valid.
+			backoff = maxDrainBackoff
+			s.logger.Warn("cloud buffer: auth rejected during replay, backing off and retaining frame",
+				"candidate_key", f.CandidateKey, "seq", f.Seq, slog.Any("error", err), slog.Duration("backoff", backoff))
 		case !isRecoverable(err):
 			s.logger.Warn("cloud buffer: dropping frame after non-recoverable replay error",
 				"candidate_key", f.CandidateKey, "seq", f.Seq, slog.Any("error", err))
 			s.buffer.Discard()
 			backoff = 0
 		default:
-			if backoff == 0 {
+			var rle *transport.RateLimitError
+			if errors.As(err, &rle) && rle.RetryAfter > 0 {
+				backoff = rle.RetryAfter
+				if backoff > maxDrainBackoff {
+					backoff = maxDrainBackoff
+				}
+			} else if backoff == 0 {
 				backoff = minDrainBackoff
 			} else if backoff *= 2; backoff > maxDrainBackoff {
 				backoff = maxDrainBackoff
