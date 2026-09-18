@@ -61,6 +61,8 @@ type Status struct {
 	LastError     string     `json:"last_error,omitempty"`
 	Degraded      bool       `json:"degraded"`
 	Quarantined   int        `json:"quarantined"`
+	Capacity      int        `json:"capacity,omitempty"`
+	Drops         int64      `json:"drops"`
 }
 
 type record struct {
@@ -81,6 +83,7 @@ type Backlog struct {
 	lastError   string
 	degraded    bool
 	quarantined int
+	drops       int64
 
 	// onSynced/onQuarantined let a caller (the K7 EventStore, via
 	// internal/agent's wiring) keep its own SyncStatus in step with this
@@ -199,6 +202,7 @@ func (b *Backlog) Enqueue(s Submission) error {
 	}
 	bytes := pendingBytes(b.queue) + submissionBytes(s)
 	if len(b.queue) >= b.cfg.MaxOperations || bytes > b.cfg.MaxBytes {
+		b.drops++
 		return ErrFull
 	}
 	b.counter++
@@ -360,12 +364,28 @@ func (b *Backlog) quarantineLocked(r record) {
 func (b *Backlog) Status() Status {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	st := Status{BacklogCount: len(b.queue), PendingBytes: pendingBytes(b.queue), LastSuccess: b.lastSuccess, LastError: b.lastError, Degraded: b.degraded, Quarantined: b.quarantined}
+	st := Status{
+		BacklogCount: len(b.queue),
+		PendingBytes: pendingBytes(b.queue),
+		LastSuccess:  b.lastSuccess,
+		LastError:    b.lastError,
+		Degraded:     b.degraded,
+		Quarantined:  b.quarantined,
+		Capacity:     b.cfg.MaxOperations,
+		Drops:        b.drops,
+	}
 	if len(b.queue) > 0 {
 		t := b.queue[0].CreatedAt
 		st.OldestPending = &t
 	}
 	return st
+}
+
+// Drops returns the count of submissions dropped due to capacity bounds.
+func (b *Backlog) Drops() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.drops
 }
 func pendingBytes(q []record) int64 {
 	var n int64

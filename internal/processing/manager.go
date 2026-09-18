@@ -229,10 +229,16 @@ func (m *Manager) publishStatus() {
 	}
 	m.mu.Unlock()
 
+	var routerQueues []RouterQueueStats
+	if m.router != nil {
+		routerQueues = m.router.QueueStats()
+	}
+
 	m.health.SetVideoPipeline(VideoPipelineSummary{
-		CameraCount: len(statuses),
-		Cameras:     statuses,
-		CloudBuffer: m.cloudBufferStats(),
+		CameraCount:  len(statuses),
+		Cameras:      statuses,
+		CloudBuffer:  m.cloudBufferStats(),
+		RouterQueues: routerQueues,
 	})
 }
 

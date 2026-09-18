@@ -75,16 +75,22 @@ type InferRequest struct {
 	Width        int
 	Height       int
 	JPEG         []byte
+	// CorrelationID is the pipeline's own correlation id for this frame
+	// (processing.Frame.CorrelationID) — carried through Go-side only,
+	// never sent to the worker over the wire (Hito N: reuse, don't
+	// re-derive, downstream of internal/agent).
+	CorrelationID string
 }
 
 // InferenceResult is the local authority's verdict for one frame (K1: "Edge
 // mode: YOLO local es la autoridad de inferencia").
 type InferenceResult struct {
-	CandidateKey string
-	FrameSeq     uint64
-	Timestamp    time.Time
-	InferenceMS  float64
-	Device       string
-	ModelsLoaded []string
-	Detections   []Detection
+	CandidateKey  string
+	FrameSeq      uint64
+	Timestamp     time.Time
+	InferenceMS   float64
+	Device        string
+	ModelsLoaded  []string
+	Detections    []Detection
+	CorrelationID string
 }

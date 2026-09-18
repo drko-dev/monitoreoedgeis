@@ -89,6 +89,9 @@ func TestFullEdgeWiring_VisionToSyncedEndToEnd(t *testing.T) {
 		Timestamp:    frameTimestamp,
 		InferenceMS:  12.5,
 		Device:       "cpu",
+		// Hito N: the pipeline's own correlation id (processing.Frame.
+		// CorrelationID), carried through unchanged rather than re-derived.
+		CorrelationID: "cam-1-42",
 		Detections: []vision.Detection{
 			{ClassID: vision.ClassIDCar, Label: "car", Type: vision.DetectionTypeVehicle, Confidence: 0.91, BBox: [4]float64{10, 20, 110, 220}},
 		},
@@ -258,11 +261,12 @@ func TestFullEdgeWiring_EventWithClipEndToEnd(t *testing.T) {
 	consumer := newFullEdgeEventConsumer(svc, backlog, clipper, history, dataDir, logger)
 
 	result := vision.InferenceResult{
-		CandidateKey: "cam-clip",
-		FrameSeq:     77,
-		Timestamp:    now,
-		InferenceMS:  15.0,
-		Device:       "cpu",
+		CandidateKey:  "cam-clip",
+		FrameSeq:      77,
+		Timestamp:     now,
+		InferenceMS:   15.0,
+		Device:        "cpu",
+		CorrelationID: "cam-clip-77",
 		Detections: []vision.Detection{
 			{ClassID: vision.ClassIDPerson, Label: "person", Type: vision.DetectionTypePerson, Confidence: 0.94, BBox: [4]float64{5, 10, 50, 100}},
 		},
@@ -359,11 +363,12 @@ func TestFullEdgeWiring_CorrelationIDSurvivesBacklogRestart(t *testing.T) {
 	consumer := newFullEdgeEventConsumer(svc, backlog1, nil, nil, dataDir, logger)
 	now := time.Now().UTC()
 	consumer.ConsumeInference(vision.InferenceResult{
-		CandidateKey: "cam-restart",
-		FrameSeq:     99,
-		Timestamp:    now,
-		InferenceMS:  10.0,
-		Device:       "cpu",
+		CandidateKey:  "cam-restart",
+		FrameSeq:      99,
+		Timestamp:     now,
+		InferenceMS:   10.0,
+		Device:        "cpu",
+		CorrelationID: "cam-restart-99",
 		Detections: []vision.Detection{
 			{ClassID: vision.ClassIDPerson, Label: "person", Type: vision.DetectionTypePerson, Confidence: 0.90, BBox: [4]float64{0, 0, 10, 10}},
 		},

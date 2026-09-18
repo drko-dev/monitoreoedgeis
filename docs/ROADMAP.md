@@ -306,8 +306,14 @@ edge-mode-only gating, model cleanup) and what remains genuinely BLOCKED
 
 ## N — Telemetría y observabilidad
 
-- N1–N12: logs, correlation IDs, métricas agente/cámara, FPS, frames, latencia,
-  CPU/RAM, disco, queue depth, RTSP failures, estado SaaS.
+- N1–N12: logs, correlation IDs, métricas agente/cámara, FPS, frames, latencia, CPU/RAM, disco, queue depth, RTSP failures, estado SaaS.
+- **Slice Recursos + Colas + Confiabilidad RTSP (CODE DONE)**:
+  - CPU: porcentaje de uso real vía procfs con `CPUSampler` thread-safe; `nil` cuando no está medido/primed (sin cero falso).
+  - RAM: `total_bytes`, `available_bytes` (con buffers/cache recuperables) y `used_bytes`; `nil` cuando no es derivable en hosts sin procfs.
+  - Disco: `total_bytes`, `available_bytes` (espacio real para usuarios no root vía `statfs`), `used_bytes`, `data_dir` observado sin rutas sensibles.
+  - Colas / Backpressure: métricas segregadas por componente real (`router`, `cloud_buffer`, `edge_backlog`, `vision`) con `depth`, `capacity`, `drops`, `oldest_pending`, `degraded`, `quarantined`.
+  - RTSP: `reconnect_count` monótono no reiniciable, `timeout_count`/`stall_count` para silencios de socket, sanitización estricta de `last_error_safe` y logs (redacción de credenciales en URIs y parámetros).
+  - Estado del Agente: `/status` expone estado global (`READY` vs `DEGRADED`) y modular; fallas de stream de cámara no degradan globalmente el agente. 100% retrocompatible. Ver `docs/observability/n-resources-queues.md`.
 
 ## O — Configuración remota
 

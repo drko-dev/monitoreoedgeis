@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -66,9 +65,12 @@ func (c *fullEdgeEventConsumer) ConsumeInference(result vision.InferenceResult, 
 	defer limits.ReleaseInference()
 
 	fres := fulledge.InferenceResult{
-		CandidateKey:       result.CandidateKey,
-		FrameSeq:           result.FrameSeq,
-		CorrelationID:      result.CandidateKey + fmt.Sprintf("-%d", result.FrameSeq),
+		CandidateKey: result.CandidateKey,
+		FrameSeq:     result.FrameSeq,
+		// Hito N: reuse the pipeline's own correlation id (set once at
+		// internal/processing/pipeline.go from the decoded frame) rather
+		// than re-deriving a second one downstream.
+		CorrelationID:      result.CorrelationID,
 		FrameTimestamp:     result.Timestamp,
 		InferenceTimestamp: result.Timestamp,
 		InferenceMs:        result.InferenceMS,
@@ -91,7 +93,10 @@ func (c *fullEdgeEventConsumer) ConsumeInference(result vision.InferenceResult, 
 	events, err := c.svc.ProcessInferenceWithJPEG(fres, jpeg)
 	if err != nil {
 		if c.logger != nil {
-			c.logger.Warn("full edge: failed to process inference result", slog.Any("error", err))
+			c.logger.Warn("full edge: failed to process inference result",
+				slog.String("candidate_key", fres.CandidateKey),
+				slog.String("correlation_id", fres.CorrelationID),
+				slog.Any("error", err))
 		}
 		return
 	}

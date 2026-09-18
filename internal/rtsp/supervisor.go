@@ -2,6 +2,7 @@ package rtsp
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -148,6 +149,9 @@ func (s *Supervisor) run(ctx context.Context) {
 
 		session, err := Dial(ctx, s.target.Addr, s.target.RTSPPath, s.target.Username, s.target.Password, s.cfg.DialTimeout)
 		if err != nil {
+			if errors.Is(err, ErrTimeout) || isTimeout(err) || errors.Is(err, context.DeadlineExceeded) {
+				s.incrementTimeout()
+			}
 			s.recordError(err, StateDegraded)
 			s.logger.Warn("stream dial failed, backing off", "error", s.safeError(err), "backoff", backoff)
 
@@ -197,7 +201,14 @@ func (s *Supervisor) run(ctx context.Context) {
 			return
 		}
 
-		// Loop exited due to error or silent stream
+		// Loop exited due to error or silent stream. This is a stall of an
+		// already-connected/playing stream, distinct from a dial timeout
+		// (line ~153): both count as a timeout, but only this one is also
+		// a stall.
+		if errors.Is(err, ErrTimeout) || isTimeout(err) || errors.Is(err, context.DeadlineExceeded) {
+			s.incrementTimeout()
+			s.incrementStreamStall()
+		}
 		s.recordError(err, StateDegraded)
 		s.incrementReconnect()
 		s.logger.Warn("stream interrupted, reconnecting", "error", s.safeError(err), "backoff", backoff)
@@ -268,15 +279,28 @@ func (s *Supervisor) incrementReconnect() {
 	s.status.ReconnectCount++
 }
 
+// incrementTimeout counts any failure classified as a timeout: dial
+// timeout, handshake timeout (both inside Dial), or a stream read timeout.
+// It never touches StallCount on its own — a timeout before the stream was
+// ever connected/playing is not a stall of an established stream.
+func (s *Supervisor) incrementTimeout() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.status.TimeoutCount++
+}
+
+// incrementStreamStall counts a timeout/silence on a stream that was
+// already connected and playing. Callers must also call incrementTimeout
+// for the same event — every stall is a timeout, not every timeout is a
+// stall.
+func (s *Supervisor) incrementStreamStall() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.status.StallCount++
+}
+
 func (s *Supervisor) safeError(err error) string {
-	if err == nil {
-		return ""
-	}
-	msg := err.Error()
-	if len(msg) > 255 {
-		msg = msg[:255]
-	}
-	return msg
+	return SanitizeError(err)
 }
 
 func min(a, b time.Duration) time.Duration {

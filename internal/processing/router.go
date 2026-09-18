@@ -62,7 +62,12 @@ func (r *Router) worker(i int, sink Sink) {
 			return
 		case f := <-r.queues[i]:
 			if err := sink.Route(f); err != nil {
-				r.logger.Warn("sink route failed", "sink", sink.Name(), "error", err)
+				r.logger.Warn("sink route failed",
+					"sink", sink.Name(),
+					"candidate_key", f.CandidateKey,
+					"seq", f.Seq,
+					"correlation_id", f.CorrelationID,
+					"error", err)
 			}
 		}
 	}
@@ -89,6 +94,31 @@ func (r *Router) Dropped(sinkName string) int64 {
 		}
 	}
 	return 0
+}
+
+// RouterQueueStats reports depth, capacity and drop metrics for a sink's queue.
+type RouterQueueStats struct {
+	SinkName string `json:"sink_name"`
+	Depth    int    `json:"depth"`
+	Capacity int    `json:"capacity"`
+	Drops    int64  `json:"drops"`
+}
+
+// QueueStats returns point-in-time depth, capacity and drops for each registered sink.
+func (r *Router) QueueStats() []RouterQueueStats {
+	if r == nil {
+		return nil
+	}
+	out := make([]RouterQueueStats, len(r.sinks))
+	for i, s := range r.sinks {
+		out[i] = RouterQueueStats{
+			SinkName: s.Name(),
+			Depth:    len(r.queues[i]),
+			Capacity: cap(r.queues[i]),
+			Drops:    r.dropped[i].Load(),
+		}
+	}
+	return out
 }
 
 // sinkCloser is implemented by a Sink holding background resources that

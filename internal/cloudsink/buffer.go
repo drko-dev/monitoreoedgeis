@@ -56,6 +56,8 @@ type BufferStats struct {
 	ReplayedFrames int64
 	DroppedFull    int64
 	CorruptEntries int64
+	Capacity       int
+	OldestPending  *time.Time
 }
 
 const (
@@ -281,13 +283,19 @@ func (b *Buffer) removeFrontLocked() {
 func (b *Buffer) Stats() BufferStats {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return BufferStats{
+	st := BufferStats{
 		BufferedFrames: len(b.queue),
 		BufferedBytes:  b.bytes,
 		ReplayedFrames: b.replayed,
 		DroppedFull:    b.droppedFull.Load(),
 		CorruptEntries: b.corruptEntries.Load(),
+		Capacity:       b.maxFrames,
 	}
+	if len(b.queue) > 0 {
+		t := b.queue[0].timestamp
+		st.OldestPending = &t
+	}
+	return st
 }
 
 // writeAtomic writes f to finalPath via a temp file + rename, so a reader
