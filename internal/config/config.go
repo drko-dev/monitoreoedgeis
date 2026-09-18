@@ -72,6 +72,10 @@ type Config struct {
 	CloudMaxBytesPerSec int64
 	CloudBurstBytes     int64
 	CloudMaxFPS         float64
+	// Local event transport backlog (K10-K12). Unlike the frame buffer this
+	// has conservative defaults because events must survive a SaaS outage.
+	LocalEventBacklogMaxOperations int
+	LocalEventBacklogMaxBytes      int64
 }
 
 // HybridROI is one normalized (0..1) region of interest parsed from
@@ -175,12 +179,14 @@ const (
 	// absorb a brief gap between real motion events without flapping.
 	DefaultHybridIdleAfter = 5 * time.Second
 	// Cloud bandwidth control defaults and bounds (Milestone I7).
-	DefaultCloudJPEGQuality    = 85
-	MinCloudJPEGQuality        = 1
-	MaxCloudJPEGQuality        = 100
-	DefaultCloudMaxBytesPerSec = 0
-	DefaultCloudBurstBytes     = 0
-	DefaultCloudMaxFPS         = 0.0
+	DefaultCloudJPEGQuality               = 85
+	MinCloudJPEGQuality                   = 1
+	MaxCloudJPEGQuality                   = 100
+	DefaultCloudMaxBytesPerSec            = 0
+	DefaultCloudBurstBytes                = 0
+	DefaultCloudMaxFPS                    = 0.0
+	DefaultLocalEventBacklogMaxOperations = 100
+	DefaultLocalEventBacklogMaxBytes      = 512 << 20
 )
 
 var validLogLevels = []string{"debug", "info", "warn", "error"}
@@ -204,25 +210,27 @@ func Load() (*Config, error) {
 		StreamRole:          DefaultStreamRole,
 		StreamTimeout:       DefaultStreamTimeout,
 
-		VideoPipelineEnabled:        DefaultVideoPipelineEnabled,
-		VideoTargetFPS:              DefaultVideoTargetFPS,
-		VideoOutputWidth:            DefaultVideoOutputWidth,
-		VideoOutputHeight:           DefaultVideoOutputHeight,
-		VideoRingBufferSize:         DefaultVideoRingBufferSize,
-		VideoQueueDepth:             DefaultVideoQueueDepth,
-		VideoDecodeQueueDepth:       DefaultVideoDecodeQueueDepth,
-		VideoMaxConcurrentPipelines: DefaultVideoMaxConcurrentPipelines,
-		VideoFFmpegPath:             DefaultVideoFFmpegPath,
-		VideoDecodeTimeout:          DefaultVideoDecodeTimeout,
-		HybridMotionThreshold:       DefaultHybridMotionThreshold,
-		HybridMinChangedArea:        DefaultHybridMinChangedArea,
-		HybridBlockSize:             DefaultHybridBlockSize,
-		HybridIdleFPS:               DefaultHybridIdleFPS,
-		HybridIdleAfter:             DefaultHybridIdleAfter,
-		CloudJPEGQuality:            DefaultCloudJPEGQuality,
-		CloudMaxBytesPerSec:         DefaultCloudMaxBytesPerSec,
-		CloudBurstBytes:             DefaultCloudBurstBytes,
-		CloudMaxFPS:                 DefaultCloudMaxFPS,
+		VideoPipelineEnabled:           DefaultVideoPipelineEnabled,
+		VideoTargetFPS:                 DefaultVideoTargetFPS,
+		VideoOutputWidth:               DefaultVideoOutputWidth,
+		VideoOutputHeight:              DefaultVideoOutputHeight,
+		VideoRingBufferSize:            DefaultVideoRingBufferSize,
+		VideoQueueDepth:                DefaultVideoQueueDepth,
+		VideoDecodeQueueDepth:          DefaultVideoDecodeQueueDepth,
+		VideoMaxConcurrentPipelines:    DefaultVideoMaxConcurrentPipelines,
+		VideoFFmpegPath:                DefaultVideoFFmpegPath,
+		VideoDecodeTimeout:             DefaultVideoDecodeTimeout,
+		HybridMotionThreshold:          DefaultHybridMotionThreshold,
+		HybridMinChangedArea:           DefaultHybridMinChangedArea,
+		HybridBlockSize:                DefaultHybridBlockSize,
+		HybridIdleFPS:                  DefaultHybridIdleFPS,
+		HybridIdleAfter:                DefaultHybridIdleAfter,
+		CloudJPEGQuality:               DefaultCloudJPEGQuality,
+		CloudMaxBytesPerSec:            DefaultCloudMaxBytesPerSec,
+		CloudBurstBytes:                DefaultCloudBurstBytes,
+		CloudMaxFPS:                    DefaultCloudMaxFPS,
+		LocalEventBacklogMaxOperations: DefaultLocalEventBacklogMaxOperations,
+		LocalEventBacklogMaxBytes:      DefaultLocalEventBacklogMaxBytes,
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_PROCESSING_MODE")); raw != "" {
@@ -589,6 +597,20 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid cloud max FPS %q: must be non-negative", raw)
 		}
 		cfg.CloudMaxFPS = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_LOCAL_EVENT_BACKLOG_MAX_OPERATIONS")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil || v <= 0 {
+			return nil, fmt.Errorf("invalid local event backlog max operations %q: must be positive", raw)
+		}
+		cfg.LocalEventBacklogMaxOperations = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_LOCAL_EVENT_BACKLOG_MAX_BYTES")); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || v <= 0 {
+			return nil, fmt.Errorf("invalid local event backlog max bytes %q: must be positive", raw)
+		}
+		cfg.LocalEventBacklogMaxBytes = v
 	}
 
 	// Fail-fast: reject an insecure http:// SaaS URL here, before any

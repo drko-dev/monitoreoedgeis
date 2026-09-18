@@ -44,4 +44,7 @@ const (
 	// authenticated device and camera_id from X-Candidate-Key server-side;
 	// neither is ever sent directly by the Edge.
 	FramesPath = "/api/v1/edge/frames"
+	// LocalEventsPath accepts locally produced event metadata. The SaaS derives
+	// organization and camera ownership from the authenticated edge device.
+	LocalEventsPath = "/api/v1/edge/local-events"
 )

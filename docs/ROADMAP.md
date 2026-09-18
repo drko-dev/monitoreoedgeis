@@ -259,10 +259,18 @@ sandbox.
 - K6. Límites hardware.
 - K7. Eventos locales.
 - K8. Evidencias.
-- K9. Clips.
-- K10. Metadata/evidencia al SaaS.
-- K11. Operación offline parcial.
-- K12. Sync posterior.
+## HITO K9-K12 — CODE DONE / TESTED (branch `feature/full-edge-sync-k9-k12`,
+paired with SaaS `feature/full-edge-event-ingest-k9-k12`). NOT MERGED, NOT
+DEPLOYED. Local event/evidence *detection* (K5-K8) is explicitly out of
+scope here and owned by a separate branch
+(`feature/full-edge-events-k5-k8`) — this milestone only builds the clip
+around an event, the Edge->SaaS sync contract, and the offline backlog. See
+`docs/PROJECT_STATUS.md`'s Hito K9-K12 section for the full breakdown.
+
+- K9. Clips. DONE.
+- K10. Metadata/evidencia al SaaS. DONE.
+- K11. Operación offline parcial. DONE.
+- K12. Sync posterior. DONE.
 
 ## L — Transporte seguro Edge ↔ SaaS
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
+	"github.com/drko-dev/monitoreoedgeis/internal/edgebacklog"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/logging"
@@ -33,8 +34,10 @@ type Agent struct {
 	health         *health.Reporter
 	heartbeatErr   error
 	discoveryErr   error
+	localEventsErr error
 	rtspManager    *rtsp.Manager
 	videoManager   *processing.Manager
+	localEvents    *edgebacklog.Backlog
 	modules        *moduleManager
 }
 
@@ -80,6 +83,11 @@ func New(cfg *config.Config) *Agent {
 	disc, discErr := newDiscoveryModule(cfg, creds, reporter, logging.Component(log, "discovery"))
 	if disc != nil {
 		mods = append(mods, disc)
+	}
+	localEvents, localEventsErr := newLocalEventsModule(cfg, creds, reporter, logging.Component(log, "local-events"))
+	if localEvents != nil {
+		mods = append(mods, localEvents)
+		a.localEvents = localEvents.backlog
 	}
 
 	if cfg.ConnectivityEnabled {
@@ -143,6 +151,7 @@ func New(cfg *config.Config) *Agent {
 
 	a.heartbeatErr = hbErr
 	a.discoveryErr = discErr
+	a.localEventsErr = localEventsErr
 	a.modules = newModuleManager(reporter.SetModuleState, mods...)
 	return a
 }
@@ -156,6 +165,10 @@ func (a *Agent) RTSPManager() *rtsp.Manager { return a.rtspManager }
 // VideoManager exposes the video pipeline manager (nil if the video
 // pipeline or RTSP connectivity is disabled).
 func (a *Agent) VideoManager() *processing.Manager { return a.videoManager }
+
+// LocalEventProducer exposes the narrow durable submission interface to a
+// future local event/evidence producer. It is nil when the Edge is unenrolled.
+func (a *Agent) LocalEventProducer() edgebacklog.Producer { return a.localEvents }
 
 // Run starts the agent and blocks until ctx is cancelled, then shuts down
 // gracefully. A cancelled context is a clean stop, not an error.
@@ -186,6 +199,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	case a.discoveryErr != nil:
 		a.log.Error("agent will not become ready: discovery module could not be built",
 			slog.Any("error", a.discoveryErr))
+		a.health.Set(health.StateDegraded)
+	case a.localEventsErr != nil:
+		a.log.Error("agent will not become ready: local event backlog could not be built",
+			slog.Any("error", a.localEventsErr))
 		a.health.Set(health.StateDegraded)
 	default:
 		a.health.Set(health.StateReady)

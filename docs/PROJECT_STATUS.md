@@ -884,6 +884,73 @@ available in this sandbox):
 - A real optional classifier model behind the J6 `CandidateClassifier`
   adapter (Hito K scope).
 
+## HITO K9–K12 — Clips + Offline + Sync (branch `feature/full-edge-sync-k9-k12`)
+
+**Scope closed this milestone: K9 (clips), K10 (Edge→SaaS metadata/evidence
+contract), K11 (partial offline operation), K12 (later sync). Local
+event/evidence *detection* — deciding a local event exists from a YOLO
+detection — is explicitly out of scope here: it belongs to a separate
+branch (`feature/full-edge-events-k5-k8`), so this milestone exposes small
+integration interfaces for that work to call rather than duplicating it.**
+
+- **K9 — clips**: `internal/evidence.Clipper` builds a bounded local clip
+  (pre-event + event + post-event) from frames the existing video pipeline
+  already decoded — no second RTSP client, no second decoder. Its
+  `FrameHistory` input is `processing.Manager.FrameHistory(candidateKey)`,
+  a thin read-only accessor over the existing per-camera ring buffer
+  (Hito H). Encoding reuses the appliance's own `ffmpeg` binary
+  (`GEOCAM_VIDEO_FFMPEG_PATH`), writing `GEOCAM_DATA_DIR/evidence/clips/
+  <event_uuid>.mp4` atomically (tmp file + rename). A failed clip returns
+  an error and never touches an event/capture record — evidence loss never
+  cascades into event loss. `ClipRecord` carries `event_uuid`,
+  `relative_path`, `sha256`, `size`, and `duration_ms` when derivable from
+  real frame timestamps.
+- **K10 — metadata/evidence contract**: `internal/transport.LocalEvent` /
+  `LocalEventSender` is a **separate** contract from the existing frame
+  endpoint — `POST {LocalEventsPath}` for metadata, `PUT
+  {LocalEventsPath}/{event_uuid}/evidence/{capture|clip}` for binary
+  evidence, both Edge-Bearer-authenticated. Producers never send an
+  organization or camera ID — see the SaaS side for server-side
+  resolution from the authenticated device + `candidate_key`.
+- **K11 — offline backlog**: `internal/edgebacklog.Backlog` is a durable,
+  bounded FIFO (`GEOCAM_LOCAL_EVENT_BACKLOG_MAX_OPERATIONS`,
+  `GEOCAM_LOCAL_EVENT_BACKLOG_MAX_BYTES` — technical limits, no invented
+  commercial retention policy) surviving a restart. YOLO inference,
+  local-event creation, and capture continue with zero dependency on SaaS
+  reachability; only the backlog's own drain loop needs connectivity.
+- **K12 — sync**: the drain loop enqueues/sends in order (metadata event →
+  capture → clip → mark synced), retries recoverable errors
+  (network/5xx) with backoff, degrades (keeps data, stops trying
+  aggressively) on 401/403 without deleting anything, and quarantines a
+  permanently-invalid payload (4xx other than auth) rather than looping
+  forever or silently dropping it. Nothing is deleted locally right after
+  a successful sync — retention is explicitly a later policy decision.
+- **Integration surface for K5-K8 (the other branch)**:
+  `Agent.LocalEventProducer() edgebacklog.Producer` is the one call a
+  local-event detector needs to enqueue a detected event/evidence into
+  this backlog. `evidence.NewClipper` + `Manager.FrameHistory` is the one
+  call it needs to build a clip. Neither is wired to an actual detector in
+  this branch — there is no detector here to wire it to.
+- **Status**: `/status` exposes the backlog's `backlog_count`,
+  `bytes_pending`, `oldest_pending`, `last_sync_success`,
+  `last_sync_error` (never a stack trace or a path with local
+  filesystem detail beyond what's already public) via
+  `health.Reporter.SetLocalEventBacklogStatus`.
+
+**Tests**: `go build/vet/test/-race ./...` clean across the whole repo,
+`gofmt -l .` clean, `make build-linux` produces linux/amd64 + linux/arm64.
+Edge-side unit tests (fakes, no real SaaS) cover: online sync, offline
+queuing, restart preserving the backlog, reconnect draining it in FIFO
+order, duplicate event/evidence handling, 401/403 degrading without data
+loss, 5xx retry, bad-payload quarantine without an infinite loop, a failed
+clip not losing its event, clean shutdown, and bounded queue/backlog size.
+
+**HITO K9–K12 = CODE DONE / TESTED. NOT MERGED, NOT DEPLOYED** (explicit
+instruction for this batch). Paired with SaaS PR on
+`feature/full-edge-event-ingest-k9-k12`
+(`drko-dev/monitoreoia`) — the two must land together since the Edge
+contract is meaningless without the SaaS endpoint, and vice versa.
+
 ## HOW ANOTHER AI SHOULD CONTINUE
 
 1. Read `AGENTS.md`.

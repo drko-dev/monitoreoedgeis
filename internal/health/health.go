@@ -17,6 +17,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/cloudsink"
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
+	"github.com/drko-dev/monitoreoedgeis/internal/edgebacklog"
 	"github.com/drko-dev/monitoreoedgeis/internal/heartbeat"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
@@ -67,22 +68,26 @@ type Snapshot struct {
 	// telemetry only — never a priced or estimated cost (see
 	// internal/cloudsink).
 	Cloud *cloudsink.Status `json:"cloud,omitempty"`
+	// LocalEventBacklog reports bounded transport state only; evidence paths
+	// and event payloads deliberately never appear on the health endpoint.
+	LocalEventBacklog *edgebacklog.Status `json:"local_event_backlog,omitempty"`
 }
 
 // Reporter holds the mutable health state of the agent, including per-module
 // lifecycle state. It is the single safe accessor for runtime state — it is
 // safe for concurrent use and nothing about it is a package-level global.
 type Reporter struct {
-	mu               sync.RWMutex
-	state            State
-	startedAt        time.Time
-	modules          map[string]string
-	credentialStatus string
-	heartbeat        *heartbeat.Status
-	discovery        *discovery.ModuleStatus
-	cameras          []rtsp.CameraStreamStatus
-	videoPipeline    *processing.VideoPipelineSummary
-	cloud            *cloudsink.Status
+	mu                sync.RWMutex
+	state             State
+	startedAt         time.Time
+	modules           map[string]string
+	credentialStatus  string
+	heartbeat         *heartbeat.Status
+	discovery         *discovery.ModuleStatus
+	cameras           []rtsp.CameraStreamStatus
+	videoPipeline     *processing.VideoPipelineSummary
+	cloud             *cloudsink.Status
+	localEventBacklog *edgebacklog.Status
 
 	version string
 	cfg     *config.Config
@@ -206,25 +211,31 @@ func (r *Reporter) Snapshot() Snapshot {
 		copied := *r.cloud
 		cloud = &copied
 	}
+	var backlog *edgebacklog.Status
+	if r.localEventBacklog != nil {
+		copied := *r.localEventBacklog
+		backlog = &copied
+	}
 
 	return Snapshot{
-		Status:           r.state,
-		Version:          r.version,
-		EdgeID:           r.ident.EdgeID,
-		EnrollmentStatus: r.ident.Status.String(),
-		CredentialStatus: r.credentialStatus,
-		Hostname:         r.host.Hostname,
-		OS:               r.host.OS,
-		Architecture:     r.host.GOARCH,
-		ProcessingMode:   r.cfg.ProcessingMode.String(),
-		UptimeSeconds:    int64(uptime.Seconds()),
-		Uptime:           uptime.Round(time.Second).String(),
-		Modules:          modules,
-		Heartbeat:        hb,
-		Discovery:        disc,
-		Cameras:          cams,
-		VideoPipeline:    vp,
-		Cloud:            cloud,
+		Status:            r.state,
+		Version:           r.version,
+		EdgeID:            r.ident.EdgeID,
+		EnrollmentStatus:  r.ident.Status.String(),
+		CredentialStatus:  r.credentialStatus,
+		Hostname:          r.host.Hostname,
+		OS:                r.host.OS,
+		Architecture:      r.host.GOARCH,
+		ProcessingMode:    r.cfg.ProcessingMode.String(),
+		UptimeSeconds:     int64(uptime.Seconds()),
+		Uptime:            uptime.Round(time.Second).String(),
+		Modules:           modules,
+		Heartbeat:         hb,
+		Discovery:         disc,
+		Cameras:           cams,
+		VideoPipeline:     vp,
+		Cloud:             cloud,
+		LocalEventBacklog: backlog,
 	}
 }
 
@@ -242,4 +253,11 @@ func (r *Reporter) SetCloudStatus(s cloudsink.Status) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cloud = &s
+}
+
+// SetLocalEventBacklogStatus accepts only aggregate, safe sync telemetry.
+func (r *Reporter) SetLocalEventBacklogStatus(s edgebacklog.Status) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.localEventBacklog = &s
 }
