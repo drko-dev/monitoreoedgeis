@@ -325,10 +325,20 @@ func TestEvidencePublicationAndChecksum(t *testing.T) {
 		t.Errorf("saved bytes do not match original jpeg")
 	}
 
-	// Verify atomic protection against overwrite
-	_, err = evMgr.SaveJPEG(testEventUUID, time.Now().UTC(), rawJPEG)
-	if !errors.Is(err, ErrEvidenceAlreadyExists) {
-		t.Errorf("expected ErrEvidenceAlreadyExists on duplicate event uuid, got %v", err)
+	// Verify idempotent retry on identical JPEG bytes
+	retryRef, err := evMgr.SaveJPEG(testEventUUID, time.Now().UTC(), rawJPEG)
+	if err != nil {
+		t.Fatalf("expected nil error on identical retry, got %v", err)
+	}
+	if retryRef.SHA256 != expectedHex {
+		t.Errorf("checksum mismatch on retry: got %s, want %s", retryRef.SHA256, expectedHex)
+	}
+
+	// Verify conflict protection against divergent overwrite
+	divergentJPEG := []byte("divergent-jpeg-bytes-different-content")
+	_, err = evMgr.SaveJPEG(testEventUUID, time.Now().UTC(), divergentJPEG)
+	if !errors.Is(err, ErrEvidenceConflict) {
+		t.Errorf("expected ErrEvidenceConflict on divergent event evidence, got %v", err)
 	}
 }
 
@@ -570,5 +580,77 @@ func TestConcurrentProcessInferenceRace(t *testing.T) {
 	expectedTotal := int64(workers * iterations)
 	if st.LocalEventsCreated != expectedTotal {
 		t.Errorf("expected %d events created, got %d", expectedTotal, st.LocalEventsCreated)
+	}
+}
+
+func TestEventStoreIdempotentRetryAndConflict(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewEventStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewEventStore: %v", err)
+	}
+
+	evt1, err := NewLocalEvent("edge-1", "t-1", "s-1", "yolo11n.pt",
+		InferenceResult{
+			CandidateKey:  "cam-1",
+			FrameSeq:      100,
+			CorrelationID: "cam-1-100",
+		},
+		LocalDetection{ClassID: 0, Label: "person", Confidence: 0.95, BBox: BoundingBox{X1: 10, Y1: 10, X2: 50, Y2: 50}},
+		&EvidenceRef{Path: "evidence/captures/test.jpg", SHA256: "abc", SizeBytes: 123},
+	)
+	if err != nil {
+		t.Fatalf("NewLocalEvent: %v", err)
+	}
+
+	// 1. Initial Save
+	if err := store.Save(evt1); err != nil {
+		t.Fatalf("initial Save: %v", err)
+	}
+	if store.BacklogCount() != 1 {
+		t.Fatalf("expected backlog count 1, got %d", store.BacklogCount())
+	}
+
+	// 2. Identical Retry (same EventUUID and fields)
+	if err := store.Save(evt1); err != nil {
+		t.Fatalf("expected nil error on identical retry, got %v", err)
+	}
+	// Backlog count should remain 1 (not 2)
+	if store.BacklogCount() != 1 {
+		t.Fatalf("expected backlog count to stay 1 on idempotent retry, got %d", store.BacklogCount())
+	}
+
+	// 3. Divergent Conflict (same EventUUID, different ClassID / Tipo)
+	divergentEvt := *evt1
+	divergentEvt.Tipo = "vehiculo"
+	divergentEvt.ClassID = 2
+	if err := store.Save(&divergentEvt); !errors.Is(err, ErrEventConflict) {
+		t.Fatalf("expected ErrEventConflict, got %v", err)
+	}
+
+	// 4. Divergent Evidence Conflict (same EventUUID, different evidence sha256)
+	divergentEvt2 := *evt1
+	divergentEvt2.Evidence = &EvidenceRef{Path: "evidence/captures/test.jpg", SHA256: "divergent-hash", SizeBytes: 999}
+	if err := store.Save(&divergentEvt2); !errors.Is(err, ErrEventConflict) {
+		t.Fatalf("expected ErrEventConflict on divergent evidence, got %v", err)
+	}
+
+	// 5. Divergent SourceTimestamp Conflict (same EventUUID, different source timestamp)
+	divergentEvt3 := *evt1
+	divergentEvt3.SourceTimestamp = evt1.SourceTimestamp.Add(5 * time.Second)
+	if err := store.Save(&divergentEvt3); !errors.Is(err, ErrEventConflict) {
+		t.Fatalf("expected ErrEventConflict on divergent source timestamp, got %v", err)
+	}
+
+	// 6. Verify stored event was not corrupted/overwritten
+	persisted, err := store.Get(evt1.EventUUID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if persisted.Tipo != "person" || persisted.ClassID != 0 {
+		t.Errorf("stored event was mutated: tipo=%s class=%d", persisted.Tipo, persisted.ClassID)
+	}
+	if persisted.CorrelationID != "cam-1-100" {
+		t.Errorf("stored event correlation_id mismatch: %s", persisted.CorrelationID)
 	}
 }

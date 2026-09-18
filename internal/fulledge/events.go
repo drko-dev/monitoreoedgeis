@@ -23,6 +23,7 @@ type LocalEvent struct {
 	CandidateKey            string           `json:"candidate_key"`
 	TenantID                string           `json:"tenant_id,omitempty"`
 	SiteID                  string           `json:"site_id,omitempty"`
+	CorrelationID           string           `json:"correlation_id,omitempty"`
 	FrameSeq                uint64           `json:"frame_seq"`
 	SourceTimestamp         time.Time        `json:"source_timestamp"`
 	LocalInferenceTimestamp time.Time        `json:"local_inference_timestamp"`
@@ -66,6 +67,7 @@ func NewLocalEvent(edgeID, tenantID, siteID, model string, res InferenceResult, 
 		CandidateKey:            res.CandidateKey,
 		TenantID:                tenantID,
 		SiteID:                  siteID,
+		CorrelationID:           res.CorrelationID,
 		FrameSeq:                res.FrameSeq,
 		SourceTimestamp:         res.FrameTimestamp,
 		LocalInferenceTimestamp: res.InferenceTimestamp,

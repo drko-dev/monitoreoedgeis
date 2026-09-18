@@ -14,6 +14,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/edgebacklog"
+	"github.com/drko-dev/monitoreoedgeis/internal/evidence"
 	"github.com/drko-dev/monitoreoedgeis/internal/fulledge"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
@@ -126,7 +127,24 @@ func New(cfg *config.Config) *Agent {
 				},
 			)
 		}
-		a.fullEdgeConsumer = newFullEdgeEventConsumer(a.fullEdgeService, producer, cfg.DataDir, log)
+		var clipper *evidence.Clipper
+		if cfg.DataDir != "" && cfg.VideoRingBufferSize > 0 {
+			clipCfg := evidence.ClipConfig{
+				DataDir:      cfg.DataDir,
+				FFmpegPath:   cfg.VideoFFmpegPath,
+				MaxFrames:    cfg.VideoRingBufferSize,
+				PreEvent:     3 * time.Second,
+				PostEvent:    0,
+				FrameRate:    float64(cfg.VideoTargetFPS),
+				MaxSizeBytes: cfg.EdgeMaxClipSizeBytes,
+			}
+			var clipErr error
+			clipper, clipErr = evidence.NewClipper(clipCfg)
+			if clipErr != nil {
+				log.Warn("full edge: failed to initialize clip capture", slog.Any("error", clipErr))
+			}
+		}
+		a.fullEdgeConsumer = newFullEdgeEventConsumer(a.fullEdgeService, producer, clipper, nil, cfg.DataDir, log)
 	}
 
 	if cfg.ConnectivityEnabled {
@@ -204,6 +222,9 @@ func New(cfg *config.Config) *Agent {
 			videoMgr := processing.NewManager(procCfg, rtspMgr, reporter, logging.Component(log, "video-pipeline"), extraSinks...)
 			mods = append(mods, videoMgr)
 			a.videoManager = videoMgr
+			if a.fullEdgeConsumer != nil {
+				a.fullEdgeConsumer.SetHistoryProvider(videoMgr)
+			}
 		}
 	}
 

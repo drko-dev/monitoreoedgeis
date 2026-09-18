@@ -104,9 +104,26 @@ func (m *EvidenceManager) SaveJPEG(eventUUID string, capturedAt time.Time, jpegB
 	fileName := eventUUID + ".jpg"
 	finalAbsPath := filepath.Join(targetSubdir, fileName)
 
-	// Guard against overwriting an existing evidence file
-	if _, err := os.Stat(finalAbsPath); err == nil {
-		return nil, fmt.Errorf("%w: %s", ErrEvidenceAlreadyExists, finalAbsPath)
+	// Guard against overwriting an existing evidence file.
+	// If identical content already exists, return the existing reference idempotently.
+	// If divergent content exists for the same eventUUID, return ErrEvidenceConflict.
+	if existingData, err := os.ReadFile(finalAbsPath); err == nil {
+		existingH := sha256.Sum256(existingData)
+		existingSHA := hex.EncodeToString(existingH[:])
+		if existingSHA == shaHex {
+			relPath, err := filepath.Rel(m.dataDir, finalAbsPath)
+			if err != nil {
+				relPath = filepath.Join(evidenceSubdir, capturesSubdir, fileName)
+			}
+			return &EvidenceRef{
+				Path:       relPath,
+				SHA256:     shaHex,
+				SizeBytes:  int64(len(existingData)),
+				CapturedAt: capturedAt.UTC(),
+				SavedAt:    time.Now().UTC(),
+			}, nil
+		}
+		return nil, fmt.Errorf("%w: %s", ErrEvidenceConflict, finalAbsPath)
 	}
 
 	// 4. Atomic write via temp file in same directory + rename

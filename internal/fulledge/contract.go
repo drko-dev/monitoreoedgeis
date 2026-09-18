@@ -13,6 +13,8 @@ var (
 	ErrDiskSpaceBelowMinimum = errors.New("fulledge: free disk space below minimum threshold")
 	ErrQueueFull             = errors.New("fulledge: inference queue capacity reached")
 	ErrEvidenceAlreadyExists = errors.New("fulledge: evidence file already exists for event")
+	ErrEvidenceConflict      = errors.New("fulledge: divergent evidence content for event")
+	ErrEventConflict         = errors.New("fulledge: divergent event content for event")
 	ErrInvalidDevice         = errors.New("fulledge: invalid inference device configured")
 	ErrEventCorrupt          = errors.New("fulledge: persisted event file is corrupt or invalid")
 )
@@ -78,5 +80,6 @@ type InferenceResult struct {
 	InferenceTimestamp time.Time        `json:"inference_timestamp"`
 	InferenceMs        float64          `json:"inference_ms"`
 	Device             string           `json:"device"`
+	CorrelationID      string           `json:"correlation_id,omitempty"`
 	Detections         []LocalDetection `json:"detections"`
 }
