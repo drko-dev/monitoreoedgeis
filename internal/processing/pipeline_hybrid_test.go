@@ -176,3 +176,61 @@ func TestPipeline_HybridShutdownCleansUp(t *testing.T) {
 		t.Fatal("pipeline did not shut down cleanly with hybrid evaluator active")
 	}
 }
+
+// TestPipeline_HybridFailSafeDispatchesUnevaluableFrame is the fail-safe
+// acceptance test for Hito J's integration fix: a frame the motion
+// detector cannot evaluate safely (here, a decoder reporting 0x0
+// dimensions) must never be silently dropped -- it is dispatched as a
+// candidate, counted in MotionCandidates (never FramesFiltered), and
+// carries CandidateReason "failsafe_unevaluable".
+func TestPipeline_HybridFailSafeDispatchesUnevaluableFrame(t *testing.T) {
+	cfg := Config{
+		RingBufferSize: 10,
+		QueueDepth:     16,
+		Hybrid:         newHybridConfig(),
+	}
+	desc := rtsp.StreamDescriptor{CandidateKey: "cam1", Codec: "H264", Width: 0, Height: 0, StreamRole: "sub"}
+
+	debug := NewDebugSink()
+	router := NewRouter([]Sink{debug}, 8, nil)
+	defer router.Stop()
+
+	p := newCameraPipeline("cam1", desc, cfg, router, nil)
+	fd := newFakeDecoder(0, 0) // 0x0 "frame" the motion detector cannot evaluate
+	p.decoderFactory = func() (VideoDecoder, error) { return fd, nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p.Start(ctx)
+
+	pkt := buildRTPPacket(true, 96, 0, 0, 1, nil, 0, 0, []byte{0x65, 0})
+	p.OnPacket(pkt, time.Now())
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		st := p.Status()
+		if st.Hybrid != nil && st.Hybrid.FramesEvaluated >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	status := p.Status()
+	if status.Hybrid == nil {
+		t.Fatal("expected non-nil Hybrid status block when Hybrid.Enabled")
+	}
+	if status.Hybrid.MotionCandidates != 1 {
+		t.Fatalf("MotionCandidates = %d, want 1 (fail-safe must count as a candidate)", status.Hybrid.MotionCandidates)
+	}
+	if status.Hybrid.FramesFiltered != 0 {
+		t.Fatalf("FramesFiltered = %d, want 0 -- fail-safe is not a filtering decision", status.Hybrid.FramesFiltered)
+	}
+	if debug.Count() != 1 {
+		t.Fatalf("debug sink received %d frames, want 1 -- an unevaluable frame must still be dispatched", debug.Count())
+	}
+	if got := debug.Last().CandidateReason; got != "failsafe_unevaluable" {
+		t.Fatalf("CandidateReason = %q, want %q", got, "failsafe_unevaluable")
+	}
+
+	cancel()
+	p.Wait()
+}

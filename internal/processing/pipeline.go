@@ -2,6 +2,7 @@ package processing
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -340,11 +341,6 @@ func (p *cameraPipeline) readLoop(ctx context.Context, dec VideoDecoder) {
 				StreamRole:       p.descriptor.StreamRole,
 				Data:             resized.Data,
 			}
-			// The ring buffer is a small in-process debug/inspection
-			// buffer, never traffic sent anywhere -- Milestone J's
-			// candidate filter only governs router.Dispatch below, so it
-			// is always pushed regardless of hybrid mode.
-			p.ring.Push(f)
 
 			dispatch := true
 			if p.motion != nil {
@@ -371,13 +367,36 @@ func (p *cameraPipeline) readLoop(ctx context.Context, dec VideoDecoder) {
 				p.lastMotionScore = result.Score
 				p.hybridMu.Unlock()
 
-				if result.Candidate {
+				// Connect the real local candidate decision to the transport
+				// metadata (Milestone J7-J9): every hybrid frame carries its
+				// mode, score, reason, and a deterministic correlation id so a
+				// buffered/replayed frame keeps the same id across retries.
+				f.ProcessingMode = ProcessingModeHybrid
+				f.CandidateScore = result.Score
+				f.CorrelationID = fmt.Sprintf("%s-%d", p.candidateKey, resized.PipelineSeq)
+
+				switch {
+				case result.Unevaluable:
+					// Fail-safe: the motion detector could not evaluate this
+					// frame safely. Never drop it silently -- treat it as a
+					// candidate and send it to Cloud.
+					f.CandidateReason = "failsafe_unevaluable"
 					p.hybridCandidates.Add(1)
-				} else {
+				case result.Candidate:
+					f.CandidateReason = "motion_detected"
+					p.hybridCandidates.Add(1)
+				default:
+					f.CandidateReason = "below_threshold"
 					p.hybridFiltered.Add(1)
 					dispatch = false
 				}
 			}
+
+			// The ring buffer is a small in-process debug/inspection
+			// buffer, never traffic sent anywhere -- Milestone J's
+			// candidate filter only governs router.Dispatch below, so it
+			// is always pushed regardless of hybrid mode.
+			p.ring.Push(f)
 
 			if dispatch && p.router != nil {
 				p.router.Dispatch(f)

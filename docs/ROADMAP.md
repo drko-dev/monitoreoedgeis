@@ -204,7 +204,9 @@ Done this slice (code, not yet real-hardware validated end to end): offline buff
 - J2. Motion detection local. DONE — pure Go, block-based luminance diff on
   the yuv420p Y plane of the resized frame, comparing only against the
   immediately preceding frame (bounded memory, no history). No OpenCV, no
-  model.
+  model. Fail-safe: a frame the detector cannot evaluate safely
+  (`MotionResult.Unevaluable`) is treated as a candidate and dispatched,
+  never silently dropped.
 - J3. Filtro frames. DONE — `cameraPipeline.readLoop` skips `Router.Dispatch`
   for non-candidate frames when hybrid is active; separate atomic counters
   (`frames_evaluated`, `motion_candidates`, `frames_filtered`) never inflate
@@ -219,16 +221,33 @@ Done this slice (code, not yet real-hardware validated end to end): offline buff
   `GEOCAM_VIDEO_HYBRID_IDLE_AFTER` hysteresis window on the active→idle
   edge only (idle→active is immediate). `GEOCAM_VIDEO_HYBRID_IDLE_FPS=0`
   (default) preserves today's fixed-FPS behavior exactly, hybrid or not.
-- J6. Modelo liviano opcional. **NOT in this slice** — explicitly out of
-  scope (belongs to Hito K's local YOLO work).
-- J7. Enviar candidatos. Covered by J1/J3: candidates reach the existing
-  Cloud sink through the unchanged Router/Dispatch path — no new sink was
-  built or needed.
+- J6. Modelo liviano opcional. ADAPTER DONE / real model **PENDING
+  (intentional)** — decoupled `CandidateClassifier` interface,
+  `ClassificationResult`, and `NoopClassifier` in `internal/hybrid`.
+  Plugging in a real model is Hito K scope.
+- J7. Enviar candidatos. DONE — `processing.Frame`, `cloudsink.Buffer`, and
+  `transport.Client` carry real candidate metadata (`ProcessingMode`,
+  `CandidateReason`, `CandidateScore`, `CorrelationID`) end-to-end: motion
+  evaluator → Frame → CloudSink → HTTP headers (`X-Processing-Mode`,
+  `X-Candidate-Reason`, `X-Candidate-Score`, `X-Correlation-Id`) → offline
+  buffer with metadata persisted across replay.
 - J8. Segunda inferencia Cloud. **NOT in this slice.**
-- J9. Correlación. **NOT in this slice.**
-- J10. Benchmark ancho de banda. **NOT in this slice** — no real-hardware
-  bandwidth benchmark was run.
-- J11. Benchmark precisión/costo. **NOT in this slice.**
+- J9. Correlación. DONE (transport-level) — `CorrelationID` is
+  deterministic (`"<candidateKey>-<seq>"`), stable across offline-buffer
+  replay. Cross-source correlation beyond this (e.g. matching against a
+  second Cloud inference pass) is **NOT in this slice** (depends on J8).
+- J10. Benchmark ancho de banda. HARNESS DONE — controlled-replay/synthetic
+  loopback benchmark (`internal/cameratest`, build tag `localbench`); no
+  real-hardware bandwidth benchmark was run (blocked, no camera available).
+- J11. Benchmark precisión/costo. HARNESS DONE (synthetic selectivity
+  proxy only) — not validated against real motion-detector output or live
+  footage.
+
+## HITO J — CODE DONE / INTEGRATED / TESTED (branch
+`integration/hito-j-final`). Pending, not blocking: real TC70/RTSP
+validation, real bandwidth measurement, real detection-frame retention
+measurement — all blocked on hardware/environment unavailable in this
+sandbox.
 
 ## K — Full Edge
 

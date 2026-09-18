@@ -24,6 +24,11 @@ type MotionResult struct {
 	Candidate   bool
 	Timestamp   time.Time
 	Seq         uint64
+	// Unevaluable is true when the frame could not be analyzed safely
+	// (bad dimensions or a short buffer). Candidate stays false in that
+	// case, but callers must treat Unevaluable as a fail-safe signal to
+	// dispatch the frame anyway, never as "confirmed no motion".
+	Unevaluable bool
 }
 
 // MotionDetector performs bounded-memory, block-based luminance-diff
@@ -73,8 +78,10 @@ func (m *MotionDetector) Evaluate(y []byte, width, height int, seq uint64, ts ti
 		block = 16
 	}
 	if width <= 0 || height <= 0 || len(y) < width*height {
-		// Can't analyze this frame; report "no motion" rather than guess,
-		// so a transient bad frame never spuriously triggers a candidate.
+		// Can't analyze this frame safely. Candidate stays false, but mark
+		// it Unevaluable so the caller fails safe and dispatches the frame
+		// to Cloud rather than silently dropping it.
+		result.Unevaluable = true
 		return result
 	}
 
