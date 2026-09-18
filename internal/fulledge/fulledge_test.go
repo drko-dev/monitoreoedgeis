@@ -633,7 +633,14 @@ func TestEventStoreIdempotentRetryAndConflict(t *testing.T) {
 		t.Fatalf("expected ErrEventConflict on divergent evidence, got %v", err)
 	}
 
-	// 5. Verify stored event was not corrupted/overwritten
+	// 5. Divergent SourceTimestamp Conflict (same EventUUID, different source timestamp)
+	divergentEvt3 := *evt1
+	divergentEvt3.SourceTimestamp = evt1.SourceTimestamp.Add(5 * time.Second)
+	if err := store.Save(&divergentEvt3); !errors.Is(err, ErrEventConflict) {
+		t.Fatalf("expected ErrEventConflict on divergent source timestamp, got %v", err)
+	}
+
+	// 6. Verify stored event was not corrupted/overwritten
 	persisted, err := store.Get(evt1.EventUUID)
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)

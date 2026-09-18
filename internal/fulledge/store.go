@@ -138,6 +138,7 @@ func eventsEquivalent(a, b *LocalEvent) bool {
 		a.SiteID != b.SiteID ||
 		a.CorrelationID != b.CorrelationID ||
 		a.FrameSeq != b.FrameSeq ||
+		!a.SourceTimestamp.Equal(b.SourceTimestamp) ||
 		a.Tipo != b.Tipo ||
 		a.ClassID != b.ClassID ||
 		a.Confidence != b.Confidence ||

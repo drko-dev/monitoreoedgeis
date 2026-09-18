@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -405,7 +406,9 @@ func submissionsEquivalent(a, b Submission) bool {
 		a.Event.CandidateKey != b.Event.CandidateKey ||
 		a.Event.Class != b.Event.Class ||
 		a.Event.Confidence != b.Event.Confidence ||
-		a.Event.Timestamp != b.Event.Timestamp {
+		a.Event.Timestamp != b.Event.Timestamp ||
+		a.Event.CorrelationID != b.Event.CorrelationID ||
+		!reflect.DeepEqual(a.Event.BBox, b.Event.BBox) {
 		return false
 	}
 	if !evidenceEquivalent(a.Capture, b.Capture) {
@@ -422,7 +425,7 @@ func evidenceEquivalent(a, b *Evidence) bool {
 		return false
 	}
 	if a != nil && b != nil {
-		if a.SHA256 != b.SHA256 || a.Size != b.Size {
+		if a.SHA256 != b.SHA256 || a.Size != b.Size || a.DurationMS != b.DurationMS {
 			return false
 		}
 	}

@@ -13,12 +13,13 @@ import (
 // LocalEvent is the narrow Edge-to-SaaS event contract. Producers must not
 // provide organization, camera IDs, or local filesystem paths.
 type LocalEvent struct {
-	EventUUID    string  `json:"event_uuid"`
-	CandidateKey string  `json:"candidate_key"`
-	Class        string  `json:"class"`
-	Confidence   float64 `json:"confidence"`
-	BBox         any     `json:"bbox"`
-	Timestamp    string  `json:"occurred_at"`
+	EventUUID     string  `json:"event_uuid"`
+	CandidateKey  string  `json:"candidate_key"`
+	Class         string  `json:"class"`
+	Confidence    float64 `json:"confidence"`
+	BBox          any     `json:"bbox"`
+	Timestamp     string  `json:"occurred_at"`
+	CorrelationID string  `json:"correlation_id,omitempty"`
 }
 
 // LocalEventSender is intentionally narrower than Client. It is the only

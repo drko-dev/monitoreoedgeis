@@ -1,16 +1,24 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/edgebacklog"
+	"github.com/drko-dev/monitoreoedgeis/internal/evidence"
 	"github.com/drko-dev/monitoreoedgeis/internal/fulledge"
+	"github.com/drko-dev/monitoreoedgeis/internal/processing"
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 	"github.com/drko-dev/monitoreoedgeis/internal/vision"
 )
+
+// FrameHistoryProvider supplies decoded-frame history for a candidate camera.
+type FrameHistoryProvider interface {
+	FrameHistory(candidateKey string) processing.FrameHistory
+}
 
 // fullEdgeEventConsumer implements vision.EventConsumer: it is the one real
 // place K1's local YOLO output becomes a K5-K8 LocalEvent and, when this
@@ -18,14 +26,27 @@ import (
 // pass, internal/vision and internal/fulledge/internal/edgebacklog were
 // three disconnected trees that only met in tests.
 type fullEdgeEventConsumer struct {
-	svc      *fulledge.Service
-	producer edgebacklog.Producer // nil when unenrolled — see newFullEdgeEventConsumer
-	dataDir  string
-	logger   *slog.Logger
+	svc             *fulledge.Service
+	producer        edgebacklog.Producer // nil when unenrolled — see newFullEdgeEventConsumer
+	clipper         *evidence.Clipper
+	historyProvider FrameHistoryProvider
+	dataDir         string
+	logger          *slog.Logger
 }
 
-func newFullEdgeEventConsumer(svc *fulledge.Service, producer edgebacklog.Producer, dataDir string, logger *slog.Logger) *fullEdgeEventConsumer {
-	return &fullEdgeEventConsumer{svc: svc, producer: producer, dataDir: dataDir, logger: logger}
+func newFullEdgeEventConsumer(svc *fulledge.Service, producer edgebacklog.Producer, clipper *evidence.Clipper, history FrameHistoryProvider, dataDir string, logger *slog.Logger) *fullEdgeEventConsumer {
+	return &fullEdgeEventConsumer{
+		svc:             svc,
+		producer:        producer,
+		clipper:         clipper,
+		historyProvider: history,
+		dataDir:         dataDir,
+		logger:          logger,
+	}
+}
+
+func (c *fullEdgeEventConsumer) SetHistoryProvider(hp FrameHistoryProvider) {
+	c.historyProvider = hp
 }
 
 // ConsumeInference implements vision.EventConsumer.
@@ -102,7 +123,8 @@ func (c *fullEdgeEventConsumer) enqueue(evt *fulledge.LocalEvent) {
 				"width":  evt.BBox.X2 - evt.BBox.X1,
 				"height": evt.BBox.Y2 - evt.BBox.Y1,
 			},
-			Timestamp: evt.SourceTimestamp.UTC().Format(rfc3339Milli),
+			Timestamp:     evt.SourceTimestamp.UTC().Format(rfc3339Milli),
+			CorrelationID: evt.CorrelationID,
 		},
 	}
 	if evt.Evidence != nil && evt.Evidence.ErrorMessage == "" {
@@ -113,13 +135,37 @@ func (c *fullEdgeEventConsumer) enqueue(evt *fulledge.LocalEvent) {
 				slog.String("event_uuid", evt.EventUUID))
 		}
 	}
-	// Clip is deliberately left unset here: nothing in this integration
-	// pass triggers internal/evidence.Clipper for a given event yet (K9's
-	// clip builder exists and is tested, but wiring "which events get a
-	// clip" is a separate decision this batch's scope doesn't cover — see
-	// docs/PROJECT_STATUS.md). Submission.Clip is optional by contract
-	// (edgebacklog nextStage skips a submission with no Clip), so this
-	// degrades to capture-only events, never a blocked/lost event.
+
+	// M8: attempt clip using existing FrameHistory ring buffer.
+	if c.clipper != nil && c.historyProvider != nil {
+		if history := c.historyProvider.FrameHistory(evt.CandidateKey); history != nil {
+			clipRec, err := c.clipper.Capture(context.Background(), history, evt.EventUUID, evt.SourceTimestamp)
+			if err != nil {
+				if c.logger != nil {
+					c.logger.Warn("full edge: failed to generate clip from frame history, submitting event without clip",
+						slog.String("event_uuid", evt.EventUUID),
+						slog.String("candidate_key", evt.CandidateKey),
+						slog.Any("error", err))
+				}
+			} else {
+				if abs, ok := c.resolveEvidencePath(clipRec.RelativePath); ok {
+					sub.Clip = &edgebacklog.Evidence{
+						Path:       abs,
+						SHA256:     clipRec.SHA256,
+						Size:       clipRec.Size,
+						DurationMS: clipRec.DurationMS,
+					}
+				} else if c.logger != nil {
+					c.logger.Warn("full edge: clip path failed containment check, submitting event without clip",
+						slog.String("event_uuid", evt.EventUUID))
+				}
+			}
+		} else if c.logger != nil {
+			c.logger.Warn("full edge: no frame history for candidate key, submitting event without clip",
+				slog.String("event_uuid", evt.EventUUID),
+				slog.String("candidate_key", evt.CandidateKey))
+		}
+	}
 
 	if err := c.producer.Enqueue(sub); err != nil && c.logger != nil {
 		c.logger.Warn("full edge: failed to enqueue local event for sync",

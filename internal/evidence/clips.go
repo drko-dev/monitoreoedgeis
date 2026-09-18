@@ -172,7 +172,7 @@ func (c *Clipper) Capture(ctx context.Context, history FrameHistory, eventUUID s
 
 func (c *Clipper) encode(ctx context.Context, output string, frames []processing.Frame) error {
 	f := frames[0]
-	cmd := exec.CommandContext(ctx, c.cfg.FFmpegPath, "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", fmt.Sprintf("%dx%d", f.OutputWidth, f.OutputHeight), "-r", fmt.Sprintf("%.3f", c.cfg.FrameRate), "-i", "pipe:0", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", output)
+	cmd := exec.CommandContext(ctx, c.cfg.FFmpegPath, "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", fmt.Sprintf("%dx%d", f.OutputWidth, f.OutputHeight), "-r", fmt.Sprintf("%.3f", c.cfg.FrameRate), "-i", "pipe:0", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mp4", output)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
