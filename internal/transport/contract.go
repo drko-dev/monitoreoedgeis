@@ -49,4 +49,11 @@ const (
 	LocalEventsPath   = "/api/v1/edge/local-events"
 	ControlNextPath   = "/api/v1/edge/control/next"
 	ControlReportPath = "/api/v1/edge/control/%s/report"
+	// RemoteConfigNextPath returns the current desired remote-config
+	// document (Hito O). 204 No Content means no config has been assigned
+	// yet; 200 OK returns {"config": {...}}. Polled the same way as
+	// ControlNextPath -- outbound-only, no push, no inbound port.
+	RemoteConfigNextPath = "/api/v1/edge/remote-config/next"
+	// RemoteConfigAckPath reports the outcome of applying one version.
+	RemoteConfigAckPath = "/api/v1/edge/remote-config/ack"
 )

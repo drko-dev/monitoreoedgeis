@@ -38,6 +38,7 @@ type Agent struct {
 	heartbeatErr     error
 	discoveryErr     error
 	controlErr       error
+	remoteConfigErr  error
 	localEventsErr   error
 	rtspManager      *rtsp.Manager
 	videoManager     *processing.Manager
@@ -91,7 +92,12 @@ func New(cfg *config.Config) *Agent {
 	if disc != nil {
 		mods = append(mods, disc)
 	}
-	controlModule, controlErr := newControlModule(cfg, creds, reporter, disc, logging.Component(log, "control"))
+	// remoteConfigModule has no poll loop of its own (Hito O Blocker 1): it
+	// is a sync component driven by control.Module's existing outbound
+	// poll cadence via the "reload_config" command, so it must exist
+	// before newControlModule wires it into controlExecutor.
+	remoteConfigModule, remoteConfigErr := newRemoteConfigModule(cfg, creds, reporter, logging.Component(log, "remote-config"))
+	controlModule, controlErr := newControlModule(cfg, creds, reporter, disc, remoteConfigModule, logging.Component(log, "control"))
 	if controlModule != nil {
 		mods = append(mods, controlModule)
 	}
@@ -231,6 +237,7 @@ func New(cfg *config.Config) *Agent {
 	a.heartbeatErr = hbErr
 	a.discoveryErr = discErr
 	a.controlErr = controlErr
+	a.remoteConfigErr = remoteConfigErr
 	a.localEventsErr = localEventsErr
 	a.modules = newModuleManager(reporter.SetModuleState, mods...)
 	return a
@@ -299,6 +306,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	case a.controlErr != nil:
 		a.log.Error("agent will not become ready: control module could not be built",
 			slog.Any("error", a.controlErr))
+		a.health.Set(health.StateDegraded)
+	case a.remoteConfigErr != nil:
+		a.log.Error("agent will not become ready: remote config module could not be built",
+			slog.Any("error", a.remoteConfigErr))
 		a.health.Set(health.StateDegraded)
 	case a.localEventsErr != nil:
 		a.log.Error("agent will not become ready: local event backlog could not be built",

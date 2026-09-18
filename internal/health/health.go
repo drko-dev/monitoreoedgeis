@@ -23,6 +23,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
+	"github.com/drko-dev/monitoreoedgeis/internal/remoteconfig"
 	"github.com/drko-dev/monitoreoedgeis/internal/rtsp"
 	"github.com/drko-dev/monitoreoedgeis/internal/vision"
 )
@@ -82,6 +83,10 @@ type Snapshot struct {
 	// LocalEventBacklog reports bounded transport state only; evidence paths
 	// and event payloads deliberately never appear on the health endpoint.
 	LocalEventBacklog *edgebacklog.Status `json:"local_event_backlog,omitempty"`
+	// RemoteConfig is the Hito O remote-config lifecycle snapshot
+	// (version, apply status, rollback count). Never carries the full
+	// config document -- payload knobs may be operationally sensitive.
+	RemoteConfig *remoteconfig.Status `json:"remote_config,omitempty"`
 	// Resources exposes whole-host CPU, memory and disk metrics (Milestone N).
 	Resources *ResourcesStatus `json:"resources,omitempty"`
 	// Queues consolidates queue depth and backpressure telemetry per component (Milestone N).
@@ -159,6 +164,7 @@ type Reporter struct {
 	vision            *vision.Status
 	fullEdge          *fulledge.Status
 	localEventBacklog *edgebacklog.Status
+	remoteConfig      *remoteconfig.Status
 	resources         *ResourcesStatus
 	queues            *QueuesStatus
 	cpuSampler        *platform.CPUSampler
@@ -305,6 +311,12 @@ func (r *Reporter) Snapshot() Snapshot {
 		backlog = &copied
 	}
 
+	var rc *remoteconfig.Status
+	if r.remoteConfig != nil {
+		copied := *r.remoteConfig
+		rc = &copied
+	}
+
 	var res *ResourcesStatus
 	if r.resources != nil {
 		copied := *r.resources
@@ -352,6 +364,7 @@ func (r *Reporter) Snapshot() Snapshot {
 		Vision:              vis,
 		FullEdge:            fe,
 		LocalEventBacklog:   backlog,
+		RemoteConfig:        rc,
 		Resources:           res,
 		Queues:              q,
 		InsecureHTTPAllowed: r.cfg.AllowInsecureHTTP,
@@ -421,6 +434,15 @@ func (r *Reporter) SetLocalEventBacklogStatus(s edgebacklog.Status) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.localEventBacklog = &s
+}
+
+// SetRemoteConfigStatus records the latest remote-config lifecycle snapshot
+// (Hito O, implements remoteconfig.HealthSink). Never carries the full
+// config document -- only version/lifecycle bookkeeping.
+func (r *Reporter) SetRemoteConfigStatus(s remoteconfig.Status) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.remoteConfig = &s
 }
 
 // SetPlatformSample records host telemetry gathered by platform.Collect (Milestone N).
