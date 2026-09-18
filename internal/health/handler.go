@@ -19,7 +19,7 @@ func Handler(r *Reporter) http.Handler {
 	})
 
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if r.State() == StateReady {
+		if r.State() == StateReady && r.EdgeVisionReady() {
 			w.WriteHeader(http.StatusOK)
 			return
 		}

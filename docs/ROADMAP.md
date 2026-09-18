@@ -251,18 +251,35 @@ sandbox.
 
 ## K — Full Edge
 
-- K1. processing_mode=edge.
-- K2. YOLO local.
-- K3. Model management.
-- K4. CPU inference.
-- K5. GPU/NPU.
-- K6. Límites hardware.
-- K7. Eventos locales.
-- K8. Evidencias.
-- K9. Clips.
-- K10. Metadata/evidencia al SaaS.
-- K11. Operación offline parcial.
-- K12. Sync posterior.
+## HITO K1–K12 — INTEGRATION FINAL (branch `integration/hito-k-final`,
+merging PR #23 K1-K4, #22 K5-K8, #24 K9-K12). CODE DONE / INTEGRATED
+TESTED. NOT MERGED to main, NOT DEPLOYED. See `docs/PROJECT_STATUS.md`'s
+Hito K section for the full breakdown, including what this integration
+pass wired/fixed (vision->fulledge, bbox semantics, device/backpressure
+reconciliation, evidence path safety, K8->K12 wiring, sync status,
+edge-mode-only gating, model cleanup) and what remains genuinely BLOCKED
+(real Ultralytics smoke, real appliance hardware/camera).
+
+- K1. processing_mode=edge. DONE.
+- K2. YOLO local. DONE.
+- K3. Model management. DONE.
+- K4. CPU inference. DONE.
+- K5. GPU/NPU. DONE — honest device selection (cpu/cuda/auto) as a
+  Go-side *preselection*; the actually-confirmed device the Python worker
+  reports after loading is what status displays.
+- K6. Límites hardware. DONE — disk/memory guards; inference
+  concurrency/queue reconciled with `processing.Router`'s real bounded
+  queue rather than a second, disconnected counter.
+- K7. Eventos locales. DONE — disk-backed atomic JSON event store,
+  created only from real vision.Sink detections (zero detections = zero
+  events), pending/synced/quarantined lifecycle wired to K12's backlog.
+- K8. Evidencias. DONE — atomic JPEG/clip evidence persistence under
+  `GEOCAM_DATA_DIR/evidence/`, path built from a validated UUID only
+  (never a raw candidate_key), sha256 checksum, disk limit protection.
+- K9. Clips. DONE.
+- K10. Metadata/evidencia al SaaS. DONE.
+- K11. Operación offline parcial. DONE.
+- K12. Sync posterior. DONE.
 
 ## L — Transporte seguro Edge ↔ SaaS
 

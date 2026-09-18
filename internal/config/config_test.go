@@ -505,3 +505,64 @@ func TestCloudBandwidthConfig_Invalid(t *testing.T) {
 		})
 	}
 }
+
+func TestFullEdgeConfig_Valid(t *testing.T) {
+	// GEOCAM_EDGE_YOLO_DEVICE (Milestone K1-K4) is the single device knob —
+	// Milestone K5-K8's own GEOCAM_EDGE_INFERENCE_DEVICE/GEOCAM_EDGE_MODEL_NAME
+	// were removed as duplicates during Hito K integration (see
+	// internal/config/config.go's EdgeYOLODevice doc comment).
+	t.Setenv("GEOCAM_EDGE_YOLO_DEVICE", "cuda")
+	t.Setenv("GEOCAM_EDGE_MAX_CONCURRENT_INFERENCE", "4")
+	t.Setenv("GEOCAM_EDGE_INFERENCE_QUEUE_DEPTH", "64")
+	t.Setenv("GEOCAM_EDGE_MIN_FREE_DISK_BYTES", "52428800")
+	t.Setenv("GEOCAM_EDGE_MAX_MEMORY_PERCENT", "85.5")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	if cfg.EdgeYOLODevice != "cuda" {
+		t.Errorf("EdgeYOLODevice = %s, want cuda", cfg.EdgeYOLODevice)
+	}
+	if cfg.EdgeMaxConcurrentInference != 4 {
+		t.Errorf("EdgeMaxConcurrentInference = %d, want 4", cfg.EdgeMaxConcurrentInference)
+	}
+	if cfg.EdgeInferenceQueueDepth != 64 {
+		t.Errorf("EdgeInferenceQueueDepth = %d, want 64", cfg.EdgeInferenceQueueDepth)
+	}
+	if cfg.EdgeMinFreeDiskBytes != 52428800 {
+		t.Errorf("EdgeMinFreeDiskBytes = %d, want 52428800", cfg.EdgeMinFreeDiskBytes)
+	}
+	if cfg.EdgeMaxMemoryPercent != 85.5 {
+		t.Errorf("EdgeMaxMemoryPercent = %f, want 85.5", cfg.EdgeMaxMemoryPercent)
+	}
+}
+
+func TestFullEdgeConfig_Invalid(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+	}{
+		// No "invalid device" case: GEOCAM_EDGE_YOLO_DEVICE accepts any
+		// string at Load() time (it is validated, with a safe fallback to
+		// "auto", by fulledge.ParseDeviceMode in internal/agent's wiring —
+		// see the removed GEOCAM_EDGE_INFERENCE_DEVICE knob's doc comment).
+		{"max concurrent inference zero", map[string]string{"GEOCAM_EDGE_MAX_CONCURRENT_INFERENCE": "0"}},
+		{"max concurrent inference too high", map[string]string{"GEOCAM_EDGE_MAX_CONCURRENT_INFERENCE": "32"}},
+		{"queue depth zero", map[string]string{"GEOCAM_EDGE_INFERENCE_QUEUE_DEPTH": "0"}},
+		{"queue depth too high", map[string]string{"GEOCAM_EDGE_INFERENCE_QUEUE_DEPTH": "512"}},
+		{"memory percent negative", map[string]string{"GEOCAM_EDGE_MAX_MEMORY_PERCENT": "-1"}},
+		{"memory percent over 100", map[string]string{"GEOCAM_EDGE_MAX_MEMORY_PERCENT": "101"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected error for case %q, got nil", tc.name)
+			}
+		})
+	}
+}

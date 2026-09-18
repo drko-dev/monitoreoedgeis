@@ -10,6 +10,10 @@
 *.test
 *.out
 
+# Python (deploy/vision-worker, Milestone K)
+__pycache__/
+*.pyc
+
 # Editor / OS
 .DS_Store
 .idea/

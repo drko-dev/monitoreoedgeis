@@ -13,29 +13,37 @@ import (
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
+	"github.com/drko-dev/monitoreoedgeis/internal/edgebacklog"
+	"github.com/drko-dev/monitoreoedgeis/internal/fulledge"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/logging"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
 	"github.com/drko-dev/monitoreoedgeis/internal/rtsp"
+	"github.com/drko-dev/monitoreoedgeis/internal/vision"
 )
 
 // Agent is the edge agent core.
 type Agent struct {
-	cfg            *config.Config
-	log            *slog.Logger
-	identity       identity.Identity
-	identityErr    error
-	credentials    credentials.Credentials
-	credentialsErr error
-	platform       platform.Info
-	health         *health.Reporter
-	heartbeatErr   error
-	discoveryErr   error
-	rtspManager    *rtsp.Manager
-	videoManager   *processing.Manager
-	modules        *moduleManager
+	cfg              *config.Config
+	log              *slog.Logger
+	identity         identity.Identity
+	identityErr      error
+	credentials      credentials.Credentials
+	credentialsErr   error
+	platform         platform.Info
+	health           *health.Reporter
+	heartbeatErr     error
+	discoveryErr     error
+	localEventsErr   error
+	rtspManager      *rtsp.Manager
+	videoManager     *processing.Manager
+	visionSink       *vision.Sink
+	fullEdgeService  *fulledge.Service
+	fullEdgeConsumer *fullEdgeEventConsumer
+	localEvents      *edgebacklog.Backlog
+	modules          *moduleManager
 }
 
 // New wires the agent from configuration. It performs no network I/O beyond
@@ -80,6 +88,40 @@ func New(cfg *config.Config) *Agent {
 	disc, discErr := newDiscoveryModule(cfg, creds, reporter, logging.Component(log, "discovery"))
 	if disc != nil {
 		mods = append(mods, disc)
+	}
+	localEvents, localEventsErr := newLocalEventsModule(cfg, creds, reporter, logging.Component(log, "local-events"))
+	if localEvents != nil {
+		mods = append(mods, localEvents)
+		a.localEvents = localEvents.backlog
+	}
+
+	// Built before the video pipeline block below (K1->K8 wiring): the
+	// vision Sink constructed there needs a live fullEdgeService to hand
+	// real detections to via a vision.EventConsumer adapter — see
+	// fulledge_wiring.go. newFullEdgeService itself still returns nil
+	// outside ModeEdge, same gate as always.
+	a.fullEdgeService = newFullEdgeService(cfg, ident, creds, reporter, log)
+	if a.fullEdgeService != nil {
+		// a.localEvents (the backlog) is nil for an unenrolled Edge;
+		// fullEdgeEventConsumer handles that (events still get created and
+		// stored locally, just not queued for sync yet).
+		var producer edgebacklog.Producer
+		if a.localEvents != nil {
+			producer = a.localEvents
+			a.localEvents.SetSyncCallbacks(
+				func(eventUUID string) {
+					if err := a.fullEdgeService.Store().MarkSynced(eventUUID); err != nil {
+						log.Warn("full edge: failed to mark event synced", slog.String("event_uuid", eventUUID), slog.Any("error", err))
+					}
+				},
+				func(eventUUID, reason string) {
+					if err := a.fullEdgeService.Store().MarkQuarantined(eventUUID, reason); err != nil {
+						log.Warn("full edge: failed to mark event quarantined", slog.String("event_uuid", eventUUID), slog.Any("error", err))
+					}
+				},
+			)
+		}
+		a.fullEdgeConsumer = newFullEdgeEventConsumer(a.fullEdgeService, producer, cfg.DataDir, log)
 	}
 
 	if cfg.ConnectivityEnabled {
@@ -134,6 +176,25 @@ func New(cfg *config.Config) *Agent {
 			if cs := newCloudSink(cfg, creds, reporter, log); cs != nil {
 				extraSinks = append(extraSinks, cs)
 			}
+			// Edge mode (Milestone K): local YOLO is the sole inference
+			// authority, so this replaces newCloudSink's frame stream
+			// rather than adding to it — newCloudSink already returns nil
+			// outside ModeCloud/ModeHybrid, so the two are mutually
+			// exclusive by construction, never registered together.
+			//
+			// consumer stays a nil vision.EventConsumer (not a typed-nil
+			// *fullEdgeEventConsumer wrapped in the interface) when Full
+			// Edge isn't configured — vision.Sink's `consumer != nil` check
+			// would otherwise see a non-nil interface holding a nil pointer.
+			var consumer vision.EventConsumer
+			if a.fullEdgeConsumer != nil {
+				consumer = a.fullEdgeConsumer
+			}
+			if vs, mod := newVisionSink(cfg, reporter, consumer, log); vs != nil {
+				extraSinks = append(extraSinks, vs)
+				mods = append(mods, mod)
+				a.visionSink = vs
+			}
 
 			videoMgr := processing.NewManager(procCfg, rtspMgr, reporter, logging.Component(log, "video-pipeline"), extraSinks...)
 			mods = append(mods, videoMgr)
@@ -143,6 +204,7 @@ func New(cfg *config.Config) *Agent {
 
 	a.heartbeatErr = hbErr
 	a.discoveryErr = discErr
+	a.localEventsErr = localEventsErr
 	a.modules = newModuleManager(reporter.SetModuleState, mods...)
 	return a
 }
@@ -156,6 +218,26 @@ func (a *Agent) RTSPManager() *rtsp.Manager { return a.rtspManager }
 // VideoManager exposes the video pipeline manager (nil if the video
 // pipeline or RTSP connectivity is disabled).
 func (a *Agent) VideoManager() *processing.Manager { return a.videoManager }
+
+// VisionStatus returns Milestone K's local-inference status block, or nil
+// when this Edge is not in ModeEdge (the vision sink/worker are never
+// constructed outside it).
+func (a *Agent) VisionStatus() *vision.Status {
+	if a.visionSink == nil {
+		return nil
+	}
+	st := a.visionSink.Status()
+	return &st
+}
+
+// FullEdgeService exposes the Full Edge service (nil if processing mode is not edge).
+func (a *Agent) FullEdgeService() *fulledge.Service { return a.fullEdgeService }
+
+// LocalEventProducer exposes the narrow durable submission interface a
+// local event/evidence producer uses to enqueue for SaaS sync. It is nil
+// when the Edge is unenrolled. As of this integration pass, the producer
+// is internal/agent/fulledge_wiring.go's adapter, not a placeholder.
+func (a *Agent) LocalEventProducer() edgebacklog.Producer { return a.localEvents }
 
 // Run starts the agent and blocks until ctx is cancelled, then shuts down
 // gracefully. A cancelled context is a clean stop, not an error.
@@ -186,6 +268,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	case a.discoveryErr != nil:
 		a.log.Error("agent will not become ready: discovery module could not be built",
 			slog.Any("error", a.discoveryErr))
+		a.health.Set(health.StateDegraded)
+	case a.localEventsErr != nil:
+		a.log.Error("agent will not become ready: local event backlog could not be built",
+			slog.Any("error", a.localEventsErr))
 		a.health.Set(health.StateDegraded)
 	default:
 		a.health.Set(health.StateReady)

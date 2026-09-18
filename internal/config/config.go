@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -72,6 +73,61 @@ type Config struct {
 	CloudMaxBytesPerSec int64
 	CloudBurstBytes     int64
 	CloudMaxFPS         float64
+	// Local YOLO vision-worker settings (Milestone K1-K4). Meaningless unless
+	// ProcessingMode == ModeEdge — the vision sink is only constructed then
+	// (see internal/agent/vision_module.go), matching how Hybrid/CloudSink
+	// derive their enablement from ProcessingMode rather than a second knob.
+	// EdgeYOLOWorkerCmd has no production default: inventing a Python
+	// interpreter path here would silently paper over a missing
+	// installation. Empty means "not configured" -- the agent reports
+	// NOT_READY/worker_not_configured rather than guessing.
+	//
+	// EdgeYOLODevice is the single source of truth for which device the
+	// vision worker is *asked* to use (K1-K4's --device flag). Milestone
+	// K5-K8 originally defined a second, disconnected
+	// GEOCAM_EDGE_INFERENCE_DEVICE knob for the same concept (Go-side
+	// CUDA-capability preselection feeding fulledge.HardwareManager) — that
+	// duplicate has been removed; internal/agent's wiring resolves
+	// EdgeYOLODevice through HardwareManager (auto -> cpu/cuda preselection)
+	// before passing it to the worker, and the *actually confirmed* device
+	// the worker reports back via its health handshake is what fulledge
+	// status displays (see internal/vision.InferenceResult.Device).
+	EdgeYOLOWorkerCmd         string
+	EdgeYOLOWorkerArgs        []string
+	EdgeYOLOModelsDir         string
+	EdgeYOLOPersonModel       string
+	EdgeYOLOVehicleModel      string
+	EdgeYOLOPersonConfidence  float64
+	EdgeYOLOVehicleConfidence float64
+	EdgeYOLONMSIoU            float64
+	EdgeYOLODevice            string
+	EdgeYOLOImgSize           int
+	EdgeYOLOSocketPath        string
+	EdgeYOLOStartTimeout      time.Duration
+	EdgeYOLOInferTimeout      time.Duration
+	// Full Edge local event/evidence settings (Milestone K5-K8).
+	// EdgeMaxConcurrentInference/EdgeInferenceQueueDepth describe the
+	// *real* effective concurrency/queue of the vision sink's Router path
+	// (processing.Router runs exactly one worker goroutine per sink through
+	// one bounded queue — see internal/processing/router.go) — reconciled
+	// with, not a second independent limit alongside, that queue.
+	EdgeMaxConcurrentInference int
+	EdgeInferenceQueueDepth    int
+	EdgeMinFreeDiskBytes       uint64
+	EdgeMaxMemoryPercent       float64
+	// Local event transport backlog (K10-K12). Unlike the frame buffer this
+	// has conservative defaults because events must survive a SaaS outage.
+	LocalEventBacklogMaxOperations int
+	LocalEventBacklogMaxBytes      int64
+	// EdgeMaxClipSizeBytes is a separate, explicit technical ceiling for MP4
+	// clip evidence (K9/integration item #8) — deliberately NOT the same
+	// knob as MAX_CAPTURE_SIZE_BYTES on the SaaS side (that one sizes a
+	// single JPEG). A clip this Edge would build larger than what the SaaS
+	// accepts is rejected locally (never attempted/never uploaded to be
+	// quarantined pointlessly) — see internal/evidence.Clipper's caller in
+	// internal/agent. Zero means "not configured": no invented commercial
+	// default here, only a real one wired to match the SaaS's actual limit.
+	EdgeMaxClipSizeBytes int64
 }
 
 // HybridROI is one normalized (0..1) region of interest parsed from
@@ -181,6 +237,58 @@ const (
 	DefaultCloudMaxBytesPerSec = 0
 	DefaultCloudBurstBytes     = 0
 	DefaultCloudMaxFPS         = 0.0
+	// DefaultLocalEventBacklogMaxOperations/MaxBytes (Milestone K10-K12):
+	// technical bounds only, no invented commercial retention policy.
+	DefaultLocalEventBacklogMaxOperations = 100
+	DefaultLocalEventBacklogMaxBytes      = 512 << 20
+	// DefaultEdgeMaxClipSizeBytes (Milestone K9/integration item #8): a
+	// technical ceiling distinct from the SaaS's JPEG-sized
+	// MAX_CAPTURE_SIZE_BYTES=5MB — clips are naturally larger than a single
+	// frame. 20MB comfortably covers a few seconds of H.264 at the
+	// resolutions this pipeline already produces (Hito H: max 1920x1080),
+	// without being large enough to make a rejected-clip retry loop cheap.
+	// Not a business/commercial number — a real, coherent value the Edge
+	// enforces locally before ever attempting an upload the SaaS would
+	// reject anyway.
+	DefaultEdgeMaxClipSizeBytes = 20 << 20
+	// Local YOLO vision-worker defaults and bounds (Milestone K).
+	// DefaultEdgeYOLOModelsDirName is a subdirectory of GEOCAM_DATA_DIR, kept
+	// outside any versioned release tree so an agent update never destroys
+	// installed weights (K3).
+	DefaultEdgeYOLOModelsDirName     = "models"
+	DefaultEdgeYOLOPersonModel       = "yolo11s-pose.pt"
+	DefaultEdgeYOLOVehicleModel      = "yolo11n.pt"
+	DefaultEdgeYOLOPersonConfidence  = 0.5
+	DefaultEdgeYOLOVehicleConfidence = 0.5
+	MinEdgeYOLOConfidence            = 0.0
+	MaxEdgeYOLOConfidence            = 1.0
+	DefaultEdgeYOLONMSIoU            = 0.45
+	MinEdgeYOLONMSIoU                = 0.0
+	MaxEdgeYOLONMSIoU                = 1.0
+	DefaultEdgeYOLODevice            = "cpu"
+	DefaultEdgeYOLOImgSize           = 640
+	MinEdgeYOLOImgSize               = 128
+	MaxEdgeYOLOImgSize               = 1920
+	DefaultEdgeYOLOSocketName        = "vision-worker.sock"
+	DefaultEdgeYOLOStartTimeout      = 30 * time.Second
+	MinEdgeYOLOStartTimeout          = 1 * time.Second
+	MaxEdgeYOLOStartTimeout          = 5 * time.Minute
+	DefaultEdgeYOLOInferTimeout      = 5 * time.Second
+	MinEdgeYOLOInferTimeout          = 100 * time.Millisecond
+	MaxEdgeYOLOInferTimeout          = 60 * time.Second
+
+	// Full Edge defaults and bounds (Milestone K5-K8).
+	// DefaultEdgeMaxConcurrentInference matches processing.Router's real
+	// invariant of exactly one worker goroutine per sink — see the struct
+	// field doc comment above.
+	DefaultEdgeMaxConcurrentInference = 1
+	MinEdgeMaxConcurrentInference     = 1
+	MaxEdgeMaxConcurrentInference     = 16
+	DefaultEdgeInferenceQueueDepth    = 32
+	MinEdgeInferenceQueueDepth        = 1
+	MaxEdgeInferenceQueueDepth        = 256
+	DefaultEdgeMinFreeDiskBytes       = 104857600 // 100MB
+	DefaultEdgeMaxMemoryPercent       = 0.0       // disabled
 )
 
 var validLogLevels = []string{"debug", "info", "warn", "error"}
@@ -223,6 +331,25 @@ func Load() (*Config, error) {
 		CloudMaxBytesPerSec:         DefaultCloudMaxBytesPerSec,
 		CloudBurstBytes:             DefaultCloudBurstBytes,
 		CloudMaxFPS:                 DefaultCloudMaxFPS,
+
+		EdgeYOLOPersonModel:       DefaultEdgeYOLOPersonModel,
+		EdgeYOLOVehicleModel:      DefaultEdgeYOLOVehicleModel,
+		EdgeYOLOPersonConfidence:  DefaultEdgeYOLOPersonConfidence,
+		EdgeYOLOVehicleConfidence: DefaultEdgeYOLOVehicleConfidence,
+		EdgeYOLONMSIoU:            DefaultEdgeYOLONMSIoU,
+		EdgeYOLODevice:            DefaultEdgeYOLODevice,
+		EdgeYOLOImgSize:           DefaultEdgeYOLOImgSize,
+		EdgeYOLOStartTimeout:      DefaultEdgeYOLOStartTimeout,
+		EdgeYOLOInferTimeout:      DefaultEdgeYOLOInferTimeout,
+
+		EdgeMaxConcurrentInference: DefaultEdgeMaxConcurrentInference,
+		EdgeInferenceQueueDepth:    DefaultEdgeInferenceQueueDepth,
+		EdgeMinFreeDiskBytes:       DefaultEdgeMinFreeDiskBytes,
+		EdgeMaxMemoryPercent:       DefaultEdgeMaxMemoryPercent,
+
+		LocalEventBacklogMaxOperations: DefaultLocalEventBacklogMaxOperations,
+		LocalEventBacklogMaxBytes:      DefaultLocalEventBacklogMaxBytes,
+		EdgeMaxClipSizeBytes:           DefaultEdgeMaxClipSizeBytes,
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_PROCESSING_MODE")); raw != "" {
@@ -589,6 +716,158 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid cloud max FPS %q: must be non-negative", raw)
 		}
 		cfg.CloudMaxFPS = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_LOCAL_EVENT_BACKLOG_MAX_OPERATIONS")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil || v <= 0 {
+			return nil, fmt.Errorf("invalid local event backlog max operations %q: must be positive", raw)
+		}
+		cfg.LocalEventBacklogMaxOperations = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_LOCAL_EVENT_BACKLOG_MAX_BYTES")); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || v <= 0 {
+			return nil, fmt.Errorf("invalid local event backlog max bytes %q: must be positive", raw)
+		}
+		cfg.LocalEventBacklogMaxBytes = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_MAX_CLIP_SIZE_BYTES")); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || v <= 0 {
+			return nil, fmt.Errorf("invalid edge max clip size %q: must be positive", raw)
+		}
+		cfg.EdgeMaxClipSizeBytes = v
+	}
+
+	// Local YOLO vision-worker settings (Milestone K). ModelsDir/SocketPath
+	// defaults are derived from the final cfg.DataDir (parsed above), not a
+	// fixed path, so GEOCAM_DATA_DIR alone still relocates them.
+	cfg.EdgeYOLOModelsDir = filepath.Join(cfg.DataDir, DefaultEdgeYOLOModelsDirName)
+	cfg.EdgeYOLOSocketPath = filepath.Join(cfg.DataDir, "run", DefaultEdgeYOLOSocketName)
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_WORKER_CMD")); raw != "" {
+		cfg.EdgeYOLOWorkerCmd = raw
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_WORKER_ARGS")); raw != "" {
+		cfg.EdgeYOLOWorkerArgs = strings.Fields(raw)
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_MODELS_DIR")); raw != "" {
+		cfg.EdgeYOLOModelsDir = raw
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_SOCKET_PATH")); raw != "" {
+		cfg.EdgeYOLOSocketPath = raw
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_DEVICE")); raw != "" {
+		cfg.EdgeYOLODevice = raw
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_IMGSZ")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge YOLO image size %q: %w", raw, err)
+		}
+		if v < MinEdgeYOLOImgSize || v > MaxEdgeYOLOImgSize {
+			return nil, fmt.Errorf("invalid edge YOLO image size %q: must be between %d and %d",
+				raw, MinEdgeYOLOImgSize, MaxEdgeYOLOImgSize)
+		}
+		cfg.EdgeYOLOImgSize = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_PERSON_CONFIDENCE")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge YOLO person confidence %q: %w", raw, err)
+		}
+		if v < MinEdgeYOLOConfidence || v > MaxEdgeYOLOConfidence {
+			return nil, fmt.Errorf("invalid edge YOLO person confidence %q: must be between %g and %g",
+				raw, MinEdgeYOLOConfidence, MaxEdgeYOLOConfidence)
+		}
+		cfg.EdgeYOLOPersonConfidence = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_VEHICLE_CONFIDENCE")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge YOLO vehicle confidence %q: %w", raw, err)
+		}
+		if v < MinEdgeYOLOConfidence || v > MaxEdgeYOLOConfidence {
+			return nil, fmt.Errorf("invalid edge YOLO vehicle confidence %q: must be between %g and %g",
+				raw, MinEdgeYOLOConfidence, MaxEdgeYOLOConfidence)
+		}
+		cfg.EdgeYOLOVehicleConfidence = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_NMS_IOU")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge YOLO NMS IoU %q: %w", raw, err)
+		}
+		if v < MinEdgeYOLONMSIoU || v > MaxEdgeYOLONMSIoU {
+			return nil, fmt.Errorf("invalid edge YOLO NMS IoU %q: must be between %g and %g",
+				raw, MinEdgeYOLONMSIoU, MaxEdgeYOLONMSIoU)
+		}
+		cfg.EdgeYOLONMSIoU = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_START_TIMEOUT")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge YOLO start timeout %q: %w", raw, err)
+		}
+		if d < MinEdgeYOLOStartTimeout || d > MaxEdgeYOLOStartTimeout {
+			return nil, fmt.Errorf("invalid edge YOLO start timeout %q: must be between %s and %s",
+				raw, MinEdgeYOLOStartTimeout, MaxEdgeYOLOStartTimeout)
+		}
+		cfg.EdgeYOLOStartTimeout = d
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_INFER_TIMEOUT")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge YOLO infer timeout %q: %w", raw, err)
+		}
+		if d < MinEdgeYOLOInferTimeout || d > MaxEdgeYOLOInferTimeout {
+			return nil, fmt.Errorf("invalid edge YOLO infer timeout %q: must be between %s and %s",
+				raw, MinEdgeYOLOInferTimeout, MaxEdgeYOLOInferTimeout)
+		}
+		cfg.EdgeYOLOInferTimeout = d
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_MAX_CONCURRENT_INFERENCE")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge max concurrent inference %q: %w", raw, err)
+		}
+		if v < MinEdgeMaxConcurrentInference || v > MaxEdgeMaxConcurrentInference {
+			return nil, fmt.Errorf("edge max concurrent inference %d out of range [%d, %d]",
+				v, MinEdgeMaxConcurrentInference, MaxEdgeMaxConcurrentInference)
+		}
+		cfg.EdgeMaxConcurrentInference = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_INFERENCE_QUEUE_DEPTH")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge inference queue depth %q: %w", raw, err)
+		}
+		if v < MinEdgeInferenceQueueDepth || v > MaxEdgeInferenceQueueDepth {
+			return nil, fmt.Errorf("edge inference queue depth %d out of range [%d, %d]",
+				v, MinEdgeInferenceQueueDepth, MaxEdgeInferenceQueueDepth)
+		}
+		cfg.EdgeInferenceQueueDepth = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_MIN_FREE_DISK_BYTES")); raw != "" {
+		v, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge min free disk bytes %q: %w", raw, err)
+		}
+		cfg.EdgeMinFreeDiskBytes = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_MAX_MEMORY_PERCENT")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge max memory percent %q: %w", raw, err)
+		}
+		if v < 0 || v > 100 {
+			return nil, fmt.Errorf("edge max memory percent %.1f out of range [0, 100]", v)
+		}
+		cfg.EdgeMaxMemoryPercent = v
 	}
 
 	// Fail-fast: reject an insecure http:// SaaS URL here, before any

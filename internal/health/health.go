@@ -17,11 +17,14 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/cloudsink"
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
+	"github.com/drko-dev/monitoreoedgeis/internal/edgebacklog"
+	"github.com/drko-dev/monitoreoedgeis/internal/fulledge"
 	"github.com/drko-dev/monitoreoedgeis/internal/heartbeat"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
 	"github.com/drko-dev/monitoreoedgeis/internal/rtsp"
+	"github.com/drko-dev/monitoreoedgeis/internal/vision"
 )
 
 // State is the lifecycle state of the agent.
@@ -67,22 +70,37 @@ type Snapshot struct {
 	// telemetry only — never a priced or estimated cost (see
 	// internal/cloudsink).
 	Cloud *cloudsink.Status `json:"cloud,omitempty"`
+	// Vision is Milestone K's local YOLO worker/model status. Omitted
+	// outside ProcessingMode=edge. Never carries a frame, an RTSP URI, or a
+	// credential — only worker lifecycle state, model file metadata, and
+	// counters (see internal/vision.Status).
+	Vision *vision.Status `json:"vision,omitempty"`
+	// FullEdge is the Milestone K Full Edge observability snapshot
+	// (local detections, events, evidence, device, hardware, limits).
+	// Omitted when processing mode is not edge or service unconfigured.
+	FullEdge *fulledge.Status `json:"full_edge,omitempty"`
+	// LocalEventBacklog reports bounded transport state only; evidence paths
+	// and event payloads deliberately never appear on the health endpoint.
+	LocalEventBacklog *edgebacklog.Status `json:"local_event_backlog,omitempty"`
 }
 
 // Reporter holds the mutable health state of the agent, including per-module
 // lifecycle state. It is the single safe accessor for runtime state — it is
 // safe for concurrent use and nothing about it is a package-level global.
 type Reporter struct {
-	mu               sync.RWMutex
-	state            State
-	startedAt        time.Time
-	modules          map[string]string
-	credentialStatus string
-	heartbeat        *heartbeat.Status
-	discovery        *discovery.ModuleStatus
-	cameras          []rtsp.CameraStreamStatus
-	videoPipeline    *processing.VideoPipelineSummary
-	cloud            *cloudsink.Status
+	mu                sync.RWMutex
+	state             State
+	startedAt         time.Time
+	modules           map[string]string
+	credentialStatus  string
+	heartbeat         *heartbeat.Status
+	discovery         *discovery.ModuleStatus
+	cameras           []rtsp.CameraStreamStatus
+	videoPipeline     *processing.VideoPipelineSummary
+	cloud             *cloudsink.Status
+	vision            *vision.Status
+	fullEdge          *fulledge.Status
+	localEventBacklog *edgebacklog.Status
 
 	version string
 	cfg     *config.Config
@@ -206,25 +224,45 @@ func (r *Reporter) Snapshot() Snapshot {
 		copied := *r.cloud
 		cloud = &copied
 	}
+	var fe *fulledge.Status
+	if r.fullEdge != nil {
+		copied := *r.fullEdge
+		fe = &copied
+	}
+
+	var vis *vision.Status
+	if r.vision != nil {
+		copied := *r.vision
+		vis = &copied
+	}
+
+	var backlog *edgebacklog.Status
+	if r.localEventBacklog != nil {
+		copied := *r.localEventBacklog
+		backlog = &copied
+	}
 
 	return Snapshot{
-		Status:           r.state,
-		Version:          r.version,
-		EdgeID:           r.ident.EdgeID,
-		EnrollmentStatus: r.ident.Status.String(),
-		CredentialStatus: r.credentialStatus,
-		Hostname:         r.host.Hostname,
-		OS:               r.host.OS,
-		Architecture:     r.host.GOARCH,
-		ProcessingMode:   r.cfg.ProcessingMode.String(),
-		UptimeSeconds:    int64(uptime.Seconds()),
-		Uptime:           uptime.Round(time.Second).String(),
-		Modules:          modules,
-		Heartbeat:        hb,
-		Discovery:        disc,
-		Cameras:          cams,
-		VideoPipeline:    vp,
-		Cloud:            cloud,
+		Status:            r.state,
+		Version:           r.version,
+		EdgeID:            r.ident.EdgeID,
+		EnrollmentStatus:  r.ident.Status.String(),
+		CredentialStatus:  r.credentialStatus,
+		Hostname:          r.host.Hostname,
+		OS:                r.host.OS,
+		Architecture:      r.host.GOARCH,
+		ProcessingMode:    r.cfg.ProcessingMode.String(),
+		UptimeSeconds:     int64(uptime.Seconds()),
+		Uptime:            uptime.Round(time.Second).String(),
+		Modules:           modules,
+		Heartbeat:         hb,
+		Discovery:         disc,
+		Cameras:           cams,
+		VideoPipeline:     vp,
+		Cloud:             cloud,
+		Vision:            vis,
+		FullEdge:          fe,
+		LocalEventBacklog: backlog,
 	}
 }
 
@@ -242,4 +280,53 @@ func (r *Reporter) SetCloudStatus(s cloudsink.Status) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cloud = &s
+}
+
+// SetVisionStatus records the latest local YOLO worker/model status
+// (implements vision.HealthReporter). Called after every Route (Milestone
+// K), same push model as SetCloudStatus.
+func (r *Reporter) SetVisionStatus(s vision.Status) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.vision = &s
+}
+
+// VisionStatus returns the last-recorded vision status, or nil if none has
+// been recorded yet.
+func (r *Reporter) VisionStatus() *vision.Status {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.vision
+}
+
+// EdgeVisionReady reports whether the /readyz gate on the local inference
+// runtime is satisfied: true when ProcessingMode isn't edge (nothing to
+// gate on — same as every other mode today), or when it is edge and the
+// vision worker has actually reached vision.StateReady. This is the one
+// place /readyz depends on a subsystem's deep state (K1) — deliberately
+// narrow, since the package doc's "local health independent of SaaS
+// reachability" rule still holds for everything else (RTSP, heartbeat,
+// discovery).
+func (r *Reporter) EdgeVisionReady() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.cfg == nil || r.cfg.ProcessingMode != config.ModeEdge {
+		return true
+	}
+	return r.vision != nil && r.vision.Worker.State == vision.StateReady
+}
+
+// SetFullEdgeStatus records the latest Full Edge observability snapshot
+// (implements fulledge.HealthSink).
+func (r *Reporter) SetFullEdgeStatus(s fulledge.Status) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fullEdge = &s
+}
+
+// SetLocalEventBacklogStatus accepts only aggregate, safe sync telemetry.
+func (r *Reporter) SetLocalEventBacklogStatus(s edgebacklog.Status) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.localEventBacklog = &s
 }
