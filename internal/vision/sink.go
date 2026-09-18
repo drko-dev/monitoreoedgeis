@@ -27,10 +27,11 @@ const jpegQuality = 90
 // ProcessingMode being ModeCloud/ModeHybrid, and edge mode registers this
 // Sink instead.
 type Sink struct {
-	worker *Worker
-	models *ModelManager
-	health HealthReporter // optional; nil in tests that don't care
-	logger *slog.Logger
+	worker   *Worker
+	models   *ModelManager
+	health   HealthReporter // optional; nil in tests that don't care
+	consumer EventConsumer  // optional; nil means "no local-event pipeline downstream"
+	logger   *slog.Logger
 
 	mu   sync.Mutex
 	last InferenceResult
@@ -47,14 +48,32 @@ type HealthReporter interface {
 	SetVisionStatus(Status)
 }
 
+// EventConsumer receives every inference result that had at least one
+// detection — Milestone K5-K8's local event/evidence pipeline
+// (internal/fulledge, wired in via internal/agent) is the real
+// implementation; this package only defines the narrow interface so
+// vision never imports fulledge (same cycle-avoidance pattern as
+// HealthReporter above). jpeg is the exact bytes the worker was sent, so
+// the consumer never has to re-encode the frame.
+//
+// vision.Sink is the sole place a real InferenceResult with detections is
+// produced (K1's "YOLO detection -> LocalEvent -> capture" pipeline) — an
+// EventConsumer wired here is the only way that ever happens for real,
+// rather than only from a test constructing a fulledge.InferenceResult by
+// hand.
+type EventConsumer interface {
+	ConsumeInference(result InferenceResult, jpeg []byte)
+}
+
 // NewSink wraps worker as a routing Sink. Callers own worker's lifecycle
 // only via Sink.Close (implements the router's sinkCloser interface).
-// health may be nil (tests, or callers that only read Status() directly).
-func NewSink(worker *Worker, models *ModelManager, health HealthReporter, logger *slog.Logger) *Sink {
+// health and consumer may both be nil (tests, or a caller that only reads
+// Status() directly / has no local-event pipeline to feed).
+func NewSink(worker *Worker, models *ModelManager, health HealthReporter, consumer EventConsumer, logger *slog.Logger) *Sink {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	s := &Sink{worker: worker, models: models, health: health, logger: logger}
+	s := &Sink{worker: worker, models: models, health: health, consumer: consumer, logger: logger}
 	worker.SetOnStateChange(s.publishStatus)
 	return s
 }
@@ -106,6 +125,13 @@ func (s *Sink) Route(f processing.Frame) error {
 	s.mu.Lock()
 	s.last = result
 	s.mu.Unlock()
+
+	// K1->K8 wiring: zero detections means zero events (the consumer's own
+	// job to enforce too, but never even calling it here keeps that
+	// invariant true by construction rather than by convention).
+	if s.consumer != nil && len(result.Detections) > 0 {
+		s.consumer.ConsumeInference(result, buf.Bytes())
+	}
 	return nil
 }
 

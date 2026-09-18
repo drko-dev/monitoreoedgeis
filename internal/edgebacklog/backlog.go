@@ -77,6 +77,24 @@ type Backlog struct {
 	lastError   string
 	degraded    bool
 	quarantined int
+
+	// onSynced/onQuarantined let a caller (the K7 EventStore, via
+	// internal/agent's wiring) keep its own SyncStatus in step with this
+	// backlog's real outcome, instead of the two drifting independently —
+	// see SetSyncCallbacks. Both are optional and called with b.mu held, so
+	// they must not call back into the Backlog.
+	onSynced      func(eventUUID string)
+	onQuarantined func(eventUUID, reason string)
+}
+
+// SetSyncCallbacks registers the hooks a record's terminal state (fully
+// synced or permanently quarantined) invokes. Either may be nil. Must be
+// called before Run starts draining, and only once.
+func (b *Backlog) SetSyncCallbacks(onSynced func(eventUUID string), onQuarantined func(eventUUID, reason string)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.onSynced = onSynced
+	b.onQuarantined = onQuarantined
 }
 
 // Run polls the FIFO until ctx is cancelled. Cancellation is a clean shutdown:
@@ -222,10 +240,12 @@ func (b *Backlog) ProcessOne(ctx context.Context, sender transport.LocalEventSen
 			r.Stage = nextStage(r.Submission, "clip")
 		default:
 			b.removeLocked(r)
+			b.notifySynced(r)
 			return true
 		}
 		if r.Stage == "complete" {
 			b.removeLocked(r)
+			b.notifySynced(r)
 			return true
 		}
 		b.queue[0] = r
@@ -234,7 +254,11 @@ func (b *Backlog) ProcessOne(ctx context.Context, sender transport.LocalEventSen
 	}
 	b.lastError = safeError(err)
 	if errors.Is(err, transport.ErrInvalidRequest) || errors.Is(err, transport.ErrUnexpectedStatus) {
+		reason := b.lastError
 		b.quarantineLocked(r)
+		if b.onQuarantined != nil {
+			b.onQuarantined(r.Submission.Event.EventUUID, reason)
+		}
 		return true
 	}
 	r.Attempts++
@@ -306,6 +330,12 @@ func (b *Backlog) writeLocked(r record) error {
 	return os.Rename(tmp, b.path(r))
 }
 func (b *Backlog) removeLocked(r record) { _ = os.Remove(b.path(r)); b.queue = b.queue[1:] }
+
+func (b *Backlog) notifySynced(r record) {
+	if b.onSynced != nil {
+		b.onSynced(r.Submission.Event.EventUUID)
+	}
+}
 func (b *Backlog) quarantineLocked(r record) {
 	_ = os.Rename(b.path(r), filepath.Join(b.cfg.Dir, "quarantine", fmt.Sprintf("%020d.json", r.Sequence)))
 	b.queue = b.queue[1:]

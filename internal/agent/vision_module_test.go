@@ -20,7 +20,7 @@ func TestNewVisionSink_OnlyEdgeMode(t *testing.T) {
 		cfg := testConfig(t)
 		cfg.ProcessingMode = mode
 		reporter := health.New("test", cfg, identity.Identity{}, platform.Info{})
-		sink, mod := newVisionSink(cfg, reporter, log)
+		sink, mod := newVisionSink(cfg, reporter, nil, log)
 		if sink != nil || mod != nil {
 			t.Fatalf("mode %s: newVisionSink returned non-nil, want nil (edge-only)", mode)
 		}
@@ -36,7 +36,7 @@ func TestNewVisionSink_EdgeModeBuildsWorker(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.ProcessingMode = config.ModeEdge
 	reporter := health.New("test", cfg, identity.Identity{}, platform.Info{})
-	sink, mod := newVisionSink(cfg, reporter, log)
+	sink, mod := newVisionSink(cfg, reporter, nil, log)
 	if sink == nil || mod == nil {
 		t.Fatal("newVisionSink returned nil in edge mode")
 	}

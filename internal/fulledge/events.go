@@ -33,7 +33,8 @@ type LocalEvent struct {
 	Model                   string           `json:"model"`
 	Device                  string           `json:"device"`
 	ProcessingMode          string           `json:"processing_mode"` // always "edge"
-	SyncStatus              SyncStatus       `json:"sync_status"`     // "pending"
+	SyncStatus              SyncStatus       `json:"sync_status"`     // "pending" | "synced" | "failed"
+	QuarantineReason        string           `json:"quarantine_reason,omitempty"`
 	CreatedAt               time.Time        `json:"created_at"`
 	Detections              []LocalDetection `json:"detections,omitempty"`
 	Evidence                *EvidenceRef     `json:"evidence,omitempty"`

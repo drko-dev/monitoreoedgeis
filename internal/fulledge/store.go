@@ -112,6 +112,84 @@ func (s *EventStore) Save(evt *LocalEvent) error {
 	return nil
 }
 
+// MarkSynced transitions a persisted event to SyncStatusSynced once K12's
+// backlog confirms metadata+capture+clip all landed on the SaaS. Without
+// this, EventStore's SyncStatus stayed "pending" forever regardless of
+// what actually happened to the event (see internal/agent's wiring, which
+// registers this as edgebacklog.Backlog's onSynced callback).
+func (s *EventStore) MarkSynced(eventUUID string) error {
+	return s.transitionLocked(eventUUID, SyncStatusSynced, "")
+}
+
+// MarkQuarantined transitions a persisted event to SyncStatusFailed after
+// K12's backlog gives up on it permanently (invalid payload, not a
+// transient/network error) — inspectable on disk, and stops the backlog
+// from retrying it forever.
+func (s *EventStore) MarkQuarantined(eventUUID, reason string) error {
+	return s.transitionLocked(eventUUID, SyncStatusFailed, reason)
+}
+
+func (s *EventStore) transitionLocked(eventUUID string, status SyncStatus, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	path := filepath.Join(s.baseDir, eventUUID+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("fulledge: load event %s for sync transition: %w", eventUUID, err)
+	}
+	var evt LocalEvent
+	if err := json.Unmarshal(data, &evt); err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrEventCorrupt, path, err)
+	}
+	wasPending := evt.SyncStatus == SyncStatusPending
+	evt.SyncStatus = status
+	if reason != "" {
+		evt.QuarantineReason = reason
+	}
+
+	out, err := json.MarshalIndent(&evt, "", "  ")
+	if err != nil {
+		return fmt.Errorf("fulledge: marshal event %s: %w", eventUUID, err)
+	}
+
+	tmpFile, err := os.CreateTemp(s.baseDir, ".event-*.tmp")
+	if err != nil {
+		return fmt.Errorf("fulledge: create temp event file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+
+	cleanTmp := true
+	defer func() {
+		if cleanTmp {
+			_ = tmpFile.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := tmpFile.Write(out); err != nil {
+		return fmt.Errorf("fulledge: write temp event file %s: %w", tmpPath, err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		return fmt.Errorf("fulledge: sync temp event file %s: %w", tmpPath, err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("fulledge: close temp event file %s: %w", tmpPath, err)
+	}
+	if err := os.Chmod(tmpPath, filePerm); err != nil {
+		return fmt.Errorf("fulledge: chmod temp event file %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("fulledge: atomic rename %s -> %s: %w", tmpPath, path, err)
+	}
+	cleanTmp = false
+
+	if wasPending && status != SyncStatusPending {
+		s.backlogCount.Add(-1)
+	}
+	return nil
+}
+
 // Get loads a LocalEvent from disk by event UUID.
 func (s *EventStore) Get(eventUUID string) (*LocalEvent, error) {
 	s.mu.RLock()

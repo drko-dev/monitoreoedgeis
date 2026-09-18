@@ -26,23 +26,24 @@ import (
 
 // Agent is the edge agent core.
 type Agent struct {
-	cfg             *config.Config
-	log             *slog.Logger
-	identity        identity.Identity
-	identityErr     error
-	credentials     credentials.Credentials
-	credentialsErr  error
-	platform        platform.Info
-	health          *health.Reporter
-	heartbeatErr    error
-	discoveryErr    error
-	localEventsErr  error
-	rtspManager     *rtsp.Manager
-	videoManager    *processing.Manager
-	visionSink      *vision.Sink
-	fullEdgeService *fulledge.Service
-	localEvents     *edgebacklog.Backlog
-	modules         *moduleManager
+	cfg              *config.Config
+	log              *slog.Logger
+	identity         identity.Identity
+	identityErr      error
+	credentials      credentials.Credentials
+	credentialsErr   error
+	platform         platform.Info
+	health           *health.Reporter
+	heartbeatErr     error
+	discoveryErr     error
+	localEventsErr   error
+	rtspManager      *rtsp.Manager
+	videoManager     *processing.Manager
+	visionSink       *vision.Sink
+	fullEdgeService  *fulledge.Service
+	fullEdgeConsumer *fullEdgeEventConsumer
+	localEvents      *edgebacklog.Backlog
+	modules          *moduleManager
 }
 
 // New wires the agent from configuration. It performs no network I/O beyond
@@ -92,6 +93,35 @@ func New(cfg *config.Config) *Agent {
 	if localEvents != nil {
 		mods = append(mods, localEvents)
 		a.localEvents = localEvents.backlog
+	}
+
+	// Built before the video pipeline block below (K1->K8 wiring): the
+	// vision Sink constructed there needs a live fullEdgeService to hand
+	// real detections to via a vision.EventConsumer adapter — see
+	// fulledge_wiring.go. newFullEdgeService itself still returns nil
+	// outside ModeEdge, same gate as always.
+	a.fullEdgeService = newFullEdgeService(cfg, ident, creds, reporter, log)
+	if a.fullEdgeService != nil {
+		// a.localEvents (the backlog) is nil for an unenrolled Edge;
+		// fullEdgeEventConsumer handles that (events still get created and
+		// stored locally, just not queued for sync yet).
+		var producer edgebacklog.Producer
+		if a.localEvents != nil {
+			producer = a.localEvents
+			a.localEvents.SetSyncCallbacks(
+				func(eventUUID string) {
+					if err := a.fullEdgeService.Store().MarkSynced(eventUUID); err != nil {
+						log.Warn("full edge: failed to mark event synced", slog.String("event_uuid", eventUUID), slog.Any("error", err))
+					}
+				},
+				func(eventUUID, reason string) {
+					if err := a.fullEdgeService.Store().MarkQuarantined(eventUUID, reason); err != nil {
+						log.Warn("full edge: failed to mark event quarantined", slog.String("event_uuid", eventUUID), slog.Any("error", err))
+					}
+				},
+			)
+		}
+		a.fullEdgeConsumer = newFullEdgeEventConsumer(a.fullEdgeService, producer, cfg.DataDir, log)
 	}
 
 	if cfg.ConnectivityEnabled {
@@ -151,7 +181,16 @@ func New(cfg *config.Config) *Agent {
 			// rather than adding to it — newCloudSink already returns nil
 			// outside ModeCloud/ModeHybrid, so the two are mutually
 			// exclusive by construction, never registered together.
-			if vs, mod := newVisionSink(cfg, reporter, log); vs != nil {
+			//
+			// consumer stays a nil vision.EventConsumer (not a typed-nil
+			// *fullEdgeEventConsumer wrapped in the interface) when Full
+			// Edge isn't configured — vision.Sink's `consumer != nil` check
+			// would otherwise see a non-nil interface holding a nil pointer.
+			var consumer vision.EventConsumer
+			if a.fullEdgeConsumer != nil {
+				consumer = a.fullEdgeConsumer
+			}
+			if vs, mod := newVisionSink(cfg, reporter, consumer, log); vs != nil {
 				extraSinks = append(extraSinks, vs)
 				mods = append(mods, mod)
 				a.visionSink = vs
@@ -166,7 +205,6 @@ func New(cfg *config.Config) *Agent {
 	a.heartbeatErr = hbErr
 	a.discoveryErr = discErr
 	a.localEventsErr = localEventsErr
-	a.fullEdgeService = newFullEdgeService(cfg, ident, creds, reporter, log)
 	a.modules = newModuleManager(reporter.SetModuleState, mods...)
 	return a
 }

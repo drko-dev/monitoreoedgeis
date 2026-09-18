@@ -34,7 +34,7 @@ func (m *visionModule) Stop(ctx context.Context) error  { return m.worker.Stop(c
 // /status and every frame Route sees is counted as dropped-not-ready,
 // exactly the explicit "NOT_READY / model_missing" contract Milestone K3
 // asks for, rather than crashing agent startup.
-func newVisionSink(cfg *config.Config, reporter *health.Reporter, log *slog.Logger) (*vision.Sink, Module) {
+func newVisionSink(cfg *config.Config, reporter *health.Reporter, consumer vision.EventConsumer, log *slog.Logger) (*vision.Sink, Module) {
 	if cfg.ProcessingMode != config.ModeEdge {
 		return nil, nil
 	}
@@ -58,6 +58,6 @@ func newVisionSink(cfg *config.Config, reporter *health.Reporter, log *slog.Logg
 		InferTimeout:      cfg.EdgeYOLOInferTimeout,
 	}, models, log)
 
-	sink := vision.NewSink(worker, models, reporter, log)
+	sink := vision.NewSink(worker, models, reporter, consumer, log)
 	return sink, &visionModule{worker: worker}
 }

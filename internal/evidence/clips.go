@@ -29,6 +29,12 @@ type ClipConfig struct {
 	MaxFrames    int
 	FrameRate    float64
 	PollInterval time.Duration
+	// MaxSizeBytes rejects a clip locally, before it is ever handed to
+	// edgebacklog/uploaded, once the encoded file exceeds this size —
+	// separate from and unrelated to the SaaS's JPEG-sized
+	// MAX_CAPTURE_SIZE_BYTES (integration item #8: GEOCAM_EDGE_MAX_CLIP_SIZE_BYTES
+	// / config.DefaultEdgeMaxClipSizeBytes). Zero disables the check.
+	MaxSizeBytes int64
 }
 
 type ClipRecord struct {
@@ -99,6 +105,17 @@ func (c *Clipper) Capture(ctx context.Context, history FrameHistory, eventUUID s
 	if err := c.encode(ctx, tmp, frames); err != nil {
 		_ = os.Remove(tmp)
 		return ClipRecord{}, err
+	}
+	if c.cfg.MaxSizeBytes > 0 {
+		info, err := os.Stat(tmp)
+		if err != nil {
+			_ = os.Remove(tmp)
+			return ClipRecord{}, err
+		}
+		if info.Size() > c.cfg.MaxSizeBytes {
+			_ = os.Remove(tmp)
+			return ClipRecord{}, fmt.Errorf("evidence: clip size %d exceeds max %d, rejecting locally rather than uploading a clip the SaaS would reject", info.Size(), c.cfg.MaxSizeBytes)
+		}
 	}
 	if err := os.Rename(tmp, final); err != nil {
 		_ = os.Remove(tmp)

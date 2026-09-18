@@ -23,7 +23,7 @@ func TestSink_DroppedWhenNotReady(t *testing.T) {
 	models := newTestModels(t)
 	w := NewWorker(Config{}, models, nil) // never started -> stays not_configured
 	reporter := &fakeHealthReporter{}
-	sink := NewSink(w, models, reporter, nil)
+	sink := NewSink(w, models, reporter, nil, nil)
 
 	err := sink.Route(processing.Frame{CandidateKey: "cam-1", OutputWidth: 640, OutputHeight: 360})
 	if err == nil {
@@ -46,7 +46,7 @@ func TestSink_PublishesOnStateChangeAlone(t *testing.T) {
 	reporter := &fakeHealthReporter{}
 	models := newTestModels(t)
 	w := NewWorker(Config{}, models, nil)
-	_ = NewSink(w, models, reporter, nil)
+	_ = NewSink(w, models, reporter, nil, nil)
 
 	if err := w.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -65,7 +65,7 @@ func TestSink_PublishesOnStateChangeAlone(t *testing.T) {
 func TestSink_Name(t *testing.T) {
 	models := newTestModels(t)
 	w := NewWorker(Config{}, models, nil)
-	sink := NewSink(w, models, nil, nil)
+	sink := NewSink(w, models, nil, nil, nil)
 	if sink.Name() != "edge-vision" {
 		t.Fatalf("Name() = %q, want %q", sink.Name(), "edge-vision")
 	}
