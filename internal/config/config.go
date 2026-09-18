@@ -73,7 +73,7 @@ type Config struct {
 	CloudMaxBytesPerSec int64
 	CloudBurstBytes     int64
 	CloudMaxFPS         float64
-	// Local YOLO vision-worker settings (Milestone K). Meaningless unless
+	// Local YOLO vision-worker settings (Milestone K1-K4). Meaningless unless
 	// ProcessingMode == ModeEdge — the vision sink is only constructed then
 	// (see internal/agent/vision_module.go), matching how Hybrid/CloudSink
 	// derive their enablement from ProcessingMode rather than a second knob.
@@ -81,6 +81,17 @@ type Config struct {
 	// interpreter path here would silently paper over a missing
 	// installation. Empty means "not configured" -- the agent reports
 	// NOT_READY/worker_not_configured rather than guessing.
+	//
+	// EdgeYOLODevice is the single source of truth for which device the
+	// vision worker is *asked* to use (K1-K4's --device flag). Milestone
+	// K5-K8 originally defined a second, disconnected
+	// GEOCAM_EDGE_INFERENCE_DEVICE knob for the same concept (Go-side
+	// CUDA-capability preselection feeding fulledge.HardwareManager) — that
+	// duplicate has been removed; internal/agent's wiring resolves
+	// EdgeYOLODevice through HardwareManager (auto -> cpu/cuda preselection)
+	// before passing it to the worker, and the *actually confirmed* device
+	// the worker reports back via its health handshake is what fulledge
+	// status displays (see internal/vision.InferenceResult.Device).
 	EdgeYOLOWorkerCmd         string
 	EdgeYOLOWorkerArgs        []string
 	EdgeYOLOModelsDir         string
@@ -94,6 +105,16 @@ type Config struct {
 	EdgeYOLOSocketPath        string
 	EdgeYOLOStartTimeout      time.Duration
 	EdgeYOLOInferTimeout      time.Duration
+	// Full Edge local event/evidence settings (Milestone K5-K8).
+	// EdgeMaxConcurrentInference/EdgeInferenceQueueDepth describe the
+	// *real* effective concurrency/queue of the vision sink's Router path
+	// (processing.Router runs exactly one worker goroutine per sink through
+	// one bounded queue — see internal/processing/router.go) — reconciled
+	// with, not a second independent limit alongside, that queue.
+	EdgeMaxConcurrentInference int
+	EdgeInferenceQueueDepth    int
+	EdgeMinFreeDiskBytes       uint64
+	EdgeMaxMemoryPercent       float64
 }
 
 // HybridROI is one normalized (0..1) region of interest parsed from
@@ -228,6 +249,19 @@ const (
 	DefaultEdgeYOLOInferTimeout      = 5 * time.Second
 	MinEdgeYOLOInferTimeout          = 100 * time.Millisecond
 	MaxEdgeYOLOInferTimeout          = 60 * time.Second
+
+	// Full Edge defaults and bounds (Milestone K5-K8).
+	// DefaultEdgeMaxConcurrentInference matches processing.Router's real
+	// invariant of exactly one worker goroutine per sink — see the struct
+	// field doc comment above.
+	DefaultEdgeMaxConcurrentInference = 1
+	MinEdgeMaxConcurrentInference     = 1
+	MaxEdgeMaxConcurrentInference     = 16
+	DefaultEdgeInferenceQueueDepth    = 32
+	MinEdgeInferenceQueueDepth        = 1
+	MaxEdgeInferenceQueueDepth        = 256
+	DefaultEdgeMinFreeDiskBytes       = 104857600 // 100MB
+	DefaultEdgeMaxMemoryPercent       = 0.0       // disabled
 )
 
 var validLogLevels = []string{"debug", "info", "warn", "error"}
@@ -280,6 +314,11 @@ func Load() (*Config, error) {
 		EdgeYOLOImgSize:           DefaultEdgeYOLOImgSize,
 		EdgeYOLOStartTimeout:      DefaultEdgeYOLOStartTimeout,
 		EdgeYOLOInferTimeout:      DefaultEdgeYOLOInferTimeout,
+
+		EdgeMaxConcurrentInference: DefaultEdgeMaxConcurrentInference,
+		EdgeInferenceQueueDepth:    DefaultEdgeInferenceQueueDepth,
+		EdgeMinFreeDiskBytes:       DefaultEdgeMinFreeDiskBytes,
+		EdgeMaxMemoryPercent:       DefaultEdgeMaxMemoryPercent,
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_PROCESSING_MODE")); raw != "" {
@@ -734,6 +773,49 @@ func Load() (*Config, error) {
 				raw, MinEdgeYOLOInferTimeout, MaxEdgeYOLOInferTimeout)
 		}
 		cfg.EdgeYOLOInferTimeout = d
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_MAX_CONCURRENT_INFERENCE")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge max concurrent inference %q: %w", raw, err)
+		}
+		if v < MinEdgeMaxConcurrentInference || v > MaxEdgeMaxConcurrentInference {
+			return nil, fmt.Errorf("edge max concurrent inference %d out of range [%d, %d]",
+				v, MinEdgeMaxConcurrentInference, MaxEdgeMaxConcurrentInference)
+		}
+		cfg.EdgeMaxConcurrentInference = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_INFERENCE_QUEUE_DEPTH")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge inference queue depth %q: %w", raw, err)
+		}
+		if v < MinEdgeInferenceQueueDepth || v > MaxEdgeInferenceQueueDepth {
+			return nil, fmt.Errorf("edge inference queue depth %d out of range [%d, %d]",
+				v, MinEdgeInferenceQueueDepth, MaxEdgeInferenceQueueDepth)
+		}
+		cfg.EdgeInferenceQueueDepth = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_MIN_FREE_DISK_BYTES")); raw != "" {
+		v, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge min free disk bytes %q: %w", raw, err)
+		}
+		cfg.EdgeMinFreeDiskBytes = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_MAX_MEMORY_PERCENT")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge max memory percent %q: %w", raw, err)
+		}
+		if v < 0 || v > 100 {
+			return nil, fmt.Errorf("edge max memory percent %.1f out of range [0, 100]", v)
+		}
+		cfg.EdgeMaxMemoryPercent = v
 	}
 
 	// Fail-fast: reject an insecure http:// SaaS URL here, before any

@@ -5,6 +5,7 @@ import (
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
+	"github.com/drko-dev/monitoreoedgeis/internal/fulledge"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 )
@@ -112,5 +113,42 @@ func TestReporterDiscoveryStatus(t *testing.T) {
 	}
 	if snap.Discovery.State != "idle" || snap.Discovery.DeviceCount != 3 {
 		t.Errorf("unexpected Discovery snapshot: %+v", snap.Discovery)
+	}
+}
+
+func TestReporterFullEdgeStatus(t *testing.T) {
+	r := newTestReporter()
+	if r.Snapshot().FullEdge != nil {
+		t.Errorf("FullEdge should be nil initially")
+	}
+
+	r.SetFullEdgeStatus(fulledge.Status{
+		LocalDetections:        5,
+		LocalEventsCreated:     3,
+		EvidenceSaved:          3,
+		EvidenceFailures:       0,
+		LocalEventBacklog:      3,
+		CurrentInferenceDevice: "cpu",
+		Hardware: fulledge.HardwareStatus{
+			ConfiguredDevice: "auto",
+			CurrentDevice:    "cpu",
+			CUDAAvailable:    false,
+			NPU: fulledge.NPUCapability{
+				AdapterReady:  true,
+				BackendActive: false,
+				Status:        fulledge.NPUStatusMessage,
+			},
+		},
+	})
+
+	snap := r.Snapshot()
+	if snap.FullEdge == nil {
+		t.Fatalf("expected non-nil FullEdge in snapshot")
+	}
+	if snap.FullEdge.LocalDetections != 5 || snap.FullEdge.LocalEventsCreated != 3 {
+		t.Errorf("unexpected FullEdge counts: %+v", snap.FullEdge)
+	}
+	if snap.FullEdge.Hardware.NPU.Status != fulledge.NPUStatusMessage {
+		t.Errorf("unexpected NPU status: %s", snap.FullEdge.Hardware.NPU.Status)
 	}
 }

@@ -884,91 +884,113 @@ available in this sandbox):
 - A real optional classifier model behind the J6 `CandidateClassifier`
   adapter (Hito K scope).
 
-## HITO K — Full Edge Core + YOLO Local (K1–K4)
+## HITO K — Full Edge (K1–K12), INTEGRATION FINAL
 
-**Scope closed this milestone: K1 (processing_mode=edge), K2 (local YOLO
-worker), K3 (model management), K4 (CPU inference). K5–K12 are explicitly
-NOT started and NOT claimed here.**
+**Branch `integration/hito-k-final`, merging PR #23 (K1-K4), #22 (K5-K8),
+#24 (K9-K12), paired with SaaS `integration/hito-k-final` (merging SaaS
+#109). NOT MERGED to main, NOT DEPLOYED. The three source PRs are
+superseded by this branch and left unmerged independently.**
 
-- **K1 — `processing_mode=edge`**: `internal/vision.Sink` implements
-  `processing.Sink` and is registered in `internal/agent/agent.go` in place
-  of `internal/cloudsink.CloudSink` whenever `GEOCAM_PROCESSING_MODE=edge`
-  (`internal/agent/vision_module.go`). `newCloudSink` already gated on
-  `ModeCloud`/`ModeHybrid` only, so edge mode registers zero CloudSink and
-  sends zero frames to Cloud for inference — verified by
-  `TestNewCloudSink_NeverBuildsInEdgeMode`. Cloud and Hybrid modes are
-  byte-for-byte unchanged (full existing suite green, no cloud/hybrid test
-  touched). The existing RTSP→decode→sample→resize→ring-buffer→Router
-  pipeline (Hito H/J) is reused unmodified — no second RTSP client, no
-  parallel pipeline.
-- **K2 — YOLO local**: `internal/vision.Worker` supervises a **separate
-  Python process** (`deploy/vision-worker/worker.py`, Ultralytics/PyTorch),
-  never embedded in the Go binary. Communication is a single Unix domain
-  socket (`GEOCAM_EDGE_YOLO_SOCKET_PATH`, under `GEOCAM_DATA_DIR/run/` —
-  never a TCP listener, never reachable off-host), newline-delimited JSON
-  (`internal/vision/protocol.go` / mirrored in `backend.py`/`worker.py`).
-  Covers start, health handshake, one-at-a-time inference requests, a
-  per-request timeout, orderly shutdown (`shutdown` message + bounded
-  process wait + kill), and restart-with-backoff on a crashed subprocess —
-  same bounded-backoff pattern `cameraPipeline.run` already uses for its
-  ffmpeg subprocess.
-- **Models**: fixed, matching SaaS `geocam/detector.py` exactly —
-  `yolo11s-pose.pt` for persons (class 0), `yolo11n.pt` for vehicles
-  (classes 2/3/5/7). No other model, no invented one. `.pt` weights are
-  never committed to Git.
-- **K3 — model management**: `internal/vision.ModelManager` stats the two
-  required weight files under `GEOCAM_EDGE_YOLO_MODELS_DIR` (default
-  `GEOCAM_DATA_DIR/models/`, outside any versioned release tree so an
-  agent update never destroys installed weights). Never downloads a model.
-  A missing file is `StateModelMissing`, published in `/status`, not a
-  crash or a silent fetch. Checksum (`ModelManager.Checksum`) is computed
-  lazily and cached by (size, mtime), never on every status call.
-- **K4 — CPU inference**: `GEOCAM_EDGE_YOLO_DEVICE` defaults to `cpu`,
-  configurable; `GEOCAM_EDGE_YOLO_IMGSZ` configurable and bounds-checked.
-  Backpressure is bounded by construction: `processing.Router` already runs
-  exactly one worker goroutine per sink through one bounded queue (Hito H),
-  so a busy YOLO worker fills that queue and drops frames for this sink
-  only — no unbounded queue was added. `/status` exposes worker state,
-  device, models loaded, restarts, inference count/errors, last inference
-  ms (`internal/vision.Status`, surfaced as `Agent.VisionStatus()` /
-  `health.Snapshot.Vision`). `/readyz` additionally requires the vision
-  worker to be `StateReady` when `ProcessingMode=edge`
-  (`health.Reporter.EdgeVisionReady`) — the one place `/readyz` depends on
-  a subsystem's deep state, since the local inference runtime *is* edge
-  mode's own authority, not an external dependency like SaaS reachability.
+K1-K4 (`internal/vision`, local YOLO worker) and K5-K8
+(`internal/fulledge`, hardware/limits/local events/evidence) were built in
+parallel, independent branches and landed here as two disconnected trees.
+K9-K12 (`internal/edgebacklog`, `internal/evidence`, sync) landed as a
+third. This integration pass wires them into one real pipeline and fixes
+the seams a merge alone can't:
 
-**Tests**: `go test ./...` (20 packages, all `ok`), `go test -race ./...`
-(clean, including a real data race found and fixed in
-`internal/vision/worker.go`'s death-watch goroutine — see git history),
-`go vet ./...` clean, `gofmt -l .` clean, `make build-linux` produces both
-linux/amd64 and linux/arm64. `internal/vision` unit tests use a fake worker
-subprocess (Go test-binary re-exec pattern) covering: not-configured,
-model-missing, start+infer, rejected health handshake, infer timeout,
-crash+restart, graceful shutdown, dropped-when-not-ready, and a
-status-pushed-on-state-change-alone regression test for the `/readyz` gate.
-`deploy/vision-worker/tests/test_worker.py` (stdlib `unittest`, no
-ultralytics/torch required) covers the protocol handler and a full
-socket round-trip against `backend.FakeBackend`.
+- **K1→K8 wiring**: `internal/vision.Sink` gained an optional
+  `EventConsumer` hook (`internal/vision/sink.go`) — after a successful
+  worker inference, if detections are non-empty, the result is handed to
+  `fulledge.Service.ProcessInferenceWithJPEG` via an adapter in
+  `internal/agent` (`internal/agent/fulledge_wiring.go`) that converts
+  `vision.Detection` (pixel bbox, real confirmed device) into
+  `fulledge.LocalDetection`. Zero detections still means zero events
+  (`fulledge.ErrZeroDetections`, already true, now actually reachable from
+  a real inference result instead of only from tests).
+- **K2 — bbox semantics unified**: `fulledge.BoundingBox` was normalized
+  `[0..1]` (`XMin/YMin/XMax/YMax`); the YOLO worker's real output is pixel
+  `x1,y1,x2,y2`. `BoundingBox` is now pixel `X1,Y1,X2,Y2` throughout Full
+  Edge (`internal/fulledge/contract.go`, with a `Validate` method: finite,
+  `x2>x1`/`y2>y1`, in-frame when frame size is known) — no
+  pixel→normalized→pixel round trip anywhere internally. Conversion to
+  `x/y/width/height` happens exactly once, at the SaaS wire boundary
+  (`internal/agent/fulledge_wiring.go`'s `transport.LocalEvent` mapping).
+- **K3 — device reconciled**: the K5-K8 branch had defined a second,
+  disconnected `GEOCAM_EDGE_INFERENCE_DEVICE` knob duplicating K1-K4's
+  `GEOCAM_EDGE_YOLO_DEVICE`. Removed; `internal/agent`'s wiring resolves
+  `EdgeYOLODevice` through `fulledge.HardwareManager` (auto→cpu/cuda
+  *preselection* only) before it's passed to the worker as `--device`, and
+  the device fulledge/status actually displays is the one the worker
+  itself confirms after loading PyTorch/Ultralytics
+  (`vision.InferenceResult.Device`) — Go-side CUDA detection is never
+  asserted as active on its own.
+- **K6 — backpressure reconciled**: `fulledge.LimitsManager`'s
+  `MaxConcurrentInference`/`QueueDepth` semaphore existed but was never
+  called from anywhere — a disconnected counter, not real backpressure.
+  The real bound is `processing.Router`'s one-worker-goroutine-per-sink
+  bounded queue (Hito H). `TryAcquireInference`/`ReleaseInference` are now
+  called around the K1→K8 handoff, with `EdgeMaxConcurrentInference`
+  defaulting to `1` — the router's actual invariant — so the reported
+  counters are now true rather than a permanently-idle display.
+- **K4/K8 — evidence path made safe**: evidence was written to
+  `evidence/<candidate_key>/<event_uuid>.jpg`, using a camera-derived
+  string as a filesystem path component. Evidence now lives at
+  `evidence/captures/<uuid>.jpg` (clips already used
+  `evidence/clips/<event_uuid>.mp4`, unchanged), and the UUID is validated
+  against the exact shape `identity.NewUUIDv4` produces
+  (`internal/fulledge/evidence.go`) before it ever reaches `filepath.Join`
+  — no candidate_key in any evidence path, no traversal surface.
+- **K8→K12 wiring**: once `fulledge.Service` persists a `LocalEvent` (+
+  capture/clip evidence), it is mapped to `transport.LocalEvent` and hard
+  onto `edgebacklog.Enqueue()` (`internal/agent/fulledge_wiring.go`) —
+  never sending `organization_id`, `camera_id`, or a local filesystem path;
+  the SaaS side (below) resolves ownership server-side. A clip failure
+  still never loses the event or its capture (unchanged from K9).
+- **K7/K12 — sync status reconciled**: `fulledge.EventStore` tracked
+  `SyncStatus` but nothing ever transitioned it past `pending`; K12's
+  backlog deleted its own queue entry after a successful sync without
+  telling K7's store. `EventStore` gained `MarkSynced`/`MarkQuarantined`
+  (`internal/fulledge/store.go`), called from the backlog's completion
+  callback — a synced event's local record now says `synced`, a
+  permanently-invalid one says `quarantined` and stops retrying, and
+  neither keeps inflating `local_event_backlog` forever after a
+  successful sync. Both stores survive a restart.
+- **Edge-mode-only gating**: the local-events module and Full Edge service
+  are only constructed under `ProcessingMode=edge` (unchanged from each
+  source branch); this pass confirms no cloud/hybrid code path can reach
+  `fulledge`/`edgebacklog` at all, so a K9-K12 failure cannot degrade
+  cloud/hybrid.
+- **Clip size contract** (SaaS-side fix, see the SaaS repo's
+  `docs/PROJECT_STATUS.md`): SaaS PR #109 reused `MAX_CAPTURE_SIZE_BYTES`
+  (5MB, JPEG-sized) for MP4 clips too. A separate, explicit
+  `MAX_EDGE_CLIP_SIZE_BYTES` technical limit now gates clip uploads on
+  both sides — JPEG's existing limit is untouched.
+- **Models**: the only production models are `yolo11s-pose.pt` (person)
+  and `yolo11n.pt` (vehicle) — K5-K8's `yolov8n` default/residual (config
+  default, service fallback, test literal) is removed; `fulledge`'s
+  `ModelName` is now the real composite the K1→K8 adapter supplies. No
+  `.pt` weights in Git, no automatic download.
 
-A manual, ungated smoke (not part of `go test`) was run against the **real**
-`python3` + `worker.py` subprocess end-to-end: Go spawns it, connects over
-the real Unix socket, sends a real health request, and receives back a
-real, correctly-formatted rejection (`ultralytics not installed`) — proving
-the IPC framing/spawn/connect/timeout machinery genuinely works process to
-process, independent of whether a model can load.
+**Tests (targeted only, per this batch's instructions — not a full
+repo-wide re-run)**:
+- `go test ./internal/vision/... ./internal/fulledge/... ./internal/edgebacklog/... ./internal/evidence/... ./internal/agent/...` — clean
+- `go test -race` on the same, touched packages — clean
+- `go vet` on touched packages — clean; `gofmt -l` on modified files — clean
+- One short integration test
+  (`internal/agent/fulledge_wiring_test.go`): fake vision inference result
+  → fulledge event → capture evidence → edgebacklog enqueue → fake SaaS
+  sender → marked synced in `EventStore`
+- `go build ./...` — clean (full-repo compile check only, per instructions)
 
-**HITO K1–K4 = CODE DONE / TESTED. NOT VALIDATED with real Ultralytics
-models or real camera footage: no `ultralytics`/`torch` install and no
-`.pt` weights exist in this sandbox (installing them was explicitly out of
-scope — "no descargar cientos de MB para un test"). REAL MODEL SMOKE =
-BLOCKED, not attempted further.**
+**HITO K1–K12 = CODE DONE / INTEGRATED TESTED. NOT MERGED, NOT DEPLOYED.**
 
-**Pending, not blocking this close** (depends on an environment not
-available here):
-- Real Ultralytics inference smoke test (`yolo11s-pose.pt`/`yolo11n.pt`
-  actually loaded and run against a real or sample JPEG).
-- Real appliance CPU inference latency/throughput measurement.
-- K5–K12 (not started, not claimed here).
+**Pending, explicitly not blocking this close** (depends on an environment
+not available here):
+- Real Ultralytics inference smoke (`yolo11s-pose.pt`/`yolo11n.pt` actually
+  loaded and run — no `ultralytics`/`torch` install in this sandbox).
+- Real TC70 camera.
+- Real CUDA/NPU hardware.
+- Physical benchmark.
 
 ## HOW ANOTHER AI SHOULD CONTINUE
 
