@@ -72,6 +72,13 @@ type Config struct {
 	CloudMaxBytesPerSec int64
 	CloudBurstBytes     int64
 	CloudMaxFPS         float64
+	// Full Edge inference and local event/evidence settings (Milestone K5-K8).
+	EdgeInferenceDevice        string
+	EdgeMaxConcurrentInference int
+	EdgeInferenceQueueDepth    int
+	EdgeMinFreeDiskBytes       uint64
+	EdgeMaxMemoryPercent       float64
+	EdgeModelName              string
 }
 
 // HybridROI is one normalized (0..1) region of interest parsed from
@@ -181,6 +188,18 @@ const (
 	DefaultCloudMaxBytesPerSec = 0
 	DefaultCloudBurstBytes     = 0
 	DefaultCloudMaxFPS         = 0.0
+
+	// Full Edge defaults and bounds (Milestone K5-K8).
+	DefaultEdgeInferenceDevice        = "auto"
+	DefaultEdgeMaxConcurrentInference = 1
+	MinEdgeMaxConcurrentInference     = 1
+	MaxEdgeMaxConcurrentInference     = 16
+	DefaultEdgeInferenceQueueDepth    = 32
+	MinEdgeInferenceQueueDepth        = 1
+	MaxEdgeInferenceQueueDepth        = 256
+	DefaultEdgeMinFreeDiskBytes       = 104857600 // 100MB
+	DefaultEdgeMaxMemoryPercent       = 0.0       // disabled
+	DefaultEdgeModelName              = "yolov8n"
 )
 
 var validLogLevels = []string{"debug", "info", "warn", "error"}
@@ -223,6 +242,12 @@ func Load() (*Config, error) {
 		CloudMaxBytesPerSec:         DefaultCloudMaxBytesPerSec,
 		CloudBurstBytes:             DefaultCloudBurstBytes,
 		CloudMaxFPS:                 DefaultCloudMaxFPS,
+		EdgeInferenceDevice:         DefaultEdgeInferenceDevice,
+		EdgeMaxConcurrentInference:  DefaultEdgeMaxConcurrentInference,
+		EdgeInferenceQueueDepth:     DefaultEdgeInferenceQueueDepth,
+		EdgeMinFreeDiskBytes:        DefaultEdgeMinFreeDiskBytes,
+		EdgeMaxMemoryPercent:        DefaultEdgeMaxMemoryPercent,
+		EdgeModelName:               DefaultEdgeModelName,
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_PROCESSING_MODE")); raw != "" {
@@ -589,6 +614,61 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid cloud max FPS %q: must be non-negative", raw)
 		}
 		cfg.CloudMaxFPS = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_INFERENCE_DEVICE")); raw != "" {
+		dev := strings.ToLower(raw)
+		if dev != "auto" && dev != "cpu" && dev != "cuda" {
+			return nil, fmt.Errorf("invalid edge inference device %q: must be one of auto, cpu, cuda", raw)
+		}
+		cfg.EdgeInferenceDevice = dev
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_MAX_CONCURRENT_INFERENCE")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge max concurrent inference %q: %w", raw, err)
+		}
+		if v < MinEdgeMaxConcurrentInference || v > MaxEdgeMaxConcurrentInference {
+			return nil, fmt.Errorf("edge max concurrent inference %d out of range [%d, %d]",
+				v, MinEdgeMaxConcurrentInference, MaxEdgeMaxConcurrentInference)
+		}
+		cfg.EdgeMaxConcurrentInference = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_INFERENCE_QUEUE_DEPTH")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge inference queue depth %q: %w", raw, err)
+		}
+		if v < MinEdgeInferenceQueueDepth || v > MaxEdgeInferenceQueueDepth {
+			return nil, fmt.Errorf("edge inference queue depth %d out of range [%d, %d]",
+				v, MinEdgeInferenceQueueDepth, MaxEdgeInferenceQueueDepth)
+		}
+		cfg.EdgeInferenceQueueDepth = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_MIN_FREE_DISK_BYTES")); raw != "" {
+		v, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge min free disk bytes %q: %w", raw, err)
+		}
+		cfg.EdgeMinFreeDiskBytes = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_MAX_MEMORY_PERCENT")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge max memory percent %q: %w", raw, err)
+		}
+		if v < 0 || v > 100 {
+			return nil, fmt.Errorf("edge max memory percent %.1f out of range [0, 100]", v)
+		}
+		cfg.EdgeMaxMemoryPercent = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_MODEL_NAME")); raw != "" {
+		cfg.EdgeModelName = raw
 	}
 
 	// Fail-fast: reject an insecure http:// SaaS URL here, before any

@@ -17,6 +17,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/cloudsink"
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
+	"github.com/drko-dev/monitoreoedgeis/internal/fulledge"
 	"github.com/drko-dev/monitoreoedgeis/internal/heartbeat"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
@@ -67,6 +68,10 @@ type Snapshot struct {
 	// telemetry only — never a priced or estimated cost (see
 	// internal/cloudsink).
 	Cloud *cloudsink.Status `json:"cloud,omitempty"`
+	// FullEdge is the Milestone K Full Edge observability snapshot
+	// (local detections, events, evidence, device, hardware, limits).
+	// Omitted when processing mode is not edge or service unconfigured.
+	FullEdge *fulledge.Status `json:"full_edge,omitempty"`
 }
 
 // Reporter holds the mutable health state of the agent, including per-module
@@ -83,6 +88,7 @@ type Reporter struct {
 	cameras          []rtsp.CameraStreamStatus
 	videoPipeline    *processing.VideoPipelineSummary
 	cloud            *cloudsink.Status
+	fullEdge         *fulledge.Status
 
 	version string
 	cfg     *config.Config
@@ -206,6 +212,11 @@ func (r *Reporter) Snapshot() Snapshot {
 		copied := *r.cloud
 		cloud = &copied
 	}
+	var fe *fulledge.Status
+	if r.fullEdge != nil {
+		copied := *r.fullEdge
+		fe = &copied
+	}
 
 	return Snapshot{
 		Status:           r.state,
@@ -225,6 +236,7 @@ func (r *Reporter) Snapshot() Snapshot {
 		Cameras:          cams,
 		VideoPipeline:    vp,
 		Cloud:            cloud,
+		FullEdge:         fe,
 	}
 }
 
@@ -242,4 +254,12 @@ func (r *Reporter) SetCloudStatus(s cloudsink.Status) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cloud = &s
+}
+
+// SetFullEdgeStatus records the latest Full Edge observability snapshot
+// (implements fulledge.HealthSink).
+func (r *Reporter) SetFullEdgeStatus(s fulledge.Status) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fullEdge = &s
 }

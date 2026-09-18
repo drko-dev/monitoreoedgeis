@@ -190,3 +190,25 @@ func TestAgentDegradedOnModuleStartFailure(t *testing.T) {
 		t.Errorf("module state = %q, want %q", got, "failed")
 	}
 }
+
+func TestAgentFullEdgeServiceGatedOnMode(t *testing.T) {
+	// ModeCloud: FullEdgeService should be nil
+	cfgCloud := testConfig(t)
+	cfgCloud.ProcessingMode = config.ModeCloud
+	aCloud := New(cfgCloud)
+	if aCloud.FullEdgeService() != nil {
+		t.Errorf("expected nil FullEdgeService in ModeCloud")
+	}
+
+	// ModeEdge: FullEdgeService should be non-nil
+	cfgEdge := testConfig(t)
+	cfgEdge.ProcessingMode = config.ModeEdge
+	aEdge := New(cfgEdge)
+	if aEdge.FullEdgeService() == nil {
+		t.Fatalf("expected non-nil FullEdgeService in ModeEdge")
+	}
+	if aEdge.FullEdgeService().Hardware().CurrentDevice() != "cpu" &&
+		aEdge.FullEdgeService().Hardware().CurrentDevice() != "cuda" {
+		t.Errorf("unexpected CurrentDevice: %s", aEdge.FullEdgeService().Hardware().CurrentDevice())
+	}
+}

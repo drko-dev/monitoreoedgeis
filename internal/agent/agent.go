@@ -13,6 +13,7 @@ import (
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
+	"github.com/drko-dev/monitoreoedgeis/internal/fulledge"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/logging"
@@ -23,19 +24,20 @@ import (
 
 // Agent is the edge agent core.
 type Agent struct {
-	cfg            *config.Config
-	log            *slog.Logger
-	identity       identity.Identity
-	identityErr    error
-	credentials    credentials.Credentials
-	credentialsErr error
-	platform       platform.Info
-	health         *health.Reporter
-	heartbeatErr   error
-	discoveryErr   error
-	rtspManager    *rtsp.Manager
-	videoManager   *processing.Manager
-	modules        *moduleManager
+	cfg             *config.Config
+	log             *slog.Logger
+	identity        identity.Identity
+	identityErr     error
+	credentials     credentials.Credentials
+	credentialsErr  error
+	platform        platform.Info
+	health          *health.Reporter
+	heartbeatErr    error
+	discoveryErr    error
+	rtspManager     *rtsp.Manager
+	videoManager    *processing.Manager
+	fullEdgeService *fulledge.Service
+	modules         *moduleManager
 }
 
 // New wires the agent from configuration. It performs no network I/O beyond
@@ -143,6 +145,7 @@ func New(cfg *config.Config) *Agent {
 
 	a.heartbeatErr = hbErr
 	a.discoveryErr = discErr
+	a.fullEdgeService = newFullEdgeService(cfg, ident, creds, reporter, log)
 	a.modules = newModuleManager(reporter.SetModuleState, mods...)
 	return a
 }
@@ -156,6 +159,9 @@ func (a *Agent) RTSPManager() *rtsp.Manager { return a.rtspManager }
 // VideoManager exposes the video pipeline manager (nil if the video
 // pipeline or RTSP connectivity is disabled).
 func (a *Agent) VideoManager() *processing.Manager { return a.videoManager }
+
+// FullEdgeService exposes the Full Edge service (nil if processing mode is not edge).
+func (a *Agent) FullEdgeService() *fulledge.Service { return a.fullEdgeService }
 
 // Run starts the agent and blocks until ctx is cancelled, then shuts down
 // gracefully. A cancelled context is a clean stop, not an error.

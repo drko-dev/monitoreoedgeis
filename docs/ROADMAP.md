@@ -255,10 +255,10 @@ sandbox.
 - K2. YOLO local.
 - K3. Model management.
 - K4. CPU inference.
-- K5. GPU/NPU.
-- K6. Límites hardware.
-- K7. Eventos locales.
-- K8. Evidencias.
+- K5. GPU/NPU. DONE (this branch) — honest device selection (cpu/cuda/auto), genuine CUDA detection with CPU fallback and tracking, NPU capability abstraction honestly reporting "NPU ADAPTER/CAPABILITY READY, BACKEND REAL PENDING".
+- K6. Límites hardware. DONE (this branch) — configurable bounds (max concurrent inference semaphore, queue depth bounds, min free disk, memory pressure), safe saturation degradation.
+- K7. Eventos locales. DONE (this branch) — disk-backed atomic JSON event store under GEOCAM_DATA_DIR/events, unique UUID, backlog tracking, created only on valid detections.
+- K8. Evidencias. DONE (this branch) — atomic JPEG evidence persistence under GEOCAM_DATA_DIR/evidence, sha256 checksum, relative path, disk limit protection without panic.
 - K9. Clips.
 - K10. Metadata/evidencia al SaaS.
 - K11. Operación offline parcial.

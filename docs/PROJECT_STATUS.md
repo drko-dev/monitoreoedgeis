@@ -884,6 +884,44 @@ available in this sandbox):
 - A real optional classifier model behind the J6 `CandidateClassifier`
   adapter (Hito K scope).
 
+## Hito K — Full Edge: Hardware + Local Events/Evidence (K5–K8) (THIS BRANCH, `feature/full-edge-events-k5-k8`)
+
+Implementation of Full Edge hardware management, resource bounds, local event persistence, and local evidence storage (K5–K8) decoupled from the YOLO vision worker (K1–K4, handled by another IA).
+
+**IMPLEMENTED**:
+- **K5 — GPU / NPU (`internal/fulledge/hardware.go`)**:
+  - Honest device selection: `cpu`, `cuda`, `auto` (`GEOCAM_EDGE_INFERENCE_DEVICE`).
+  - Genuine CUDA detection via device node (`/dev/nvidia0`, `/dev/nvhost-ctrl`) and `nvidia-smi` inspection (`HardwareDetector` interface).
+  - Controlled fallback to CPU when CUDA is requested or auto-selected but unavailable, with fallback counter tracking (`cuda_fallback_count`).
+  - NPU capability abstraction honestly reporting: `NPU ADAPTER/CAPABILITY READY, BACKEND REAL PENDING` (`AdapterReady: true`, `BackendActive: false`). No faked vendor runtimes.
+- **K6 — Límites hardware (`internal/fulledge/limits.go`)**:
+  - Resource safety controls: `MaxConcurrentInference` semaphore, `QueueDepth` bounds, `MinFreeDiskBytes` threshold, `MaxMemoryPercent` threshold.
+  - Safe degradation under resource saturation (queue drops with metric tracking, disk full check before writing).
+  - Telemetry integration reusing `internal/platform.Collect` disk and memory metrics without panicking.
+- **K7 — Eventos locales (`internal/fulledge/events.go`, `internal/fulledge/store.go`)**:
+  - Structured local event contract (`LocalDetection`, `InferenceResult`, `BoundingBox`, `LocalEvent`).
+  - Events created ONLY on valid detection (`len(detections) > 0`). Motion candidate is never converted into an event without YOLO detections.
+  - Stable, unique UUID v4 generated via `identity.NewUUIDv4()`.
+  - Durable atomic persistence under `GEOCAM_DATA_DIR/events/` (temp file + rename, 0700 dir, 0600 file). Zero SQL dependency (`CGO_ENABLED=0` safe).
+  - Disk-backed event backlog tracking (`LocalEventBacklog`, `ListPending()`).
+- **K8 — Evidencias (`internal/fulledge/evidence.go`)**:
+  - Evidence manager persisting JPEG captures under `GEOCAM_DATA_DIR/evidence/<candidate_key>/<event_uuid>.jpg`.
+  - SHA-256 checksum computation, byte size, capture/save timestamps, relative path recording.
+  - Safe degraded handling: if free disk falls below `GEOCAM_EDGE_MIN_FREE_DISK_BYTES`, evidence write is skipped and error recorded in `EvidenceRef` without crashing or panicking.
+  - Never overwrites existing evidence files.
+- **Observability & Agent Integration**:
+  - `fulledge.Status` exposed on `health.Snapshot.FullEdge` and `/status`: `local_detections`, `local_events_created`, `evidence_saved`, `evidence_failures`, `local_event_backlog`, `current_inference_device`, `fallback_cpu_count`, `hardware`, `limits`.
+  - Zero secrets, tokens, or image payloads exposed in status.
+  - Wired in `internal/agent` when `ProcessingMode == ModeEdge`.
+
+**TESTED**:
+- Unit and integration tests in `internal/fulledge`: detection-to-event flow, zero detection suppression, UUID uniqueness, bbox/confidence preservation, atomic disk persistence, evidence checksum, restart survival, disk full safe degradation, CUDA fallback, invalid device rejection, bounded concurrency, memory pressure, and concurrent processing under `-race`.
+- Repo-wide `go test ./...`, `go test -race ./...`, `go vet ./...`, `gofmt -l .`, and `make build-linux` (amd64/arm64) pass clean.
+
+**PHYSICAL HARDWARE VALIDATION**:
+- Genuine CUDA / NPU hardware validation is declared **BLOCKED** on this host (macOS darwin host without NVIDIA GPU or NPU accelerator). Device correctly resolved to CPU with honest capability reporting.
+- No merge to `main`, no deploy.
+
 ## HOW ANOTHER AI SHOULD CONTINUE
 
 1. Read `AGENTS.md`.
