@@ -251,10 +251,17 @@ sandbox.
 
 ## K — Full Edge
 
-- K1. processing_mode=edge.
-- K2. YOLO local.
-- K3. Model management.
-- K4. CPU inference.
+## HITO K1–K4 — CODE DONE / TESTED (branch
+`feature/full-edge-yolo-k1-k4`). NOT VALIDATED with real Ultralytics
+models or real camera footage — no `ultralytics`/`torch` install and no
+`.pt` weights in this sandbox; REAL MODEL SMOKE = BLOCKED, explicitly out
+of scope for this milestone. See `docs/PROJECT_STATUS.md`'s Hito K section
+for the full breakdown.
+
+- K1. processing_mode=edge. DONE.
+- K2. YOLO local. DONE.
+- K3. Model management. DONE.
+- K4. CPU inference. DONE.
 - K5. GPU/NPU.
 - K6. Límites hardware.
 - K7. Eventos locales.
