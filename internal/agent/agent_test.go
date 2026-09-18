@@ -212,3 +212,33 @@ func TestAgentFullEdgeServiceGatedOnMode(t *testing.T) {
 		t.Errorf("unexpected CurrentDevice: %s", aEdge.FullEdgeService().Hardware().CurrentDevice())
 	}
 }
+
+func TestAgentDegradedOnCorruptControlLedger(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.SaaSURL = "https://saas.example.com"
+	// Create identity and credentials so enrollment passes
+	identPath := filepath.Join(cfg.DataDir, "identity.json")
+	_ = os.WriteFile(identPath, []byte(`{"edge_id":"550e8400-e29b-41d4-a716-446655440000","created_at":"2026-09-18T00:00:00Z","schema_version":1}`), 0o600)
+	credsPath := filepath.Join(cfg.DataDir, "credentials.json")
+	_ = os.WriteFile(credsPath, []byte(`{"edge_id":"550e8400-e29b-41d4-a716-446655440000","device_id":"dev-1","credential":"cred-1","enrolled_at":"2026-09-18T00:00:00Z","schema_version":1}`), 0o600)
+
+	// Corrupt control_ledger.json
+	ledgerPath := filepath.Join(cfg.DataDir, "control_ledger.json")
+	if err := os.WriteFile(ledgerPath, []byte("{invalid-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := New(cfg)
+	if a.controlErr == nil {
+		t.Fatal("expected controlErr != nil due to corrupt ledger, got nil")
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+
+	waitForState(t, a, health.StateDegraded)
+	cancel()
+	_ = <-done
+}

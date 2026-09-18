@@ -262,7 +262,15 @@ func (b *Backlog) ProcessOne(ctx context.Context, sender transport.LocalEventSen
 		return true
 	}
 	r.Attempts++
-	r.NextAttempt = time.Now().Add(b.backoff(r.Attempts))
+	delay := b.backoff(r.Attempts)
+	var rle *transport.RateLimitError
+	if errors.As(err, &rle) && rle.RetryAfter > 0 {
+		delay = rle.RetryAfter
+		if delay > b.cfg.RetryMax {
+			delay = b.cfg.RetryMax
+		}
+	}
+	r.NextAttempt = time.Now().Add(delay)
 	if errors.Is(err, transport.ErrUnauthorized) {
 		b.degraded = true
 		r.NextAttempt = time.Now().Add(b.cfg.RetryMax)

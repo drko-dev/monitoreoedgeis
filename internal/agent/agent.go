@@ -36,6 +36,7 @@ type Agent struct {
 	health           *health.Reporter
 	heartbeatErr     error
 	discoveryErr     error
+	controlErr       error
 	localEventsErr   error
 	rtspManager      *rtsp.Manager
 	videoManager     *processing.Manager
@@ -88,6 +89,10 @@ func New(cfg *config.Config) *Agent {
 	disc, discErr := newDiscoveryModule(cfg, creds, reporter, logging.Component(log, "discovery"))
 	if disc != nil {
 		mods = append(mods, disc)
+	}
+	controlModule, controlErr := newControlModule(cfg, creds, reporter, disc, logging.Component(log, "control"))
+	if controlModule != nil {
+		mods = append(mods, controlModule)
 	}
 	localEvents, localEventsErr := newLocalEventsModule(cfg, creds, reporter, logging.Component(log, "local-events"))
 	if localEvents != nil {
@@ -204,6 +209,7 @@ func New(cfg *config.Config) *Agent {
 
 	a.heartbeatErr = hbErr
 	a.discoveryErr = discErr
+	a.controlErr = controlErr
 	a.localEventsErr = localEventsErr
 	a.modules = newModuleManager(reporter.SetModuleState, mods...)
 	return a
@@ -268,6 +274,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	case a.discoveryErr != nil:
 		a.log.Error("agent will not become ready: discovery module could not be built",
 			slog.Any("error", a.discoveryErr))
+		a.health.Set(health.StateDegraded)
+	case a.controlErr != nil:
+		a.log.Error("agent will not become ready: control module could not be built",
+			slog.Any("error", a.controlErr))
 		a.health.Set(health.StateDegraded)
 	case a.localEventsErr != nil:
 		a.log.Error("agent will not become ready: local event backlog could not be built",

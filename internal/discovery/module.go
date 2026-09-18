@@ -113,6 +113,10 @@ func (m *Module) Name() string { return "discovery" }
 // Engine returns the underlying discovery engine.
 func (m *Module) Engine() *Engine { return m.engine }
 
+// Rediscover uses the existing serialized scan lifecycle; it opens no new
+// listener and accepts no remote parameters.
+func (m *Module) Rediscover(ctx context.Context) error { _, err := m.executeScan(ctx); return err }
+
 // Start starts the background periodic discovery and SaaS polling loops.
 func (m *Module) Start(_ context.Context) error {
 	ctx, cancel := context.WithCancel(context.Background())

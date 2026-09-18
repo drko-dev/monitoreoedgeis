@@ -46,5 +46,7 @@ const (
 	FramesPath = "/api/v1/edge/frames"
 	// LocalEventsPath accepts locally produced event metadata. The SaaS derives
 	// organization and camera ownership from the authenticated edge device.
-	LocalEventsPath = "/api/v1/edge/local-events"
+	LocalEventsPath   = "/api/v1/edge/local-events"
+	ControlNextPath   = "/api/v1/edge/control/next"
+	ControlReportPath = "/api/v1/edge/control/%s/report"
 )
