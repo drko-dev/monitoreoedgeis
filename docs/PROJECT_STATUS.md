@@ -992,6 +992,60 @@ not available here):
 - Real CUDA/NPU hardware.
 - Physical benchmark.
 
+## HITO L1–L4 — Transporte seguro Edge ↔ SaaS — CODE DONE
+
+**Branch `feature/secure-transport-l1-l4`, based on `main` (45c8232). Not
+merged, not deployed.** Hardening pass over transport already built in
+prior hitos (C, D, E, I, J, K) — no rearchitecture, no new endpoints.
+
+- **L1 — HTTPS enforced.** All Edge→SaaS traffic (enrollment, heartbeat,
+  discovery, Cloud/Hybrid frames, Full Edge local events, credential
+  rotation) goes through the single `internal/transport.Client`
+  constructed by `transport.New` (`internal/transport/client.go`). `New`
+  rejects an `http://` `baseURL` unless `allowInsecureHTTP` is true;
+  `internal/config.Load` fails fast at startup with the same rule if
+  `GEOCAM_SAAS_URL` is `http://` and `GEOCAM_ALLOW_INSECURE_HTTP` was not
+  set (`internal/config/config.go`). This was already centralized (one env
+  var, one config field, one transport-layer check) from Hito C — audited,
+  not duplicated further. No `InsecureSkipVerify`, no unauthenticated
+  Edge→SaaS call, anywhere in the tree.
+- **L2 — WSS: N/A.** No WebSocket client or server exists anywhere in this
+  repo (`grep -ri websocket|gorilla|"ws"` across all `.go` files returns
+  nothing). Every Edge→SaaS channel is plain HTTP request/response. Nothing
+  to secure; nothing added to fake the checkbox.
+- **L3 — Auth reused, verified uniform.** Every transport method
+  (`Enroll`, `Me`, `RotateKey`, `PostFrame`/`PostFrameWithMetadata`, plus
+  discovery/heartbeat/local-events, all in `internal/transport/`) sends the
+  same `X-Device-Id` + `Authorization: Bearer <credential>` pair through
+  the shared `Client.do`/per-request header set — no endpoint has a
+  different auth contract. `org_id`/`camera_id` are never sent from the
+  Edge (confirmed in `internal/transport/contract.go`,
+  `internal/agent/fulledge_wiring.go`); the SaaS resolves both from the
+  authenticated device. 401/403 map uniformly to `ErrUnauthorized` and
+  callers treat it as "credential revoked." Grepped the whole tree for any
+  log statement touching a credential/token/Authorization header — none
+  found; only `credential_status` (a state string, never the secret) is
+  ever logged.
+- **L4 — TLS via stdlib defaults, timeouts bounded.** `transport.Client`
+  uses a zero-value `http.Client{Timeout: timeout}` — no custom
+  `http.Transport`, no `tls.Config`, so hostname/certificate validation and
+  the system trust store are the (unmodified) Go stdlib default, and no
+  request can hang forever. `GEOCAM_ALLOW_INSECURE_HTTP` is the only
+  escape hatch (dev-only, explicit env var, not a silent default) and is
+  now also surfaced on `/status` as `insecure_http_allowed`
+  (`internal/health.Snapshot.InsecureHTTPAllowed`,
+  `internal/health/health.go`) — omitted (false) unless actually active.
+
+**Tests (targeted only)**:
+- `go test ./internal/transport/... ./internal/config/... ./internal/health/... ./internal/agent/...` — clean
+- `go test -race` on the same packages — clean
+- `go vet` on the same packages — clean; `gofmt -l` on touched files — clean
+- `go build ./...` — clean (full-repo compile check only)
+
+**HITO L1–L4 = CODE DONE. NOT MERGED, NOT DEPLOYED.** No mTLS added (not
+required by the current architecture). No new certificates, domains, or
+infrastructure introduced.
+
 ## HOW ANOTHER AI SHOULD CONTINUE
 
 1. Read `AGENTS.md`.

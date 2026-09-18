@@ -59,6 +59,19 @@ func TestSnapshot(t *testing.T) {
 	}
 }
 
+func TestSnapshotInsecureHTTPAllowed(t *testing.T) {
+	secure := New("0.1.0", &config.Config{}, identity.Identity{}, platform.Info{}).Snapshot()
+	if secure.InsecureHTTPAllowed {
+		t.Error("InsecureHTTPAllowed = true, want false when AllowInsecureHTTP is unset")
+	}
+
+	insecureCfg := &config.Config{AllowInsecureHTTP: true}
+	insecure := New("0.1.0", insecureCfg, identity.Identity{}, platform.Info{}).Snapshot()
+	if !insecure.InsecureHTTPAllowed {
+		t.Error("InsecureHTTPAllowed = false, want true when AllowInsecureHTTP is set")
+	}
+}
+
 func TestSnapshotUnenrolled(t *testing.T) {
 	cfg := &config.Config{ProcessingMode: config.ModeCloud}
 	r := New("0.1.0", cfg, identity.Identity{}, platform.Info{})
