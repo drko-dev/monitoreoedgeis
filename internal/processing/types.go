@@ -51,6 +51,12 @@ type DecodedFrame struct {
 	DecodedAt        time.Time
 }
 
+// Processing modes for video frames.
+const (
+	ProcessingModeCloud  = "cloud"
+	ProcessingModeHybrid = "hybrid"
+)
+
 // Frame is a decoded frame after sampling/resize, ready for routing. It
 // retains only non-sensitive metadata — never a credential or RTSP URI.
 type Frame struct {
@@ -65,6 +71,13 @@ type Frame struct {
 	Codec            string
 	StreamRole       string
 	Data             []byte
+
+	// Hybrid candidate metadata (Milestone J6-J9). Optional; default/empty
+	// or "cloud" indicates standard cloud sampling.
+	ProcessingMode  string
+	CandidateReason string
+	CandidateScore  float64
+	CorrelationID   string
 }
 
 // PipelineStatus is the small, per-camera summary published to /status. It

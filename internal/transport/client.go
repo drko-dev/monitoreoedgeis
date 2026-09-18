@@ -209,12 +209,27 @@ func (c *Client) RotateKey(ctx context.Context, deviceID, credential string, req
 	return resp, nil
 }
 
+// FrameMetadata holds optional transport headers for hybrid candidate frames
+// (Milestone J7). When omitted or empty, standard cloud sampling headers
+// are sent with zero protocol differences.
+type FrameMetadata struct {
+	ProcessingMode  string
+	CandidateReason string
+	CandidateScore  float64
+	CorrelationID   string
+}
+
 // PostFrame uploads one sampled video frame to FramesPath (Milestone I).
 // Unlike do(), the body is the raw JPEG (Content-Type: image/jpeg), not
 // JSON — frame metadata travels as headers instead, since there is no JSON
 // envelope to put it in. capturedAt is the pipeline's best-effort decode
 // timestamp (processing.Frame.Timestamp), not a true camera capture time.
 func (c *Client) PostFrame(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte) error {
+	return c.PostFrameWithMetadata(ctx, deviceID, credential, candidateKey, seq, capturedAt, jpeg, FrameMetadata{})
+}
+
+// PostFrameWithMetadata extends PostFrame with optional hybrid candidate headers (Milestone J7).
+func (c *Client) PostFrameWithMetadata(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte, meta FrameMetadata) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+FramesPath, bytes.NewReader(jpeg))
 	if err != nil {
 		return fmt.Errorf("transport: build request: %w", err)
@@ -226,6 +241,19 @@ func (c *Client) PostFrame(ctx context.Context, deviceID, credential, candidateK
 	req.Header.Set("X-Candidate-Key", candidateKey)
 	req.Header.Set("X-Frame-Seq", strconv.FormatUint(seq, 10))
 	req.Header.Set("X-Frame-Timestamp", capturedAt.UTC().Format(time.RFC3339Nano))
+
+	if meta.ProcessingMode != "" {
+		req.Header.Set("X-Processing-Mode", meta.ProcessingMode)
+	}
+	if meta.CandidateReason != "" {
+		req.Header.Set("X-Candidate-Reason", meta.CandidateReason)
+	}
+	if meta.CandidateScore > 0 {
+		req.Header.Set("X-Candidate-Score", strconv.FormatFloat(meta.CandidateScore, 'f', 4, 64))
+	}
+	if meta.CorrelationID != "" {
+		req.Header.Set("X-Correlation-Id", meta.CorrelationID)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

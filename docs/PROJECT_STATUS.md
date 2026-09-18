@@ -853,6 +853,10 @@ used to observe motion detection end-to-end — coverage is via `go test`
 (including `-race`) against `internal/processing`'s fake decoder with
 synthetic yuv420p frames, plus `go vet`, `gofmt`, and `make build-linux`
 (linux/amd64 + linux/arm64, `CGO_ENABLED=0`).
+## Hito J — Hybrid Candidates Transport & Classifier (J6–J7)
+
+- **J6 (Lightweight Classifier Adapter)**: Implemented decoupled `CandidateClassifier` interface, `ClassificationResult`, and `NoopClassifier` in `internal/hybrid`. Status: ADAPTER DONE / MODEL REAL OPTIONAL PENDING. Default mode is disabled.
+- **J7 (Candidate Transport & Spooling)**: Extended `processing.Frame` and `cloudsink.Buffer` (`BufferedFrame`/`bufferMeta`) with candidate metadata (`ProcessingMode`, `CandidateReason`, `CandidateScore`, `CorrelationID`). Extended `internal/transport.Client` with `PostFrameWithMetadata` sending `X-Processing-Mode`, `X-Candidate-Reason`, `X-Candidate-Score`, and `X-Correlation-Id` without breaking standard cloud upload. Offline buffer preserves hybrid metadata on recoverable retries and replay.
 
 ## HOW ANOTHER AI SHOULD CONTINUE
 
