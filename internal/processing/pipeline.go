@@ -340,6 +340,11 @@ func (p *cameraPipeline) readLoop(ctx context.Context, dec VideoDecoder) {
 				Codec:            p.descriptor.Codec,
 				StreamRole:       p.descriptor.StreamRole,
 				Data:             resized.Data,
+				// Hito N: assigned unconditionally for every mode (edge,
+				// cloud, hybrid) — this is the one place the canonical
+				// correlation id is created; nothing downstream re-derives
+				// it (see internal/vision, internal/agent/fulledge_wiring.go).
+				CorrelationID: fmt.Sprintf("%s-%d", p.candidateKey, resized.PipelineSeq),
 			}
 
 			dispatch := true
@@ -369,11 +374,11 @@ func (p *cameraPipeline) readLoop(ctx context.Context, dec VideoDecoder) {
 
 				// Connect the real local candidate decision to the transport
 				// metadata (Milestone J7-J9): every hybrid frame carries its
-				// mode, score, reason, and a deterministic correlation id so a
+				// mode and score. CorrelationID is already set unconditionally
+				// above (Hito N) — hybrid reuses it, never re-derives it, so a
 				// buffered/replayed frame keeps the same id across retries.
 				f.ProcessingMode = ProcessingModeHybrid
 				f.CandidateScore = result.Score
-				f.CorrelationID = fmt.Sprintf("%s-%d", p.candidateKey, resized.PipelineSeq)
 
 				switch {
 				case result.Unevaluable:

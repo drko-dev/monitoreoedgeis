@@ -62,7 +62,12 @@ func (r *Router) worker(i int, sink Sink) {
 			return
 		case f := <-r.queues[i]:
 			if err := sink.Route(f); err != nil {
-				r.logger.Warn("sink route failed", "sink", sink.Name(), "error", err)
+				r.logger.Warn("sink route failed",
+					"sink", sink.Name(),
+					"candidate_key", f.CandidateKey,
+					"seq", f.Seq,
+					"correlation_id", f.CorrelationID,
+					"error", err)
 			}
 		}
 	}

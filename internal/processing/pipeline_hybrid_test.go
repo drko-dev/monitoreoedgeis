@@ -93,6 +93,12 @@ func TestPipeline_HybridFiltersNonCandidateFrames(t *testing.T) {
 	if status.FramesDropped != 0 {
 		t.Fatalf("FramesDropped = %d, want 0 -- hybrid filtering must not count as a drop", status.FramesDropped)
 	}
+	// Hito N: CorrelationID is assigned once, unconditionally, before the
+	// hybrid motion check runs -- hybrid must reuse that exact value, never
+	// overwrite it with a second one.
+	if got, want := debug.Last().CorrelationID, "cam1-3"; got != want {
+		t.Fatalf("hybrid candidate frame CorrelationID = %q, want %q (same id the pipeline assigns to every frame, not re-derived)", got, want)
+	}
 
 	cancel()
 	p.Wait()

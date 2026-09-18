@@ -72,6 +72,52 @@ func TestPipeline_EndToEndWithFakeDecoder_H11(t *testing.T) {
 	p.Wait()
 }
 
+// TestPipeline_CorrelationIDAssignedWithoutHybrid is Hito N's blocking
+// regression test: with Hybrid disabled (p.motion == nil, the real
+// processing_mode=edge/cloud shape), Frame.CorrelationID must still be
+// assigned -- it was previously set only inside the `if p.motion != nil`
+// block, so Full Edge (which never enables Hybrid) received an empty
+// CorrelationID.
+func TestPipeline_CorrelationIDAssignedWithoutHybrid(t *testing.T) {
+	cfg := Config{
+		RingBufferSize: 10,
+		QueueDepth:     16,
+		// Hybrid left zero-valued: Enabled defaults to false, so p.motion
+		// stays nil -- the exact shape processing_mode=edge wiring produces.
+	}
+	desc := rtsp.StreamDescriptor{CandidateKey: "cam1", Codec: "H264", Width: 4, Height: 4, FPS: 15, StreamRole: "sub"}
+
+	debug := NewDebugSink()
+	router := NewRouter([]Sink{debug}, 8, nil)
+	defer router.Stop()
+
+	p := newCameraPipeline("cam1", desc, cfg, router, nil)
+	fd := newFakeDecoder(4, 4)
+	p.decoderFactory = func() (VideoDecoder, error) { return fd, nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p.Start(ctx)
+
+	pkt := buildRTPPacket(true, 96, 0, 0, 1, nil, 0, 0, []byte{0x65, 0x00})
+	p.OnPacket(pkt, time.Now())
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && debug.Count() < 1 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if debug.Count() != 1 {
+		t.Fatalf("debug sink received %d frames, want 1", debug.Count())
+	}
+
+	last := debug.Last()
+	if want := "cam1-1"; last.CorrelationID != want {
+		t.Fatalf("CorrelationID = %q, want %q (must be assigned even with Hybrid disabled)", last.CorrelationID, want)
+	}
+
+	cancel()
+	p.Wait()
+}
+
 // TestPipeline_WatchdogRestartsStalledDecoder is the regression test for
 // review point 2: a decoder that keeps accepting access units (upstream IS
 // flowing) but never produces a frame for cfg.DecodeTimeout must be
