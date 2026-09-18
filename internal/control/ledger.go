@@ -92,7 +92,15 @@ func OpenLedger(dataDir string, maxEntries int) (*Ledger, error) {
 	return l, nil
 }
 
-// Get checks if a command_id has a recorded terminal outcome.
+const (
+	StatusExecuting = "executing"
+	StatusSucceeded = "succeeded"
+	StatusFailed    = "failed"
+
+	ErrIndeterminateAfterRestart = "INDETERMINATE_AFTER_RESTART"
+)
+
+// Get checks if a command_id has a recorded outcome.
 func (l *Ledger) Get(commandID string) (CommandExecution, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -100,8 +108,33 @@ func (l *Ledger) Get(commandID string) (CommandExecution, bool) {
 	return exec, ok
 }
 
-// Record saves a terminal outcome atomically to disk.
-func (l *Ledger) Record(commandID string, exec CommandExecution) error {
+// Begin records that execution of commandID has started ("executing").
+// It writes atomically to disk before side effects begin.
+func (l *Ledger) Begin(commandID string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if _, exists := l.commands[commandID]; !exists {
+		l.order = append(l.order, commandID)
+	}
+	l.commands[commandID] = CommandExecution{
+		Status:      StatusExecuting,
+		CompletedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	if len(l.order) > l.maxEntries {
+		pruneCount := len(l.order) - l.maxEntries
+		for i := 0; i < pruneCount; i++ {
+			delete(l.commands, l.order[i])
+		}
+		l.order = l.order[pruneCount:]
+	}
+
+	return l.saveLocked()
+}
+
+// Complete records the terminal outcome (succeeded/failed) atomically to disk.
+func (l *Ledger) Complete(commandID string, exec CommandExecution) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -123,6 +156,11 @@ func (l *Ledger) Record(commandID string, exec CommandExecution) error {
 	}
 
 	return l.saveLocked()
+}
+
+// Record saves a terminal outcome atomically to disk (kept for backwards compatibility).
+func (l *Ledger) Record(commandID string, exec CommandExecution) error {
+	return l.Complete(commandID, exec)
 }
 
 // saveLocked writes the ledger via temp-file-sync-rename.

@@ -4,6 +4,7 @@ package control
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -142,22 +143,32 @@ func (m *Module) loop(ctx context.Context) {
 		if cmd == nil {
 			continue
 		}
-		state, result, code := m.execute(ctx, cmd)
+		state, result, code, execErr := m.execute(ctx, cmd)
+		if execErr != nil {
+			// Hard ledger persistence failure: do NOT report success to SaaS.
+			// Degrade and stop polling commands to avoid unsafe execution.
+			return
+		}
 		if err := m.client.ReportControlCommand(ctx, m.deviceID, m.credential, cmd.ID, state, result, code); err != nil && errors.Is(err, context.Canceled) {
 			return
 		}
 	}
 }
 
-func (m *Module) execute(ctx context.Context, cmd *transport.ControlCommand) (string, map[string]any, string) {
+func (m *Module) execute(ctx context.Context, cmd *transport.ControlCommand) (string, map[string]any, string, error) {
 	if cmd.ID == "" || len(cmd.Payload) != 0 {
-		return "failed", nil, "INVALID_COMMAND"
+		return StatusFailed, nil, "INVALID_COMMAND", nil
 	}
 
 	// 1. Check durable ledger if available
 	if m.ledger != nil {
 		if record, found := m.ledger.Get(cmd.ID); found {
-			return record.Status, record.Result, record.ErrorCode
+			if record.Status == StatusExecuting {
+				// Incomplete / was executing before restart: do NOT re-execute.
+				// Report failed with deterministic error code.
+				return StatusFailed, nil, ErrIndeterminateAfterRestart, nil
+			}
+			return record.Status, record.Result, record.ErrorCode, nil
 		}
 	}
 
@@ -165,8 +176,23 @@ func (m *Module) execute(ctx context.Context, cmd *transport.ControlCommand) (st
 	m.mu.Lock()
 	if existing, seen := m.executed[cmd.ID]; seen {
 		m.mu.Unlock()
-		return existing.status, existing.result, existing.errorCode
+		if existing.status == StatusExecuting {
+			return StatusFailed, nil, ErrIndeterminateAfterRestart, nil
+		}
+		return existing.status, existing.result, existing.errorCode, nil
 	}
+	m.mu.Unlock()
+
+	// 3. Mark "executing" atomically in ledger BEFORE calling Executor
+	if m.ledger != nil {
+		if err := m.ledger.Begin(cmd.ID); err != nil {
+			// Begin failed: DO NOT call executor. Return error to stop loop.
+			return "", nil, "", fmt.Errorf("control: begin command in ledger: %w", err)
+		}
+	}
+
+	m.mu.Lock()
+	m.executed[cmd.ID] = commandExecution{status: StatusExecuting}
 	m.mu.Unlock()
 
 	var state, code string
@@ -174,28 +200,31 @@ func (m *Module) execute(ctx context.Context, cmd *transport.ControlCommand) (st
 
 	switch cmd.CommandType {
 	case "request_status":
-		state = "succeeded"
+		state = StatusSucceeded
 		result = m.executor.Status()
 	case "rediscovery":
 		if err := m.executor.Rediscover(ctx); err != nil {
-			state, code = "failed", "REDISCOVERY_FAILED"
+			state, code = StatusFailed, "REDISCOVERY_FAILED"
 		} else {
-			state = "succeeded"
+			state = StatusSucceeded
 			result = map[string]any{}
 		}
 	case "restart_video_pipeline", "reload_config":
-		state, code = "failed", "UNSUPPORTED"
+		state, code = StatusFailed, "UNSUPPORTED"
 	default:
-		state, code = "failed", "UNKNOWN_COMMAND"
+		state, code = StatusFailed, "UNKNOWN_COMMAND"
 	}
 
-	// Persist to durable ledger atomically BEFORE returning to report
+	// 4. Persist terminal outcome atomically in ledger BEFORE reporting to SaaS
 	if m.ledger != nil {
-		_ = m.ledger.Record(cmd.ID, CommandExecution{
+		if err := m.ledger.Complete(cmd.ID, CommandExecution{
 			Status:    state,
 			Result:    result,
 			ErrorCode: code,
-		})
+		}); err != nil {
+			// Complete failed: DO NOT return success to report. Return error to halt.
+			return "", nil, "", fmt.Errorf("control: complete command in ledger: %w", err)
+		}
 	}
 
 	m.mu.Lock()
@@ -206,5 +235,5 @@ func (m *Module) execute(ctx context.Context, cmd *transport.ControlCommand) (st
 	}
 	m.mu.Unlock()
 
-	return state, result, code
+	return state, result, code, nil
 }

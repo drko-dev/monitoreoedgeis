@@ -12,10 +12,19 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
 
-type fakeExecutor struct{ rediscoveries int }
+type fakeExecutor struct {
+	rediscoveries int
+	rediscoverFn  func(context.Context) error
+}
 
-func (f *fakeExecutor) Status() map[string]any           { return map[string]any{"health": "READY"} }
-func (f *fakeExecutor) Rediscover(context.Context) error { f.rediscoveries++; return nil }
+func (f *fakeExecutor) Status() map[string]any { return map[string]any{"health": "READY"} }
+func (f *fakeExecutor) Rediscover(ctx context.Context) error {
+	f.rediscoveries++
+	if f.rediscoverFn != nil {
+		return f.rediscoverFn(ctx)
+	}
+	return nil
+}
 
 func TestExecuteAllowlistAndDuplicateSafety(t *testing.T) {
 	exec := &fakeExecutor{}
@@ -34,7 +43,10 @@ func TestExecuteAllowlistAndDuplicateSafety(t *testing.T) {
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cmdID := fmt.Sprintf("cmd-%d", i)
-			state, _, code := m.execute(t.Context(), &transport.ControlCommand{ID: cmdID, CommandType: tc.kind, Payload: tc.payload})
+			state, _, code, err := m.execute(t.Context(), &transport.ControlCommand{ID: cmdID, CommandType: tc.kind, Payload: tc.payload})
+			if err != nil {
+				t.Fatalf("unexpected error = %v", err)
+			}
 			if state != tc.state || code != tc.code {
 				t.Fatalf("got %s/%s", state, code)
 			}
@@ -45,7 +57,10 @@ func TestExecuteAllowlistAndDuplicateSafety(t *testing.T) {
 	}
 
 	// Duplicate execution of same command ID ("cmd-1" was rediscovery) returns recorded result and does NOT re-execute
-	state, _, code := m.execute(t.Context(), &transport.ControlCommand{ID: "cmd-1", CommandType: "rediscovery"})
+	state, _, code, err := m.execute(t.Context(), &transport.ControlCommand{ID: "cmd-1", CommandType: "rediscovery"})
+	if err != nil {
+		t.Fatalf("unexpected error = %v", err)
+	}
 	if state != "succeeded" || code != "" {
 		t.Fatalf("duplicate execution got %s/%s", state, code)
 	}
@@ -294,4 +309,154 @@ func TestLedger_AtomicWriteAndPruning(t *testing.T) {
 	if len(data) == 0 {
 		t.Fatal("ledger file is empty")
 	}
+}
+
+func TestControlModule_BeginFailureDoesNotCallExecutor(t *testing.T) {
+	// Read-only directory where Begin will fail when attempting to write/rename
+	dataDir := t.TempDir()
+	l, err := OpenLedger(dataDir, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Make directory read-only so saveLocked will fail
+	if err := os.Chmod(dataDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dataDir, 0o700)
+
+	exec := &fakeExecutor{}
+	m := New(&fakeClient{}, exec, "dev-1", "cred-1", WithLedger(l))
+
+	state, _, code, err := m.execute(context.Background(), &transport.ControlCommand{
+		ID:          "cmd-fail-begin",
+		CommandType: "rediscovery",
+	})
+	if err == nil {
+		t.Fatal("expected error on failed Begin, got nil")
+	}
+	if state != "" || code != "" {
+		t.Fatalf("expected empty state/code, got %s/%s", state, code)
+	}
+	if exec.rediscoveries != 0 {
+		t.Fatalf("Executor called %d times, want 0 when Begin fails", exec.rediscoveries)
+	}
+}
+
+func TestControlModule_RestartExecutingDoesNotReexecute(t *testing.T) {
+	dataDir := t.TempDir()
+	l1, err := OpenLedger(dataDir, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Record an incomplete command that was in StatusExecuting before restart
+	if err := l1.Begin("cmd-interrupted"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restart: reopen ledger
+	l2, err := OpenLedger(dataDir, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exec := &fakeExecutor{}
+	reported := make(chan struct {
+		status string
+		code   string
+	}, 1)
+	client := &fakeClient{
+		claimFunc: func(ctx context.Context, deviceID, credential string) (*transport.ControlCommand, error) {
+			return &transport.ControlCommand{
+				ID:          "cmd-interrupted",
+				CommandType: "rediscovery",
+			}, nil
+		},
+		reportFunc: func(ctx context.Context, deviceID, credential, commandID, status string, result map[string]any, errorCode string) error {
+			reported <- struct {
+				status string
+				code   string
+			}{status: status, code: errorCode}
+			return nil
+		},
+	}
+
+	m := New(client, exec, "dev-1", "cred-1", WithLedger(l2))
+	m.SetPollInterval(10 * time.Millisecond)
+
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop(context.Background())
+
+	select {
+	case rep := <-reported:
+		if rep.status != StatusFailed {
+			t.Fatalf("reported status = %s, want failed", rep.status)
+		}
+		if rep.code != ErrIndeterminateAfterRestart {
+			t.Fatalf("reported code = %s, want %s", rep.code, ErrIndeterminateAfterRestart)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for report")
+	}
+
+	// Executor must NEVER be called
+	if exec.rediscoveries != 0 {
+		t.Fatalf("Executor called %d times, want 0", exec.rediscoveries)
+	}
+}
+
+func TestControlModule_CompleteFailureHaltsAndDoesNotReport(t *testing.T) {
+	dataDir := t.TempDir()
+	l, err := OpenLedger(dataDir, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exec := &fakeExecutor{
+		rediscoverFn: func(ctx context.Context) error {
+			// Make dir read-only during execution so Complete will fail
+			if err := os.Chmod(dataDir, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			return nil
+		},
+	}
+	defer func() { _ = os.Chmod(dataDir, 0o700) }()
+
+	reported := make(chan string, 1)
+	claims := 0
+	client := &fakeClient{
+		claimFunc: func(ctx context.Context, deviceID, credential string) (*transport.ControlCommand, error) {
+			claims++
+			if claims == 1 {
+				return &transport.ControlCommand{
+					ID:          "cmd-complete-fail",
+					CommandType: "rediscovery",
+				}, nil
+			}
+			return nil, nil
+		},
+		reportFunc: func(ctx context.Context, deviceID, credential, commandID, status string, result map[string]any, errorCode string) error {
+			reported <- status
+			return nil
+		},
+	}
+
+	m := New(client, exec, "dev-1", "cred-1", WithLedger(l))
+	m.SetPollInterval(10 * time.Millisecond)
+
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait briefly: reportFunc should NOT be called because loop exits on Complete error
+	select {
+	case st := <-reported:
+		t.Fatalf("reportFunc called with status %s, want no report when Complete fails", st)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	_ = m.Stop(context.Background())
 }
