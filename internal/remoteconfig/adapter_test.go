@@ -769,3 +769,74 @@ func TestTargeted_10_KnownCamerasEmptyRejectsCameraOverride(t *testing.T) {
 		t.Fatalf("unexpected adapter.Apply error message: %v", err)
 	}
 }
+
+type unreadyVisionSink struct {
+	*testSink
+}
+
+func (u *unreadyVisionSink) WaitForReady(ctx context.Context) error {
+	return fmt.Errorf("simulated unready vision worker")
+}
+
+func TestTargeted_NilCloudSinkFailsTransition(t *testing.T) {
+	adapter, videoMgr, _, _, _ := setupTestRuntime(t, config.ModeEdge)
+	// Replace cloud sink factory with one returning nil
+	adapter.cloudSinkFn = func() processing.Sink { return nil }
+
+	ctx := context.Background()
+	cloudMode := config.ModeCloud
+	err := adapter.Apply(ctx, Config{ProcessingMode: &cloudMode})
+	if err == nil {
+		t.Fatal("expected Apply to fail when cloud sink factory returns nil")
+	}
+
+	// Router still has vision sink
+	sinks := videoMgr.ExtraSinks()
+	if len(sinks) != 1 || sinks[0].Name() != "cloud-sink" { // in setupTestRuntime, cloud-sink was passed
+		// verify router wasn't cleared
+		if len(sinks) == 0 {
+			t.Fatal("router sinks cleared unexpectedly")
+		}
+	}
+
+	// Mode remains edge
+	cur := adapter.CurrentConfig()
+	if cur.ProcessingMode == nil || *cur.ProcessingMode != config.ModeEdge {
+		t.Fatalf("ProcessingMode = %v, want edge", cur.ProcessingMode)
+	}
+}
+
+func TestTargeted_UnreadyVisionSinkFailsTransition(t *testing.T) {
+	adapter, videoMgr, _, _, _ := setupTestRuntime(t, config.ModeCloud)
+	stopped := false
+	adapter.visionSinkFn = func() (processing.Sink, func(ctx context.Context) error, func(ctx context.Context) error) {
+		vs := &unreadyVisionSink{testSink: newTestSink("unready-vision")}
+		startFn := func(ctx context.Context) error { return nil }
+		stopFn := func(ctx context.Context) error { stopped = true; return nil }
+		return vs, startFn, stopFn
+	}
+
+	ctx := context.Background()
+	edgeMode := config.ModeEdge
+	err := adapter.Apply(ctx, Config{ProcessingMode: &edgeMode})
+	if err == nil {
+		t.Fatal("expected Apply to fail when vision worker is unready")
+	}
+
+	// Worker stopFn was called
+	if !stopped {
+		t.Fatal("expected vision worker stopFn to be called after unready abort")
+	}
+
+	// Mode remains cloud
+	cur := adapter.CurrentConfig()
+	if cur.ProcessingMode == nil || *cur.ProcessingMode != config.ModeCloud {
+		t.Fatalf("ProcessingMode = %v, want cloud", cur.ProcessingMode)
+	}
+
+	// Router still has cloud sink
+	sinks := videoMgr.ExtraSinks()
+	if len(sinks) != 1 || sinks[0].Name() != "cloud-sink" {
+		t.Fatalf("expected router to maintain cloud sink, got: %+v", sinks)
+	}
+}

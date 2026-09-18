@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
@@ -33,6 +34,7 @@ type RuntimeAdapter struct {
 	currentVisionStopFn func(ctx context.Context) error
 	healthCheck         func(ctx context.Context) error
 	onModeChange        func(string)
+	startTimeout        time.Duration
 
 	currentCfg  Config
 	previousCfg Config
@@ -56,6 +58,20 @@ func WithCloudSinkFactory(fn func() processing.Sink) Option {
 func WithVisionSinkFactory(fn func() (processing.Sink, func(ctx context.Context) error, func(ctx context.Context) error)) Option {
 	return func(a *RuntimeAdapter) {
 		a.visionSinkFn = fn
+	}
+}
+
+// WithInitialVisionStop sets the stop function for an initial vision worker running at startup.
+func WithInitialVisionStop(fn func(ctx context.Context) error) Option {
+	return func(a *RuntimeAdapter) {
+		a.currentVisionStopFn = fn
+	}
+}
+
+// WithStartTimeout configures the timeout when waiting for vision worker ready state during mode transition.
+func WithStartTimeout(d time.Duration) Option {
+	return func(a *RuntimeAdapter) {
+		a.startTimeout = d
 	}
 }
 
@@ -191,14 +207,18 @@ func (a *RuntimeAdapter) Apply(ctx context.Context, patch Config) error {
 	// 4. Apply changes to runtime
 	if err := a.applyState(ctx, effective); err != nil {
 		// Failure during transition: rollback
-		_ = a.applyState(ctx, oldCfg)
+		if rerr := a.applyState(ctx, oldCfg); rerr != nil {
+			return fmt.Errorf("remoteconfig: apply transition failed: %w; rollback also failed: %v", err, rerr)
+		}
 		return fmt.Errorf("remoteconfig: apply transition failed: %w; rolled back", err)
 	}
 
 	// 5. Health check
 	if err := a.runHealthCheck(ctx); err != nil {
 		a.logger.Warn("remoteconfig: health check failed after apply, rolling back", "error", err)
-		_ = a.applyState(ctx, oldCfg)
+		if rerr := a.applyState(ctx, oldCfg); rerr != nil {
+			return fmt.Errorf("remoteconfig: post-apply health check failed: %w; rollback also failed: %v", err, rerr)
+		}
 		return fmt.Errorf("remoteconfig: post-apply health check failed: %w; rolled back to previous configuration", err)
 	}
 
@@ -366,40 +386,85 @@ func (a *RuntimeAdapter) transitionMode(ctx context.Context, from, to config.Pro
 
 	switch to {
 	case config.ModeCloud, config.ModeHybrid:
-		// Stop running vision worker if any
+		// 1. Build CloudSink first
+		if a.cloudSinkFn == nil {
+			return fmt.Errorf("cloud video sink factory unavailable for mode %s", to)
+		}
+		cloudSink := a.cloudSinkFn()
+		if cloudSink == nil {
+			return fmt.Errorf("cloud video sink unavailable for mode %s (transport/credentials disabled)", to)
+		}
+
+		// 2. Only after building successfully, swap Router sinks
+		a.videoManager.UpdateRouterSinks(cloudSink)
+
+		// 3. Stop previous Vision worker
 		if a.currentVisionStopFn != nil {
 			_ = a.currentVisionStopFn(ctx)
 			a.currentVisionStopFn = nil
 		}
-		// Sinks: CloudSink active, VisionSink stopped
-		var cloudSink processing.Sink
-		if a.cloudSinkFn != nil {
-			cloudSink = a.cloudSinkFn()
-		}
-		if cloudSink != nil {
-			a.videoManager.UpdateRouterSinks(cloudSink)
-		} else {
-			a.videoManager.UpdateRouterSinks()
-		}
 
 	case config.ModeEdge:
-		// Sinks: VisionSink active, CloudSink stopped
-		var visionSink processing.Sink
-		if a.visionSinkFn != nil {
-			sink, startFn, stopFn := a.visionSinkFn()
-			if startFn != nil {
-				if err := startFn(ctx); err != nil {
-					return fmt.Errorf("start vision worker: %w", err)
+		// 1. Build VisionSink
+		if a.visionSinkFn == nil {
+			return fmt.Errorf("vision sink factory unavailable for edge mode")
+		}
+		sink, startFn, stopFn := a.visionSinkFn()
+		if sink == nil {
+			return fmt.Errorf("vision sink unavailable for edge mode")
+		}
+
+		// 2. Start Vision Worker
+		if startFn != nil {
+			if err := startFn(ctx); err != nil {
+				if stopFn != nil {
+					_ = stopFn(ctx)
+				}
+				return fmt.Errorf("start vision worker: %w", err)
+			}
+		}
+
+		// 3. Wait for READY bounded by timeout
+		timeout := a.startTimeout
+		if timeout <= 0 {
+			timeout = config.DefaultEdgeYOLOStartTimeout
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, timeout)
+		var readyErr error
+		if rw, ok := sink.(interface{ WaitForReady(context.Context) error }); ok {
+			readyErr = rw.WaitForReady(waitCtx)
+		} else if rc, ok := sink.(interface{ Ready() bool }); ok {
+			ticker := time.NewTicker(10 * time.Millisecond)
+			for !rc.Ready() {
+				select {
+				case <-waitCtx.Done():
+					readyErr = fmt.Errorf("vision sink: timed out waiting for ready: %w", waitCtx.Err())
+					break
+				case <-ticker.C:
+				}
+				if readyErr != nil {
+					break
 				}
 			}
-			a.currentVisionStopFn = stopFn
-			visionSink = sink
+			ticker.Stop()
 		}
-		if visionSink != nil {
-			a.videoManager.UpdateRouterSinks(visionSink)
-		} else {
-			a.videoManager.UpdateRouterSinks()
+		cancel()
+
+		if readyErr != nil {
+			// If Vision is not READY:
+			// - stop the new worker if it was started
+			// - maintain previous sink/router
+			// - return error
+			// - do not swap router or update mode
+			if stopFn != nil {
+				_ = stopFn(ctx)
+			}
+			return fmt.Errorf("vision worker not ready: %w", readyErr)
 		}
+
+		// 4. Only after reaching READY swap Router sinks
+		a.videoManager.UpdateRouterSinks(sink)
+		a.currentVisionStopFn = stopFn
 	}
 
 	return nil

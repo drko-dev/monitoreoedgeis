@@ -3,6 +3,7 @@ package vision
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image/jpeg"
 	"log/slog"
@@ -83,6 +84,19 @@ func (s *Sink) ModelManager() *ModelManager { return s.models }
 
 // Worker returns the underlying Worker.
 func (s *Sink) Worker() *Worker { return s.worker }
+
+// WaitForReady blocks until the underlying worker reaches StateReady, or returns error.
+func (s *Sink) WaitForReady(ctx context.Context) error {
+	if s.worker == nil {
+		return errors.New("edge-vision: no worker attached")
+	}
+	return s.worker.WaitForReady(ctx)
+}
+
+// Ready reports whether the underlying worker is ready.
+func (s *Sink) Ready() bool {
+	return s.worker != nil && s.worker.Ready()
+}
 
 // Name implements processing.Sink.
 func (s *Sink) Name() string { return "edge-vision" }

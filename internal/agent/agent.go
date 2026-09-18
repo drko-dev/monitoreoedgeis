@@ -219,10 +219,14 @@ func New(cfg *config.Config) *Agent {
 			if a.fullEdgeConsumer != nil {
 				consumer = a.fullEdgeConsumer
 			}
+			var initialVisionStop func(ctx context.Context) error
 			if vs, mod := newVisionSink(cfg, reporter, consumer, log, modelMgr); vs != nil {
 				extraSinks = append(extraSinks, vs)
 				mods = append(mods, mod)
 				a.visionSink = vs
+				if mod != nil {
+					initialVisionStop = mod.Stop
+				}
 			}
 
 			videoMgr := processing.NewManager(procCfg, rtspMgr, reporter, logging.Component(log, "video-pipeline"), extraSinks...)
@@ -238,6 +242,8 @@ func New(cfg *config.Config) *Agent {
 				rtspMgr,
 				modelMgr,
 				logging.Component(log, "remote-config"),
+				remoteconfig.WithStartTimeout(cfg.EdgeYOLOStartTimeout),
+				remoteconfig.WithInitialVisionStop(initialVisionStop),
 				remoteconfig.WithCloudSinkFactory(func() processing.Sink {
 					return buildCloudSink(cfg, creds, reporter, log)
 				}),
