@@ -19,6 +19,10 @@ type HealthSink interface {
 	SetVideoPipeline(summary VideoPipelineSummary)
 }
 
+// FrameHistory is the read-only, bounded video-history surface available to a
+// local evidence producer. It deliberately exposes no decoder or RTSP handle.
+type FrameHistory interface{ Snapshot() []Frame }
+
 // Manager implements agent.Module: it fans out video RTP from
 // internal/rtsp (as an rtsp.PacketSink) into one cameraPipeline per camera,
 // bounded by Config.MaxConcurrentPipelines, and periodically publishes a
@@ -87,6 +91,18 @@ func (m *Manager) DebugSink() *DebugSink {
 		if d, ok := s.(*DebugSink); ok {
 			return d
 		}
+	}
+	return nil
+}
+
+// FrameHistory returns the existing decoded-frame ring for candidateKey, or
+// nil when no pipeline is active. This permits local clip creation without a
+// second RTSP connection or decoder.
+func (m *Manager) FrameHistory(candidateKey string) FrameHistory {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p := m.pipelines[candidateKey]; p != nil {
+		return p.ring
 	}
 	return nil
 }

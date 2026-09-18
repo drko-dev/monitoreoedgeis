@@ -115,6 +115,19 @@ type Config struct {
 	EdgeInferenceQueueDepth    int
 	EdgeMinFreeDiskBytes       uint64
 	EdgeMaxMemoryPercent       float64
+	// Local event transport backlog (K10-K12). Unlike the frame buffer this
+	// has conservative defaults because events must survive a SaaS outage.
+	LocalEventBacklogMaxOperations int
+	LocalEventBacklogMaxBytes      int64
+	// EdgeMaxClipSizeBytes is a separate, explicit technical ceiling for MP4
+	// clip evidence (K9/integration item #8) — deliberately NOT the same
+	// knob as MAX_CAPTURE_SIZE_BYTES on the SaaS side (that one sizes a
+	// single JPEG). A clip this Edge would build larger than what the SaaS
+	// accepts is rejected locally (never attempted/never uploaded to be
+	// quarantined pointlessly) — see internal/evidence.Clipper's caller in
+	// internal/agent. Zero means "not configured": no invented commercial
+	// default here, only a real one wired to match the SaaS's actual limit.
+	EdgeMaxClipSizeBytes int64
 }
 
 // HybridROI is one normalized (0..1) region of interest parsed from
@@ -224,6 +237,20 @@ const (
 	DefaultCloudMaxBytesPerSec = 0
 	DefaultCloudBurstBytes     = 0
 	DefaultCloudMaxFPS         = 0.0
+	// DefaultLocalEventBacklogMaxOperations/MaxBytes (Milestone K10-K12):
+	// technical bounds only, no invented commercial retention policy.
+	DefaultLocalEventBacklogMaxOperations = 100
+	DefaultLocalEventBacklogMaxBytes      = 512 << 20
+	// DefaultEdgeMaxClipSizeBytes (Milestone K9/integration item #8): a
+	// technical ceiling distinct from the SaaS's JPEG-sized
+	// MAX_CAPTURE_SIZE_BYTES=5MB — clips are naturally larger than a single
+	// frame. 20MB comfortably covers a few seconds of H.264 at the
+	// resolutions this pipeline already produces (Hito H: max 1920x1080),
+	// without being large enough to make a rejected-clip retry loop cheap.
+	// Not a business/commercial number — a real, coherent value the Edge
+	// enforces locally before ever attempting an upload the SaaS would
+	// reject anyway.
+	DefaultEdgeMaxClipSizeBytes = 20 << 20
 	// Local YOLO vision-worker defaults and bounds (Milestone K).
 	// DefaultEdgeYOLOModelsDirName is a subdirectory of GEOCAM_DATA_DIR, kept
 	// outside any versioned release tree so an agent update never destroys
@@ -319,6 +346,10 @@ func Load() (*Config, error) {
 		EdgeInferenceQueueDepth:    DefaultEdgeInferenceQueueDepth,
 		EdgeMinFreeDiskBytes:       DefaultEdgeMinFreeDiskBytes,
 		EdgeMaxMemoryPercent:       DefaultEdgeMaxMemoryPercent,
+
+		LocalEventBacklogMaxOperations: DefaultLocalEventBacklogMaxOperations,
+		LocalEventBacklogMaxBytes:      DefaultLocalEventBacklogMaxBytes,
+		EdgeMaxClipSizeBytes:           DefaultEdgeMaxClipSizeBytes,
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_PROCESSING_MODE")); raw != "" {
@@ -685,6 +716,27 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid cloud max FPS %q: must be non-negative", raw)
 		}
 		cfg.CloudMaxFPS = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_LOCAL_EVENT_BACKLOG_MAX_OPERATIONS")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil || v <= 0 {
+			return nil, fmt.Errorf("invalid local event backlog max operations %q: must be positive", raw)
+		}
+		cfg.LocalEventBacklogMaxOperations = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_LOCAL_EVENT_BACKLOG_MAX_BYTES")); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || v <= 0 {
+			return nil, fmt.Errorf("invalid local event backlog max bytes %q: must be positive", raw)
+		}
+		cfg.LocalEventBacklogMaxBytes = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_MAX_CLIP_SIZE_BYTES")); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || v <= 0 {
+			return nil, fmt.Errorf("invalid edge max clip size %q: must be positive", raw)
+		}
+		cfg.EdgeMaxClipSizeBytes = v
 	}
 
 	// Local YOLO vision-worker settings (Milestone K). ModelsDir/SocketPath
