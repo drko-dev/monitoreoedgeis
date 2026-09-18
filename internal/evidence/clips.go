@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,11 @@ import (
 	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
+)
+
+// Sentinel errors for clip operations.
+var (
+	ErrClipConflict = errors.New("evidence: divergent clip content for event")
 )
 
 // FrameHistory is implemented by an existing ring buffer or a small adapter
@@ -117,20 +123,51 @@ func (c *Clipper) Capture(ctx context.Context, history FrameHistory, eventUUID s
 			return ClipRecord{}, fmt.Errorf("evidence: clip size %d exceeds max %d, rejecting locally rather than uploading a clip the SaaS would reject", info.Size(), c.cfg.MaxSizeBytes)
 		}
 	}
-	if err := os.Rename(tmp, final); err != nil {
+
+	tmpData, err := os.ReadFile(tmp)
+	if err != nil {
 		_ = os.Remove(tmp)
 		return ClipRecord{}, err
 	}
-	data, err := os.ReadFile(final)
-	if err != nil {
-		return ClipRecord{}, err
-	}
-	sum := sha256.Sum256(data)
+	tmpSum := sha256.Sum256(tmpData)
+	tmpSHA := hex.EncodeToString(tmpSum[:])
+
 	duration := int64(time.Duration(len(frames)-1).Seconds() / c.cfg.FrameRate * 1000)
 	if len(frames) > 1 && frames[len(frames)-1].Timestamp.After(frames[0].Timestamp) {
 		duration = frames[len(frames)-1].Timestamp.Sub(frames[0].Timestamp).Milliseconds()
 	}
-	return ClipRecord{EventUUID: eventUUID, RelativePath: rel, SHA256: hex.EncodeToString(sum[:]), Size: int64(len(data)), DurationMS: duration}, nil
+
+	// Guard against overwriting an existing clip file.
+	// If identical content already exists, return the existing record idempotently.
+	// If divergent content exists for the same eventUUID, return ErrClipConflict without overwriting.
+	if existingData, err := os.ReadFile(final); err == nil {
+		_ = os.Remove(tmp)
+		existingSum := sha256.Sum256(existingData)
+		existingSHA := hex.EncodeToString(existingSum[:])
+		if existingSHA == tmpSHA {
+			return ClipRecord{
+				EventUUID:    eventUUID,
+				RelativePath: rel,
+				SHA256:       existingSHA,
+				Size:         int64(len(existingData)),
+				DurationMS:   duration,
+			}, nil
+		}
+		return ClipRecord{}, fmt.Errorf("%w: %s", ErrClipConflict, final)
+	}
+
+	if err := os.Rename(tmp, final); err != nil {
+		_ = os.Remove(tmp)
+		return ClipRecord{}, err
+	}
+
+	return ClipRecord{
+		EventUUID:    eventUUID,
+		RelativePath: rel,
+		SHA256:       tmpSHA,
+		Size:         int64(len(tmpData)),
+		DurationMS:   duration,
+	}, nil
 }
 
 func (c *Clipper) encode(ctx context.Context, output string, frames []processing.Frame) error {

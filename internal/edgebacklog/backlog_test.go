@@ -178,3 +178,22 @@ func TestBacklogRateLimitErrorWithRetryAfter(t *testing.T) {
 		t.Errorf("NextAttempt %v is before expected min %v", nextAttempt, expectedMin)
 	}
 }
+
+func TestBacklogDivergentSubmissionConflict(t *testing.T) {
+	d := t.TempDir()
+	b := open(t, d)
+
+	sub1 := submission(t, d, "conflict-evt")
+	if err := b.Enqueue(sub1); err != nil {
+		t.Fatalf("sub1: %v", err)
+	}
+
+	// Divergent submission: different Class for the exact same event_uuid
+	sub2 := sub1
+	sub2.Event.Class = "vehicle"
+
+	err := b.Enqueue(sub2)
+	if !errors.Is(err, ErrSubmissionConflict) {
+		t.Fatalf("expected ErrSubmissionConflict, got %v", err)
+	}
+}

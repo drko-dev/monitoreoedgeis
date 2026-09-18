@@ -69,6 +69,20 @@ func (s *EventStore) Save(evt *LocalEvent) error {
 	}
 
 	finalPath := filepath.Join(s.baseDir, evt.EventUUID+".json")
+
+	// Guard against overwriting an existing event file.
+	// If identical event already exists, return nil idempotently without double-counting backlog.
+	// If divergent event content exists for the same EventUUID, return ErrEventConflict.
+	if existingData, err := os.ReadFile(finalPath); err == nil {
+		var existingEvt LocalEvent
+		if err := json.Unmarshal(existingData, &existingEvt); err == nil {
+			if eventsEquivalent(&existingEvt, evt) {
+				return nil
+			}
+			return fmt.Errorf("%w: %s", ErrEventConflict, evt.EventUUID)
+		}
+	}
+
 	tmpFile, err := os.CreateTemp(s.baseDir, ".event-*.tmp")
 	if err != nil {
 		return fmt.Errorf("fulledge: create temp event file: %w", err)
@@ -110,6 +124,41 @@ func (s *EventStore) Save(evt *LocalEvent) error {
 	}
 
 	return nil
+}
+
+// eventsEquivalent compares semantic payload fields of two events to decide if an event retry is identical.
+func eventsEquivalent(a, b *LocalEvent) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.EventUUID != b.EventUUID ||
+		a.EdgeID != b.EdgeID ||
+		a.CandidateKey != b.CandidateKey ||
+		a.TenantID != b.TenantID ||
+		a.SiteID != b.SiteID ||
+		a.CorrelationID != b.CorrelationID ||
+		a.FrameSeq != b.FrameSeq ||
+		a.Tipo != b.Tipo ||
+		a.ClassID != b.ClassID ||
+		a.Confidence != b.Confidence ||
+		a.BBox != b.BBox ||
+		a.Model != b.Model ||
+		a.Device != b.Device ||
+		a.ProcessingMode != b.ProcessingMode {
+		return false
+	}
+	// Evidence check
+	if (a.Evidence == nil) != (b.Evidence == nil) {
+		return false
+	}
+	if a.Evidence != nil && b.Evidence != nil {
+		if a.Evidence.Path != b.Evidence.Path ||
+			a.Evidence.SHA256 != b.Evidence.SHA256 ||
+			a.Evidence.SizeBytes != b.Evidence.SizeBytes {
+			return false
+		}
+	}
+	return true
 }
 
 // MarkSynced transitions a persisted event to SyncStatusSynced once K12's

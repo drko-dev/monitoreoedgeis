@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -46,6 +47,7 @@ func (c *fullEdgeEventConsumer) ConsumeInference(result vision.InferenceResult, 
 	fres := fulledge.InferenceResult{
 		CandidateKey:       result.CandidateKey,
 		FrameSeq:           result.FrameSeq,
+		CorrelationID:      result.CandidateKey + fmt.Sprintf("-%d", result.FrameSeq),
 		FrameTimestamp:     result.Timestamp,
 		InferenceTimestamp: result.Timestamp,
 		InferenceMs:        result.InferenceMS,

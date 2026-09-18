@@ -131,4 +131,7 @@ func TestFullEdgeWiring_VisionToSyncedEndToEnd(t *testing.T) {
 	if evt.SyncStatus != fulledge.SyncStatusSynced {
 		t.Fatalf("event SyncStatus = %q, want %q", evt.SyncStatus, fulledge.SyncStatusSynced)
 	}
+	if evt.CorrelationID != "cam-1-42" {
+		t.Fatalf("event CorrelationID = %q, want %q", evt.CorrelationID, "cam-1-42")
+	}
 }

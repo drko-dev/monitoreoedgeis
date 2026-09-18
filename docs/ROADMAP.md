@@ -296,8 +296,13 @@ edge-mode-only gating, model cleanup) and what remains genuinely BLOCKED
 
 ## M — Eventos y evidencia
 
-- M1–M12: modelo evento, timestamp, tenant/site/cámara, tipo, confidence, bbox,
-  captura, clip, retry, deduplicación, correlación y evidencia SaaS.
+- M1–M6: Modelo local, timestamp, tenant/site, tipo, confidence, bbox pixel-level unificado (K1–K8).
+- M7. Captura JPEG. CODE DONE — Validated UUIDv4 filename under `GEOCAM_DATA_DIR/evidence/captures/<uuid>.jpg`, atomic write, SHA-256 integrity, size tracking, safe path containment (no candidate_key path traversal). Capture failures degrade safely without dropping the event.
+- M8. Clip MP4. CODE DONE — Ring buffer / FrameHistory window encoding via ffmpeg (`GEOCAM_DATA_DIR/evidence/clips/<uuid>.mp4`), atomic write, SHA-256 calculation, duration tracking. Encoder failures degrade safely without losing event record.
+- M9. Retry. CODE DONE — Durable replay via `internal/edgebacklog`: 3-stage progression (`metadata` -> `capture` -> `clip`), rate limiting honoring `Retry-After` (429), exponential backoff for transient issues (5xx/408/timeouts), auth backoff (401/403) with durable retention, quarantine on unrecoverable 4xx errors.
+- M10. Deduplicación. CODE DONE — Idempotent retry handling across all layers: EventStore avoids double backlog count and file overwrite on identical re-save; EvidenceManager and Clipper return existing records on matching SHA-256; Backlog deduplicates in-flight entries. Explicit conflict sentinels (`ErrEventConflict`, `ErrEvidenceConflict`, `ErrClipConflict`, `ErrSubmissionConflict`) prevent silent file corruption or divergent re-submissions.
+- M11. Correlación. CODE DONE — `CorrelationID` preserved end-to-end across `InferenceResult`, `LocalEvent`, and `Submission`, allowing correlation between camera stream frames, local events, and evidence artifacts.
+- M12: Evidencia SaaS sync validation.
 
 ## N — Telemetría y observabilidad
 
