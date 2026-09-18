@@ -19,6 +19,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
 	"github.com/drko-dev/monitoreoedgeis/internal/rtsp"
+	"github.com/drko-dev/monitoreoedgeis/internal/vision"
 )
 
 // Agent is the edge agent core.
@@ -35,6 +36,7 @@ type Agent struct {
 	discoveryErr   error
 	rtspManager    *rtsp.Manager
 	videoManager   *processing.Manager
+	visionSink     *vision.Sink
 	modules        *moduleManager
 }
 
@@ -134,6 +136,16 @@ func New(cfg *config.Config) *Agent {
 			if cs := newCloudSink(cfg, creds, reporter, log); cs != nil {
 				extraSinks = append(extraSinks, cs)
 			}
+			// Edge mode (Milestone K): local YOLO is the sole inference
+			// authority, so this replaces newCloudSink's frame stream
+			// rather than adding to it — newCloudSink already returns nil
+			// outside ModeCloud/ModeHybrid, so the two are mutually
+			// exclusive by construction, never registered together.
+			if vs, mod := newVisionSink(cfg, reporter, log); vs != nil {
+				extraSinks = append(extraSinks, vs)
+				mods = append(mods, mod)
+				a.visionSink = vs
+			}
 
 			videoMgr := processing.NewManager(procCfg, rtspMgr, reporter, logging.Component(log, "video-pipeline"), extraSinks...)
 			mods = append(mods, videoMgr)
@@ -156,6 +168,17 @@ func (a *Agent) RTSPManager() *rtsp.Manager { return a.rtspManager }
 // VideoManager exposes the video pipeline manager (nil if the video
 // pipeline or RTSP connectivity is disabled).
 func (a *Agent) VideoManager() *processing.Manager { return a.videoManager }
+
+// VisionStatus returns Milestone K's local-inference status block, or nil
+// when this Edge is not in ModeEdge (the vision sink/worker are never
+// constructed outside it).
+func (a *Agent) VisionStatus() *vision.Status {
+	if a.visionSink == nil {
+		return nil
+	}
+	st := a.visionSink.Status()
+	return &st
+}
 
 // Run starts the agent and blocks until ctx is cancelled, then shuts down
 // gracefully. A cancelled context is a clean stop, not an error.

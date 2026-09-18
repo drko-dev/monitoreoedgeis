@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -72,6 +73,27 @@ type Config struct {
 	CloudMaxBytesPerSec int64
 	CloudBurstBytes     int64
 	CloudMaxFPS         float64
+	// Local YOLO vision-worker settings (Milestone K). Meaningless unless
+	// ProcessingMode == ModeEdge — the vision sink is only constructed then
+	// (see internal/agent/vision_module.go), matching how Hybrid/CloudSink
+	// derive their enablement from ProcessingMode rather than a second knob.
+	// EdgeYOLOWorkerCmd has no production default: inventing a Python
+	// interpreter path here would silently paper over a missing
+	// installation. Empty means "not configured" -- the agent reports
+	// NOT_READY/worker_not_configured rather than guessing.
+	EdgeYOLOWorkerCmd         string
+	EdgeYOLOWorkerArgs        []string
+	EdgeYOLOModelsDir         string
+	EdgeYOLOPersonModel       string
+	EdgeYOLOVehicleModel      string
+	EdgeYOLOPersonConfidence  float64
+	EdgeYOLOVehicleConfidence float64
+	EdgeYOLONMSIoU            float64
+	EdgeYOLODevice            string
+	EdgeYOLOImgSize           int
+	EdgeYOLOSocketPath        string
+	EdgeYOLOStartTimeout      time.Duration
+	EdgeYOLOInferTimeout      time.Duration
 }
 
 // HybridROI is one normalized (0..1) region of interest parsed from
@@ -181,6 +203,31 @@ const (
 	DefaultCloudMaxBytesPerSec = 0
 	DefaultCloudBurstBytes     = 0
 	DefaultCloudMaxFPS         = 0.0
+	// Local YOLO vision-worker defaults and bounds (Milestone K).
+	// DefaultEdgeYOLOModelsDirName is a subdirectory of GEOCAM_DATA_DIR, kept
+	// outside any versioned release tree so an agent update never destroys
+	// installed weights (K3).
+	DefaultEdgeYOLOModelsDirName     = "models"
+	DefaultEdgeYOLOPersonModel       = "yolo11s-pose.pt"
+	DefaultEdgeYOLOVehicleModel      = "yolo11n.pt"
+	DefaultEdgeYOLOPersonConfidence  = 0.5
+	DefaultEdgeYOLOVehicleConfidence = 0.5
+	MinEdgeYOLOConfidence            = 0.0
+	MaxEdgeYOLOConfidence            = 1.0
+	DefaultEdgeYOLONMSIoU            = 0.45
+	MinEdgeYOLONMSIoU                = 0.0
+	MaxEdgeYOLONMSIoU                = 1.0
+	DefaultEdgeYOLODevice            = "cpu"
+	DefaultEdgeYOLOImgSize           = 640
+	MinEdgeYOLOImgSize               = 128
+	MaxEdgeYOLOImgSize               = 1920
+	DefaultEdgeYOLOSocketName        = "vision-worker.sock"
+	DefaultEdgeYOLOStartTimeout      = 30 * time.Second
+	MinEdgeYOLOStartTimeout          = 1 * time.Second
+	MaxEdgeYOLOStartTimeout          = 5 * time.Minute
+	DefaultEdgeYOLOInferTimeout      = 5 * time.Second
+	MinEdgeYOLOInferTimeout          = 100 * time.Millisecond
+	MaxEdgeYOLOInferTimeout          = 60 * time.Second
 )
 
 var validLogLevels = []string{"debug", "info", "warn", "error"}
@@ -223,6 +270,16 @@ func Load() (*Config, error) {
 		CloudMaxBytesPerSec:         DefaultCloudMaxBytesPerSec,
 		CloudBurstBytes:             DefaultCloudBurstBytes,
 		CloudMaxFPS:                 DefaultCloudMaxFPS,
+
+		EdgeYOLOPersonModel:       DefaultEdgeYOLOPersonModel,
+		EdgeYOLOVehicleModel:      DefaultEdgeYOLOVehicleModel,
+		EdgeYOLOPersonConfidence:  DefaultEdgeYOLOPersonConfidence,
+		EdgeYOLOVehicleConfidence: DefaultEdgeYOLOVehicleConfidence,
+		EdgeYOLONMSIoU:            DefaultEdgeYOLONMSIoU,
+		EdgeYOLODevice:            DefaultEdgeYOLODevice,
+		EdgeYOLOImgSize:           DefaultEdgeYOLOImgSize,
+		EdgeYOLOStartTimeout:      DefaultEdgeYOLOStartTimeout,
+		EdgeYOLOInferTimeout:      DefaultEdgeYOLOInferTimeout,
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_PROCESSING_MODE")); raw != "" {
@@ -589,6 +646,94 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid cloud max FPS %q: must be non-negative", raw)
 		}
 		cfg.CloudMaxFPS = v
+	}
+
+	// Local YOLO vision-worker settings (Milestone K). ModelsDir/SocketPath
+	// defaults are derived from the final cfg.DataDir (parsed above), not a
+	// fixed path, so GEOCAM_DATA_DIR alone still relocates them.
+	cfg.EdgeYOLOModelsDir = filepath.Join(cfg.DataDir, DefaultEdgeYOLOModelsDirName)
+	cfg.EdgeYOLOSocketPath = filepath.Join(cfg.DataDir, "run", DefaultEdgeYOLOSocketName)
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_WORKER_CMD")); raw != "" {
+		cfg.EdgeYOLOWorkerCmd = raw
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_WORKER_ARGS")); raw != "" {
+		cfg.EdgeYOLOWorkerArgs = strings.Fields(raw)
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_MODELS_DIR")); raw != "" {
+		cfg.EdgeYOLOModelsDir = raw
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_SOCKET_PATH")); raw != "" {
+		cfg.EdgeYOLOSocketPath = raw
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_DEVICE")); raw != "" {
+		cfg.EdgeYOLODevice = raw
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_IMGSZ")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge YOLO image size %q: %w", raw, err)
+		}
+		if v < MinEdgeYOLOImgSize || v > MaxEdgeYOLOImgSize {
+			return nil, fmt.Errorf("invalid edge YOLO image size %q: must be between %d and %d",
+				raw, MinEdgeYOLOImgSize, MaxEdgeYOLOImgSize)
+		}
+		cfg.EdgeYOLOImgSize = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_PERSON_CONFIDENCE")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge YOLO person confidence %q: %w", raw, err)
+		}
+		if v < MinEdgeYOLOConfidence || v > MaxEdgeYOLOConfidence {
+			return nil, fmt.Errorf("invalid edge YOLO person confidence %q: must be between %g and %g",
+				raw, MinEdgeYOLOConfidence, MaxEdgeYOLOConfidence)
+		}
+		cfg.EdgeYOLOPersonConfidence = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_VEHICLE_CONFIDENCE")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge YOLO vehicle confidence %q: %w", raw, err)
+		}
+		if v < MinEdgeYOLOConfidence || v > MaxEdgeYOLOConfidence {
+			return nil, fmt.Errorf("invalid edge YOLO vehicle confidence %q: must be between %g and %g",
+				raw, MinEdgeYOLOConfidence, MaxEdgeYOLOConfidence)
+		}
+		cfg.EdgeYOLOVehicleConfidence = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_NMS_IOU")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge YOLO NMS IoU %q: %w", raw, err)
+		}
+		if v < MinEdgeYOLONMSIoU || v > MaxEdgeYOLONMSIoU {
+			return nil, fmt.Errorf("invalid edge YOLO NMS IoU %q: must be between %g and %g",
+				raw, MinEdgeYOLONMSIoU, MaxEdgeYOLONMSIoU)
+		}
+		cfg.EdgeYOLONMSIoU = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_START_TIMEOUT")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge YOLO start timeout %q: %w", raw, err)
+		}
+		if d < MinEdgeYOLOStartTimeout || d > MaxEdgeYOLOStartTimeout {
+			return nil, fmt.Errorf("invalid edge YOLO start timeout %q: must be between %s and %s",
+				raw, MinEdgeYOLOStartTimeout, MaxEdgeYOLOStartTimeout)
+		}
+		cfg.EdgeYOLOStartTimeout = d
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_INFER_TIMEOUT")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge YOLO infer timeout %q: %w", raw, err)
+		}
+		if d < MinEdgeYOLOInferTimeout || d > MaxEdgeYOLOInferTimeout {
+			return nil, fmt.Errorf("invalid edge YOLO infer timeout %q: must be between %s and %s",
+				raw, MinEdgeYOLOInferTimeout, MaxEdgeYOLOInferTimeout)
+		}
+		cfg.EdgeYOLOInferTimeout = d
 	}
 
 	// Fail-fast: reject an insecure http:// SaaS URL here, before any

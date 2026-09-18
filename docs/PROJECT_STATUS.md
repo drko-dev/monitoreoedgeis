@@ -884,6 +884,92 @@ available in this sandbox):
 - A real optional classifier model behind the J6 `CandidateClassifier`
   adapter (Hito K scope).
 
+## HITO K — Full Edge Core + YOLO Local (K1–K4)
+
+**Scope closed this milestone: K1 (processing_mode=edge), K2 (local YOLO
+worker), K3 (model management), K4 (CPU inference). K5–K12 are explicitly
+NOT started and NOT claimed here.**
+
+- **K1 — `processing_mode=edge`**: `internal/vision.Sink` implements
+  `processing.Sink` and is registered in `internal/agent/agent.go` in place
+  of `internal/cloudsink.CloudSink` whenever `GEOCAM_PROCESSING_MODE=edge`
+  (`internal/agent/vision_module.go`). `newCloudSink` already gated on
+  `ModeCloud`/`ModeHybrid` only, so edge mode registers zero CloudSink and
+  sends zero frames to Cloud for inference — verified by
+  `TestNewCloudSink_NeverBuildsInEdgeMode`. Cloud and Hybrid modes are
+  byte-for-byte unchanged (full existing suite green, no cloud/hybrid test
+  touched). The existing RTSP→decode→sample→resize→ring-buffer→Router
+  pipeline (Hito H/J) is reused unmodified — no second RTSP client, no
+  parallel pipeline.
+- **K2 — YOLO local**: `internal/vision.Worker` supervises a **separate
+  Python process** (`deploy/vision-worker/worker.py`, Ultralytics/PyTorch),
+  never embedded in the Go binary. Communication is a single Unix domain
+  socket (`GEOCAM_EDGE_YOLO_SOCKET_PATH`, under `GEOCAM_DATA_DIR/run/` —
+  never a TCP listener, never reachable off-host), newline-delimited JSON
+  (`internal/vision/protocol.go` / mirrored in `backend.py`/`worker.py`).
+  Covers start, health handshake, one-at-a-time inference requests, a
+  per-request timeout, orderly shutdown (`shutdown` message + bounded
+  process wait + kill), and restart-with-backoff on a crashed subprocess —
+  same bounded-backoff pattern `cameraPipeline.run` already uses for its
+  ffmpeg subprocess.
+- **Models**: fixed, matching SaaS `geocam/detector.py` exactly —
+  `yolo11s-pose.pt` for persons (class 0), `yolo11n.pt` for vehicles
+  (classes 2/3/5/7). No other model, no invented one. `.pt` weights are
+  never committed to Git.
+- **K3 — model management**: `internal/vision.ModelManager` stats the two
+  required weight files under `GEOCAM_EDGE_YOLO_MODELS_DIR` (default
+  `GEOCAM_DATA_DIR/models/`, outside any versioned release tree so an
+  agent update never destroys installed weights). Never downloads a model.
+  A missing file is `StateModelMissing`, published in `/status`, not a
+  crash or a silent fetch. Checksum (`ModelManager.Checksum`) is computed
+  lazily and cached by (size, mtime), never on every status call.
+- **K4 — CPU inference**: `GEOCAM_EDGE_YOLO_DEVICE` defaults to `cpu`,
+  configurable; `GEOCAM_EDGE_YOLO_IMGSZ` configurable and bounds-checked.
+  Backpressure is bounded by construction: `processing.Router` already runs
+  exactly one worker goroutine per sink through one bounded queue (Hito H),
+  so a busy YOLO worker fills that queue and drops frames for this sink
+  only — no unbounded queue was added. `/status` exposes worker state,
+  device, models loaded, restarts, inference count/errors, last inference
+  ms (`internal/vision.Status`, surfaced as `Agent.VisionStatus()` /
+  `health.Snapshot.Vision`). `/readyz` additionally requires the vision
+  worker to be `StateReady` when `ProcessingMode=edge`
+  (`health.Reporter.EdgeVisionReady`) — the one place `/readyz` depends on
+  a subsystem's deep state, since the local inference runtime *is* edge
+  mode's own authority, not an external dependency like SaaS reachability.
+
+**Tests**: `go test ./...` (20 packages, all `ok`), `go test -race ./...`
+(clean, including a real data race found and fixed in
+`internal/vision/worker.go`'s death-watch goroutine — see git history),
+`go vet ./...` clean, `gofmt -l .` clean, `make build-linux` produces both
+linux/amd64 and linux/arm64. `internal/vision` unit tests use a fake worker
+subprocess (Go test-binary re-exec pattern) covering: not-configured,
+model-missing, start+infer, rejected health handshake, infer timeout,
+crash+restart, graceful shutdown, dropped-when-not-ready, and a
+status-pushed-on-state-change-alone regression test for the `/readyz` gate.
+`deploy/vision-worker/tests/test_worker.py` (stdlib `unittest`, no
+ultralytics/torch required) covers the protocol handler and a full
+socket round-trip against `backend.FakeBackend`.
+
+A manual, ungated smoke (not part of `go test`) was run against the **real**
+`python3` + `worker.py` subprocess end-to-end: Go spawns it, connects over
+the real Unix socket, sends a real health request, and receives back a
+real, correctly-formatted rejection (`ultralytics not installed`) — proving
+the IPC framing/spawn/connect/timeout machinery genuinely works process to
+process, independent of whether a model can load.
+
+**HITO K1–K4 = CODE DONE / TESTED. NOT VALIDATED with real Ultralytics
+models or real camera footage: no `ultralytics`/`torch` install and no
+`.pt` weights exist in this sandbox (installing them was explicitly out of
+scope — "no descargar cientos de MB para un test"). REAL MODEL SMOKE =
+BLOCKED, not attempted further.**
+
+**Pending, not blocking this close** (depends on an environment not
+available here):
+- Real Ultralytics inference smoke test (`yolo11s-pose.pt`/`yolo11n.pt`
+  actually loaded and run against a real or sample JPEG).
+- Real appliance CPU inference latency/throughput measurement.
+- K5–K12 (not started, not claimed here).
+
 ## HOW ANOTHER AI SHOULD CONTINUE
 
 1. Read `AGENTS.md`.
