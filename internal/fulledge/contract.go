@@ -13,6 +13,8 @@ var (
 	ErrDiskSpaceBelowMinimum = errors.New("fulledge: free disk space below minimum threshold")
 	ErrQueueFull             = errors.New("fulledge: inference queue capacity reached")
 	ErrEvidenceAlreadyExists = errors.New("fulledge: evidence file already exists for event")
+	ErrEvidenceConflict      = errors.New("fulledge: divergent evidence content for event")
+	ErrEventConflict         = errors.New("fulledge: divergent event content for event")
 	ErrInvalidDevice         = errors.New("fulledge: invalid inference device configured")
 	ErrEventCorrupt          = errors.New("fulledge: persisted event file is corrupt or invalid")
 )
@@ -58,6 +60,18 @@ type LocalDetection struct {
 	BBox       BoundingBox `json:"bbox"`
 }
 
+// ValidateConfidence checks the model's real score is finite and in [0,1] —
+// it is never rounded or otherwise transformed (M5).
+func (d LocalDetection) ValidateConfidence() error {
+	if math.IsNaN(d.Confidence) || math.IsInf(d.Confidence, 0) {
+		return fmt.Errorf("fulledge: confidence is not finite: %v", d.Confidence)
+	}
+	if d.Confidence < 0 || d.Confidence > 1 {
+		return fmt.Errorf("fulledge: confidence out of range [0,1]: %v", d.Confidence)
+	}
+	return nil
+}
+
 // InferenceResult is the structured payload delivered by local YOLO inference (K1-K4).
 type InferenceResult struct {
 	CandidateKey       string           `json:"candidate_key"`
@@ -66,5 +80,6 @@ type InferenceResult struct {
 	InferenceTimestamp time.Time        `json:"inference_timestamp"`
 	InferenceMs        float64          `json:"inference_ms"`
 	Device             string           `json:"device"`
+	CorrelationID      string           `json:"correlation_id,omitempty"`
 	Detections         []LocalDetection `json:"detections"`
 }

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -20,7 +21,10 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
 
-var ErrFull = errors.New("edgebacklog: bounded backlog is full")
+var (
+	ErrFull               = errors.New("edgebacklog: bounded backlog is full")
+	ErrSubmissionConflict = errors.New("edgebacklog: divergent submission for event")
+)
 
 // Evidence is an immutable local reference. Path is never sent to the SaaS.
 type Evidence struct {
@@ -187,7 +191,10 @@ func (b *Backlog) Enqueue(s Submission) error {
 	defer b.mu.Unlock()
 	for _, r := range b.queue {
 		if r.Submission.Event.EventUUID == s.Event.EventUUID {
-			return nil
+			if submissionsEquivalent(r.Submission, s) {
+				return nil
+			}
+			return fmt.Errorf("%w: %s", ErrSubmissionConflict, s.Event.EventUUID)
 		}
 	}
 	bytes := pendingBytes(b.queue) + submissionBytes(s)
@@ -392,4 +399,35 @@ func SHA256File(path string) (string, int64, error) {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), int64(len(data)), nil
+}
+
+func submissionsEquivalent(a, b Submission) bool {
+	if a.Event.EventUUID != b.Event.EventUUID ||
+		a.Event.CandidateKey != b.Event.CandidateKey ||
+		a.Event.Class != b.Event.Class ||
+		a.Event.Confidence != b.Event.Confidence ||
+		a.Event.Timestamp != b.Event.Timestamp ||
+		a.Event.CorrelationID != b.Event.CorrelationID ||
+		!reflect.DeepEqual(a.Event.BBox, b.Event.BBox) {
+		return false
+	}
+	if !evidenceEquivalent(a.Capture, b.Capture) {
+		return false
+	}
+	if !evidenceEquivalent(a.Clip, b.Clip) {
+		return false
+	}
+	return true
+}
+
+func evidenceEquivalent(a, b *Evidence) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	if a != nil && b != nil {
+		if a.SHA256 != b.SHA256 || a.Size != b.Size || a.DurationMS != b.DurationMS {
+			return false
+		}
+	}
+	return true
 }

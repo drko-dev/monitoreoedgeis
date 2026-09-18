@@ -178,3 +178,79 @@ func TestBacklogRateLimitErrorWithRetryAfter(t *testing.T) {
 		t.Errorf("NextAttempt %v is before expected min %v", nextAttempt, expectedMin)
 	}
 }
+
+func TestBacklogDivergentSubmissionConflict(t *testing.T) {
+	d := t.TempDir()
+	b := open(t, d)
+
+	sub1 := submission(t, d, "conflict-evt")
+	if err := b.Enqueue(sub1); err != nil {
+		t.Fatalf("sub1: %v", err)
+	}
+
+	// Divergent submission: different Class for the exact same event_uuid
+	sub2 := sub1
+	sub2.Event.Class = "vehicle"
+
+	err := b.Enqueue(sub2)
+	if !errors.Is(err, ErrSubmissionConflict) {
+		t.Fatalf("expected ErrSubmissionConflict, got %v", err)
+	}
+}
+
+func TestBacklogDedupe_SamePayloadIdempotent(t *testing.T) {
+	d := t.TempDir()
+	b := open(t, d)
+
+	sub1 := submission(t, d, "idempotent-evt")
+	sub1.Event.CorrelationID = "cam-1-100"
+	sub1.Event.BBox = map[string]float64{"x": 10, "y": 20, "width": 30, "height": 40}
+	if err := b.Enqueue(sub1); err != nil {
+		t.Fatalf("initial enqueue: %v", err)
+	}
+
+	// Re-enqueue identical submission
+	if err := b.Enqueue(sub1); err != nil {
+		t.Fatalf("identical retry should be idempotent, got: %v", err)
+	}
+
+	if b.Status().BacklogCount != 1 {
+		t.Fatalf("expected backlog count 1, got %d", b.Status().BacklogCount)
+	}
+}
+
+func TestBacklogDedupe_DifferentBBoxConflict(t *testing.T) {
+	d := t.TempDir()
+	b := open(t, d)
+
+	sub1 := submission(t, d, "bbox-evt")
+	sub1.Event.BBox = map[string]float64{"x": 10, "y": 20, "width": 30, "height": 40}
+	if err := b.Enqueue(sub1); err != nil {
+		t.Fatalf("initial enqueue: %v", err)
+	}
+
+	sub2 := sub1
+	sub2.Event.BBox = map[string]float64{"x": 99, "y": 20, "width": 30, "height": 40}
+	err := b.Enqueue(sub2)
+	if !errors.Is(err, ErrSubmissionConflict) {
+		t.Fatalf("expected ErrSubmissionConflict on divergent BBox, got %v", err)
+	}
+}
+
+func TestBacklogDedupe_DifferentCorrelationIDConflict(t *testing.T) {
+	d := t.TempDir()
+	b := open(t, d)
+
+	sub1 := submission(t, d, "cid-evt")
+	sub1.Event.CorrelationID = "cam-1-100"
+	if err := b.Enqueue(sub1); err != nil {
+		t.Fatalf("initial enqueue: %v", err)
+	}
+
+	sub2 := sub1
+	sub2.Event.CorrelationID = "cam-1-200"
+	err := b.Enqueue(sub2)
+	if !errors.Is(err, ErrSubmissionConflict) {
+		t.Fatalf("expected ErrSubmissionConflict on divergent CorrelationID, got %v", err)
+	}
+}

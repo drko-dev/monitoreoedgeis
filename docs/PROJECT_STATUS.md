@@ -1086,6 +1086,46 @@ Slice L8–L10 implements outbound-only control commands, zero-inbound connectiv
 - Unit tests with `-race` on `internal/control` and `internal/transport`.
 - `go vet ./...` and `gofmt -l .` clean.
 
+## Hito M — Eventos y evidencia (M7–M11)
+
+Slice M7–M11 consolida y robustece la persistencia, retry, deduplicación y correlación de eventos y evidencias locales en Full Edge:
+
+### M7 — Captura
+- Almacenamiento atómico bajo `GEOCAM_DATA_DIR/evidence/captures/<event_uuid>.jpg` mediante temp-file + rename.
+- Validación estricta de UUIDv4 en el path; previene path traversal / escape de candidatos arbitrarios.
+- Cálculo de integridad SHA-256 y tamaño exacto.
+- Resiliencia: si la captura JPEG falla (disco/permisos), el evento no se descarta; se persiste con degradación graceful (`EvidenceRef.ErrorMessage`).
+
+### M8 — Clip
+- Clipper materializa video MP4 desde el ring buffer de frames (`FrameHistory`) circundantes al evento.
+- Archivo atómico bajo `GEOCAM_DATA_DIR/evidence/clips/<event_uuid>.mp4` con SHA-256 y duración exacta.
+- Resiliencia: errores de encoding o falta de frames en ventana degradan de forma segura sin abortar ni corromper el evento principal.
+
+### M9 — Retry
+- Cola offline duradera y crash-consistent en `internal/edgebacklog.Backlog`:
+  - Pipeline de 3 fases: `metadata` -> `capture` -> `clip` -> `complete`.
+  - Respeto a `Retry-After` en 429 (`transport.RateLimitError`).
+  - Backoff exponencial en fallos transitorios (5xx, 408, timeouts).
+  - Auth backoff (401/403) con degradación del agente y retención durable (nunca auto-desenrolar ni purgar credenciales).
+  - Aislamiento en cuarentena de fallos no recuperables 4xx (`transport.ErrInvalidRequest`).
+
+### M10 — Deduplicación
+- Semántica honesta de retry idéntico vs conflicto divergente:
+  - `EventStore.Save`: reintentos idénticos no incrementan el backlog ni reescriben el archivo; eventos divergentes devuelven `ErrEventConflict`.
+  - `EvidenceManager.SaveJPEG`: reintentos idénticos con mismo hash devuelven la referencia existente; bytes divergentes devuelven `ErrEvidenceConflict`.
+  - `Clipper.Capture`: clips con idéntico SHA-256 no sobreescriben y devuelven el record existente; contenido divergente devuelve `ErrClipConflict`.
+  - `edgebacklog.Backlog.Enqueue`: re-encolado idéntico es idempotente; re-encolado divergente devuelve `ErrSubmissionConflict`.
+
+### M11 — Correlación
+- Propagación de `CorrelationID` a través de toda la cadena:
+  - Preservado en `processing.Frame`, `fulledge.InferenceResult`, `fulledge.LocalEvent` y `edgebacklog.Submission`.
+  - Permite trazabilidad unificada entre frames de cámara, inferencia local y artefactos de evidencia (JPEG/MP4).
+
+**Verification:**
+- Targeted unit tests con `-race` en `./internal/fulledge/...`, `./internal/evidence/...`, `./internal/edgebacklog/...`, `./internal/agent/...`, `./internal/transport/...`.
+- `go vet` y `gofmt -l` limpios.
+- `go build ./...` exitoso.
+
 ## HOW ANOTHER AI SHOULD CONTINUE
 
 1. Read `AGENTS.md`.
