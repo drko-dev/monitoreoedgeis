@@ -96,6 +96,8 @@ fi
 
 # --- 2. Directories (idempotent; never recurse-delete anything) ------------
 mkdir -p "$RELEASE_DIR" "$CONFIG_DIR" "$DATA_DIR"
+chmod 0750 "$CONFIG_DIR"
+chmod 0700 "$DATA_DIR"
 DATA_DIR_PRE_EXISTING=1
 [ -e "$DATA_DIR/identity.json" ] || DATA_DIR_PRE_EXISTING=0
 
