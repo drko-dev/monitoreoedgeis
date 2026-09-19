@@ -18,7 +18,7 @@
 | H     | NEXT                  |
 | O     | CODE DONE / INTEGRATED TESTED / MERGED |
 | P     | CODE DONE / INTEGRATED TESTED / MERGED |
-| Q1–Q10| CODE DONE / INTEGRATED TESTED (per-item detail below; no real hardware validated) |
+| Q1–Q10| CODE DONE / INTEGRATED TESTED / MERGED (SaaS prod: NOT DEPLOYED, SSH blocker; Edge prod: N/A) |
 | I–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
@@ -353,13 +353,20 @@ mechanism is ready but untested end-to-end against a real tag push).
 
 ## Q — Appliance residencial
 
-**HITO Q (Q1–Q7) — CODE DONE / INTEGRATED TESTED** (branch
-`integration/hito-q-final`, integra #44/#45; Q9 de #46 y Q8 de
-`monitoreoia` PR #120 se agregan en el mismo cierre). Arquitectura y
-evidencia de red documentadas a partir de código y mediciones reales
-existentes — ver `docs/deployment/hardware.md`. Ningún hardware físico
-fue validado en este cierre; cada punto marca explícitamente qué sigue
-pendiente de hardware real.
+**HITO Q (Q1–Q10) — CODE DONE / INTEGRATED TESTED / MERGED** (PR #47
+mergeado a `main` @ `25a7d8ea27a082b957c19a7fbf691b063014bdff`, integra
+#44/#45/#46; `monitoreoia` PR #121 mergeado a su `main` @
+`66a5bec920f23a09dc28531db44274ad1c97df21`, integra #120 para Q8).
+**SAAS PROD: NOT DEPLOYED en este cierre** — deploy productivo autorizado
+pero bloqueado por falta de credencial SSH funcional hacia el host
+documentado (`vps-6387636-x.dattaweb.com`) en este entorno de trabajo; no
+es una limitación del código ni de la integración. **EDGE PROD: N/A**
+— no existe un target Edge/appliance/VM productivo real documentado
+distinto del VPS SaaS. Arquitectura y evidencia de red documentadas a
+partir de código y mediciones reales existentes — ver
+`docs/deployment/hardware.md`. Ningún hardware físico fue validado en
+este cierre; cada punto marca explícitamente qué sigue pendiente de
+hardware real.
 
 - Q1. Hardware mínimo. **PARTIAL / DOCUMENTED** — arquitectura soportada
   (`linux/amd64`/`linux/arm64`), separación de perfiles (Cloud/Hybrid
