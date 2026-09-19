@@ -438,8 +438,10 @@ hardware real.
 
 ## R — Instalación corporativa
 
-- R1–R9: VM, server Linux, appliance industrial, VPN site-to-site, subnet
-  routing, VLANs, múltiples segmentos CCTV, firewall/proxy, HA futura.
+- R1 VM. **CODE/INSTALL PATH READY / DOCUMENTED / NOT VALIDATED ON REAL CORPORATE TARGET** — se reutiliza el paquete nativo Hito P/Q, systemd, `GEOCAM_DATA_DIR`, health/ready y update/rollback. No se declara compatibilidad específica con VMware, Hyper-V, Proxmox ni ningún cloud provider.
+- R2 Server Linux. **CODE/INSTALL PATH READY / DOCUMENTED / NOT VALIDATED ON REAL CORPORATE TARGET** — instalación directa con `package.sh`/`install.sh` y la unidad systemd existente. No modifica firewall, networking, discos ni servicios ajenos.
+- R3 Appliance industrial. **CODE/INSTALL PATH READY / DOCUMENTED / HARDWARE NOT VALIDATED** — se trata como hardware Linux dedicado con el mismo software y lifecycle. No se certifican marcas, modelos, temperatura, IP rating, voltajes, MTBF ni aceleradores.
+- Perfiles, preflight operativo, paths, dependencias y gaps: `docs/deployment/corporate.md`.
 
 ## S — Seguridad
 
