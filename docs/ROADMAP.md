@@ -19,6 +19,7 @@
 | O     | CODE DONE / INTEGRATED TESTED / MERGED |
 | P     | CODE DONE / INTEGRATED TESTED / MERGED |
 | Q1–Q10| CODE DONE / INTEGRATED TESTED / MERGED / SAAS PROD DEPLOYED (Edge prod: N/A) |
+| R7–R9 | CODE DONE / DOCUMENTED (R1–R6 not done, out of scope) |
 | I–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
@@ -446,8 +447,45 @@ hardware real.
 
 ## R — Instalación corporativa
 
-- R1–R9: VM, server Linux, appliance industrial, VPN site-to-site, subnet
-  routing, VLANs, múltiples segmentos CCTV, firewall/proxy, HA futura.
+**HITO R (R7–R9) — CODE DONE / DOCUMENTED** (branch
+`feature/corporate-r-enterprise-network`). Ver
+`docs/deployment/corporate-enterprise.md` para la matriz completa. R1–R6
+quedan sin tocar, fuera de alcance de este cierre.
+
+- R1–R6: VM, server Linux, appliance industrial, VPN site-to-site, subnet
+  routing, VLANs. **NOT DONE** — fuera de alcance de este cierre.
+- R7. Múltiples segmentos CCTV. **PARTIAL / DOCUMENTED** — acceso unicast
+  a cámaras ya conocidas por IP/URL ya funciona hoy sin cambios de código
+  (`internal/rtsp.Dial`/ONVIF SOAP no fijan interfaz), siempre que exista
+  ruteo real entre segmentos. WS-Discovery (`239.255.255.250:3702/UDP`)
+  ya corre por interfaz local (`internal/discovery.SelectInterfaces`,
+  soporta multi-homed), pero **no cruza routers/VLANs sin multicast
+  routing/IGMP relay a nivel de red** — gap documentado explícitamente,
+  no resuelto con scanner/broadcast forwarding (deliberadamente no
+  agregados). Alternativa documentada (no obligatoria): un Edge por
+  segmento.
+- R8. Firewall. **DOCUMENTED** — matriz exacta de tráfico outbound
+  (Edge→SaaS, Edge→cámaras, WS-Discovery multicast) y local/inbound
+  (health en `127.0.0.1:8091` por defecto, no expuesto en red) en
+  `docs/deployment/corporate-enterprise.md`. Sin automatización de
+  firewall (no iptables/nftables).
+- R8. Proxy corporativo. **CODE DONE / TESTED** — auditoría confirmó que
+  `internal/transport.Client` (compartido por enrollment/heartbeat/
+  cloudsink) ya respeta `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` estándar de
+  Go (Transport nil → `http.DefaultTransport` → `ProxyFromEnvironment`);
+  no fue necesario ningún cambio de código. Cobertura antes ausente,
+  agregada en `internal/transport/proxy_test.go`
+  (`TestClientRespectsStandardProxyEnv`). ONVIF SOAP correctamente
+  excluido del proxy (tráfico LAN directo a cámaras, sin cambios). RTSP
+  es un dial TCP crudo, no aplica proxy HTTP.
+- R9. HA futura. **FUTURE ARCHITECTURE DOCUMENTED / NOT IMPLEMENTED** —
+  boundary documentado en `docs/deployment/corporate-enterprise.md`: hoy
+  un solo Edge activo por conjunto de cámaras; clonar identity/credentials
+  NO es HA; dos Edges sobre la misma cámara pueden duplicar trabajo/
+  eventos; estado local (buffer offline, backlog) requiere estrategia
+  antes de active/passive; HA real futura debe resolver ownership/lease/
+  fencing/failover. Sin cluster, sin consensus, sin etcd, sin leader
+  election en este hito.
 
 ## S — Seguridad
 
