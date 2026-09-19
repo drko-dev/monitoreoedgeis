@@ -37,6 +37,7 @@ type Agent struct {
 	credentialsErr   error
 	platform         platform.Info
 	health           *health.Reporter
+	healthGate       *agentHealthGate
 	heartbeatErr     error
 	discoveryErr     error
 	controlErr       error
@@ -80,6 +81,7 @@ func New(cfg *config.Config) *Agent {
 		credentialsErr: credErr,
 		platform:       host,
 		health:         reporter,
+		healthGate:     newAgentHealthGate(reporter),
 	}
 	mods := []Module{
 		newHealthServerModule(cfg.HealthAddr, reporter, logging.Component(log, "health-http")),
@@ -94,7 +96,7 @@ func New(cfg *config.Config) *Agent {
 	// construction errors are non-fatal: a misconfigured SaaS URL must not
 	// take down the local health surface that would let an operator diagnose
 	// it. Either way the agent does not reach READY (see Run).
-	hb, hbErr := newHeartbeatModule(cfg, ident, creds, reporter, otaModule, logging.Component(log, "heartbeat"))
+	hb, hbErr := newHeartbeatModule(cfg, ident, creds, reporter, a.healthGate, otaModule, logging.Component(log, "heartbeat"))
 	if hb != nil {
 		mods = append(mods, hb)
 	}
@@ -353,39 +355,52 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	moduleErr := a.modules.Start(ctx)
 
+	// Each startup failure is recorded as a cause the gate owns, rather than
+	// written straight to the reporter, so the aggregate state has a single
+	// author and a later credential recovery cannot silently erase a real
+	// startup fault (or be erased by it).
 	switch {
 	case a.identityErr != nil:
 		a.log.Error("agent will not become ready: identity error", slog.Any("error", a.identityErr))
-		a.health.Set(health.StateDegraded)
+		a.healthGate.markStartupDegraded()
 	case a.credentialsErr != nil:
 		a.log.Error("agent will not become ready: credentials error", slog.Any("error", a.credentialsErr))
-		a.health.Set(health.StateDegraded)
+		a.healthGate.markStartupDegraded()
 	case moduleErr != nil:
 		a.log.Error("agent will not become ready: module startup failed", slog.Any("error", moduleErr))
-		a.health.Set(health.StateDegraded)
+		a.healthGate.markStartupDegraded()
 	case a.heartbeatErr != nil:
 		a.log.Error("agent will not become ready: heartbeat module could not be built",
 			slog.Any("error", a.heartbeatErr))
-		a.health.Set(health.StateDegraded)
+		a.healthGate.markStartupDegraded()
 	case a.discoveryErr != nil:
 		a.log.Error("agent will not become ready: discovery module could not be built",
 			slog.Any("error", a.discoveryErr))
-		a.health.Set(health.StateDegraded)
+		a.healthGate.markStartupDegraded()
 	case a.controlErr != nil:
 		a.log.Error("agent will not become ready: control module could not be built",
 			slog.Any("error", a.controlErr))
-		a.health.Set(health.StateDegraded)
+		a.healthGate.markStartupDegraded()
 	case a.remoteConfigErr != nil:
 		a.log.Error("agent will not become ready: remote config module could not be built",
 			slog.Any("error", a.remoteConfigErr))
-		a.health.Set(health.StateDegraded)
+		a.healthGate.markStartupDegraded()
 	case a.localEventsErr != nil:
 		a.log.Error("agent will not become ready: local event backlog could not be built",
 			slog.Any("error", a.localEventsErr))
-		a.health.Set(health.StateDegraded)
-	default:
-		a.health.Set(health.StateReady)
-		a.log.Info("agent ready", slog.String("status", health.StateReady.String()))
+		a.healthGate.markStartupDegraded()
+	}
+
+	// Publish the initial state once and hand READY/DEGRADED to the gate: from
+	// here the only transitions left are a credential revocation and its
+	// recovery, plus STOPPING at shutdown.
+	initial := a.healthGate.activate()
+	if initial == health.StateReady {
+		a.log.Info("agent ready", slog.String("status", initial.String()))
+	} else {
+		a.log.Error("agent will not become ready",
+			slog.String("status", initial.String()),
+			slog.String("reason", "startup fault; a restart is required to clear it"))
 	}
 
 	<-ctx.Done()

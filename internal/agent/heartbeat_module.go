@@ -31,6 +31,7 @@ func newHeartbeatModule(
 	ident identity.Identity,
 	creds credentials.Credentials,
 	reporter *health.Reporter,
+	gate credentialHealth,
 	otaModule *ota.Module,
 	log *slog.Logger,
 ) (*heartbeat.Module, error) {
@@ -127,14 +128,31 @@ func newHeartbeatModule(
 		Credential: creds.Credential,
 		Build:      build,
 		Interval:   cfg.HeartbeatInterval,
-		Log:        log,
-		OnStatus:   reporter.SetHeartbeatStatus,
+		// Zero keeps the module's own five-minute default; a non-zero value
+		// comes from GEOCAM_HEARTBEAT_AUTH_FAILURE_INTERVAL.
+		AuthFailureInterval: cfg.HeartbeatAuthFailureInterval,
+		Log:                 log,
+		OnStatus:            reporter.SetHeartbeatStatus,
 		OnUnauthorized: func() {
 			// A revoked or disabled Edge is genuinely not doing its job, so
 			// the whole agent goes DEGRADED — unlike a plain SaaS outage,
 			// which leaves the agent READY. The credential itself is left
 			// untouched; clearing it is an operator decision.
-			reporter.Set(health.StateDegraded)
+			if gate != nil {
+				gate.MarkCredentialRevoked()
+			}
+		},
+		// The counterpart OnUnauthorized needs. A revoked credential is an
+		// administrative state an operator can reverse (re-enable the device,
+		// rotate the credential), and once the SaaS accepts it again the Edge
+		// is doing its job and must say so. Without this the agent stayed
+		// DEGRADED — and /readyz stayed 503 — until the process restarted,
+		// which also made the appliance's own post-update readiness gate fail
+		// and roll back a good release.
+		OnRecovered: func() {
+			if gate != nil {
+				gate.ClearCredentialRevoked()
+			}
 		},
 		OnSuccess: otaCheckOnSuccess(otaModule, log),
 	})
