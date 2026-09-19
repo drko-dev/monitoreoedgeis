@@ -523,9 +523,13 @@ por punto abajo. Perfiles, preflight operativo, matrices y gaps:
 
 ## S — Seguridad
 
-- S1–S11: threat model, secrets únicos, TLS, cifrado local, revocación, rotación,
-  enrollment seguro, replay protection, signed updates, least privilege,
-  auditoría.
+**HITO S1–S4 — DOCUMENTED / PARTIAL WHERE EXPLICITLY MARKED**
+
+- S1 Threat model. **DOCUMENTED** — assets, trust boundaries, concrete threats, mitigations, owners and remaining gaps: `docs/security/threat-model.md`.
+- S2 Unique secrets. **IMPLEMENTED** — per-device credential uses 32 bytes from `crypto/rand`; only its SHA-256 hash crosses enrollment; camera master key is a distinct local 32-byte random key; enrollment token is distinct from both. No shared/default/hardcoded production credential found in the audited paths.
+- S3 TLS. **IMPLEMENTED** — all Edge→SaaS clients reuse `internal/transport.Client`; HTTPS is required by default, insecure HTTP requires explicit development configuration, and normal hostname/certificate verification remains active. ONVIF/RTSP is a separate CCTV-LAN boundary.
+- S4 Local data protection. **PARTIAL** — camera credentials are AES-256-GCM encrypted and local state uses restrictive permissions/atomic writes. Device credential at-rest encryption is **NOT ESTABLISHED / REQUIRES KEY-MANAGEMENT DECISION** because no TPM/HSM/KMS/Vault/OS-keychain trust root exists. Full classification: `docs/security/edge-security-baseline.md`.
+- No merge or deploy is claimed for this closure; no hardware-backed security or signed-release guarantee is claimed.
 
 ## T — OTA
 
