@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -279,6 +280,9 @@ func runEnrollCmd(args []string) {
 	if err != nil {
 		// Claim never happened server-side (or the credential could not be
 		// generated in the first place): nothing to persist.
+		// S11 security event log: edge_id is a non-secret identifier; the
+		// enrollment token/credential itself is never logged here or anywhere.
+		slog.Default().Error("enrollment failed", "edge_id", ident.EdgeID, "error", saasErrorMessage(err))
 		fmt.Fprintf(os.Stderr, "geocam-edge enroll: %s\n", saasErrorMessage(err))
 		os.Exit(1)
 	}
@@ -287,10 +291,12 @@ func runEnrollCmd(args []string) {
 	}
 
 	if err := credentials.Save(cfg.DataDir, creds); err != nil {
+		slog.Default().Error("enrollment succeeded but persisting credentials failed", "edge_id", creds.EdgeID, "device_id", creds.DeviceID, "error", err)
 		fmt.Fprintf(os.Stderr, "geocam-edge enroll: enrollment succeeded but persisting credentials failed: %v\n", err)
 		os.Exit(1)
 	}
 
+	slog.Default().Info("enrollment succeeded", "edge_id", creds.EdgeID, "device_id", creds.DeviceID, "tenant_id", creds.TenantID, "site_id", creds.SiteID)
 	fmt.Print(enrollSummary(creds.EdgeID, creds.DeviceID, creds.TenantID, creds.SiteID))
 }
 
@@ -439,9 +445,13 @@ func runFactoryResetCmd(args []string) {
 		os.Exit(1)
 	}
 	if err := factoryreset.Reset(cfg.DataDir, *confirmed); err != nil {
+		// S11 security event log: never logs DataDir contents, only the
+		// outcome and the (non-secret) data directory path.
+		slog.Default().Error("factory reset failed", "data_dir", cfg.DataDir, "error", err)
 		fmt.Fprintf(os.Stderr, "geocam-edge factory-reset: %v\n", err)
 		os.Exit(1)
 	}
+	slog.Default().Info("factory reset completed", "data_dir", cfg.DataDir)
 	fmt.Printf("Factory reset complete. Local device state removed from %s.\n", cfg.DataDir)
 }
 
@@ -527,6 +537,9 @@ func runCredentialRotateCmd(args []string) {
 		rotateBackoffs)
 	if err != nil {
 		// A queda intacta en disco: nunca se llamó a Save.
+		// S11 security event log: edge_id/rotation_id are non-secret
+		// identifiers; neither credential (old or new) is ever logged.
+		slog.Default().Error("credential rotation failed", "edge_id", creds.EdgeID, "rotation_id", rotationID, "error", saasErrorMessage(err))
 		if errors.Is(err, transport.ErrUnauthorized) {
 			fmt.Fprintln(os.Stderr, "geocam-edge credential rotate: credential rejected by SaaS (revoked) — re-enrollment required")
 		} else {
@@ -560,11 +573,13 @@ func runCredentialRotateCmd(args []string) {
 	}
 
 	if _, err := client.Me(ctx, resp.DeviceID, newCred); err != nil {
+		slog.Default().Error("credential rotated and persisted but post-rotation verification failed", "edge_id", creds.EdgeID, "rotation_id", rotationID, "error", err)
 		fmt.Fprintf(os.Stderr, "geocam-edge credential rotate: rotated and persisted, but verification against %s failed: %v\n",
 			transport.MePath, err)
 		os.Exit(1)
 	}
 
+	slog.Default().Info("credential rotation succeeded", "edge_id", creds.EdgeID, "rotation_id", rotationID, "new_credential_version", newVersion)
 	fmt.Print(rotateSummary(creds.EdgeID, newVersion))
 }
 

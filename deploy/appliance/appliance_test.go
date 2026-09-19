@@ -722,14 +722,30 @@ func TestSystemdUnitTemplateStructure(t *testing.T) {
 		"Restart=on-failure",
 		"KillSignal=SIGTERM",
 		"WantedBy=multi-user.target",
+		// Hito S / S10: least-privilege hardening confirmed safe -- no
+		// Linux capability is needed by this agent/ffmpeg. PrivateDevices
+		// is deliberately NOT required here: Full Edge's CUDA vision
+		// worker profile (GEOCAM_EDGE_YOLO_DEVICE=cuda) needs host
+		// accelerator device nodes, and this unit is shared across every
+		// processing mode.
+		"CapabilityBoundingSet=",
 	}
+
 	for _, want := range required {
 		if !strings.Contains(content, want) {
 			t.Errorf("unit template missing required directive: %q", want)
 		}
 	}
 
-	forbidden := []string{"sleep ", "GEOCAM_ENROLLMENT_TOKEN=", "Type=forking"}
+	forbidden := []string{
+		"sleep ", "GEOCAM_ENROLLMENT_TOKEN=", "Type=forking",
+		// Hito S / S10 correction: PrivateDevices=true would mask the host
+		// accelerator device nodes (/dev/nvidia*) Full Edge's CUDA vision
+		// worker profile (GEOCAM_EDGE_YOLO_DEVICE=cuda, Hito K/K5) needs.
+		// This unit is shared by every processing mode, so it must not
+		// assume CPU-only.
+		"PrivateDevices=true",
+	}
 	for _, bad := range forbidden {
 		if strings.Contains(content, bad) {
 			t.Errorf("unit template contains disallowed content: %q", bad)

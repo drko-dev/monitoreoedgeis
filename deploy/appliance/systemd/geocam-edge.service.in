@@ -39,6 +39,20 @@ ProtectHome=true
 ReadWritePaths=@GEOCAM_DATA_DIR_PLACEHOLDER@
 PrivateTmp=true
 
+# Hito S / S10: confirmed safe by audit, not guessed. Neither the agent's
+# own networking nor its ffmpeg subprocess (software-only decode) needs
+# any Linux capability -- see docs/security/least-privilege.md.
+# A PrivateDevices directive was evaluated and deliberately NOT enabled here:
+# Full Edge's vision worker (deploy/vision-worker/, internal/vision)
+# supports GEOCAM_EDGE_YOLO_DEVICE=cuda (Hito K/K5), and the CUDA/PyTorch
+# runtime it invokes needs host accelerator device nodes (/dev/nvidia*)
+# even though no literal "/dev/nvidia" path appears in this repo's own
+# source. Enabling that directive would mask those nodes and break that
+# profile. This unit is shared by every processing mode (cloud/hybrid/
+# edge), so it cannot assume CPU-only. See least-privilege.md for the
+# full analysis and what a future profile-aware policy would need.
+CapabilityBoundingSet=
+
 # ffmpeg subprocess + RTSP/ONVIF discovery sockets: raise the file
 # descriptor ceiling above the 1024 default rather than invent a number —
 # this is a ceiling, not a claim about how many the agent actually opens at
