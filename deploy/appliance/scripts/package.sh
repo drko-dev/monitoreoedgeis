@@ -48,8 +48,11 @@ for arch in amd64 arm64; do
     # repo checkout or from an extracted tarball.
     mkdir -p "$STAGE/scripts" "$STAGE/systemd" "$STAGE/config"
     cp "$SCRIPT_DIR"/install.sh "$SCRIPT_DIR"/update.sh "$SCRIPT_DIR"/rollback.sh \
-       "$SCRIPT_DIR"/uninstall.sh "$SCRIPT_DIR"/wait-ready.sh "$SCRIPT_DIR"/lib.sh "$STAGE/scripts/"
+       "$SCRIPT_DIR"/uninstall.sh "$SCRIPT_DIR"/wait-ready.sh "$SCRIPT_DIR"/bootstrap.sh "$SCRIPT_DIR"/lib.sh "$STAGE/scripts/"
     cp "$APPLIANCE_DIR/systemd/geocam-edge.service.in" "$STAGE/systemd/"
+    if [ -f "$APPLIANCE_DIR/systemd/geocam-edge-bootstrap.service.in" ]; then
+        cp "$APPLIANCE_DIR/systemd/geocam-edge-bootstrap.service.in" "$STAGE/systemd/"
+    fi
     cp "$APPLIANCE_DIR/config/geocam-edge.env.example" "$STAGE/config/"
 
     ARTIFACT="$DIST_DIR/geocam-edge-$VERSION-linux-$arch.tar.gz"

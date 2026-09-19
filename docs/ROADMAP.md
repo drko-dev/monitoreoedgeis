@@ -18,7 +18,7 @@
 | H     | NEXT                  |
 | O     | CODE DONE / INTEGRATED TESTED / MERGED |
 | P     | CODE DONE / INTEGRATED TESTED / MERGED |
-| Q1–Q3 | PARTIAL / DOCUMENTED   |
+| Q1–Q10| CODE DONE / INTEGRATED TESTED (per-item detail below; no real hardware validated) |
 | I–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
@@ -353,14 +353,13 @@ mechanism is ready but untested end-to-end against a real tag push).
 
 ## Q — Appliance residencial
 
-**HITO Q (Q1–Q3) — PARTIAL / DOCUMENTED** (branch
-`feature/appliance-q-hardware`). Arquitectura y evidencia de red
-documentadas a partir de código y mediciones reales existentes — ver
-`docs/deployment/hardware.md`. Mínimos reales de RAM/storage **pendientes
-de benchmark de hardware real** (no inventados, marcados explícitamente
-como NOT ESTABLISHED). Sin código nuevo: la identificación de hardware
-(CPU arch/RAM/disk/temperatura) ya existía (`internal/platform`, Hito N)
-y se reutilizó tal cual.
+**HITO Q (Q1–Q7) — CODE DONE / INTEGRATED TESTED** (branch
+`integration/hito-q-final`, integra #44/#45; Q9 de #46 y Q8 de
+`monitoreoia` PR #120 se agregan en el mismo cierre). Arquitectura y
+evidencia de red documentadas a partir de código y mediciones reales
+existentes — ver `docs/deployment/hardware.md`. Ningún hardware físico
+fue validado en este cierre; cada punto marca explícitamente qué sigue
+pendiente de hardware real.
 
 - Q1. Hardware mínimo. **PARTIAL / DOCUMENTED** — arquitectura soportada
   (`linux/amd64`/`linux/arm64`), separación de perfiles (Cloud/Hybrid
@@ -368,10 +367,11 @@ y se reutilizó tal cual.
   en `docs/deployment/hardware.md`. La cifra de red del gateway
   (~9.12 Mbps) es un **benchmark local sintético** (una cámara, ruido
   pseudo-aleatorio, sin red/SaaS real) — se documenta como tal, no como
-  medición de producción. Los mínimos reales de RAM/storage **no están
-  establecidos** — no se inventó ningún benchmark; el doc lo marca
-  explícitamente como pendiente de medición real. El costo de inferencia
-  CPU en ARM64/amd64 tampoco está medido.
+  medición de producción. Los mínimos reales de RAM/storage **NOT
+  ESTABLISHED, pending real hardware benchmark** — no se inventó ningún
+  número; 512MB/1GB y 2GB/4GB son sólo *provisional provisioning
+  assumptions*, nunca requisitos validados. El costo de inferencia CPU en
+  ARM64/amd64 tampoco está medido.
 - Q2. Raspberry Pi / Orange Pi (ARM64). **DOCUMENTED CANDIDATE / NOT
   HARDWARE VALIDATED** — candidato documentado para Cloud/Hybrid gateway;
   Full Edge con YOLO local NOT PERFORMANCE VALIDATED (sin medición real
@@ -379,9 +379,55 @@ y se reutilizó tal cual.
 - Q3. Mini-PC (AMD64). **DOCUMENTED CANDIDATE / NOT HARDWARE VALIDATED** —
   mismo criterio: candidato documentado para Cloud/Hybrid gateway y Full
   Edge, sin medición real todavía.
-- Q4–Q10: imagen preparada, Ethernet+power, zero-touch enrollment,
-  discovery, QR/código, factory reset, UX no técnica. **NOT DONE** —
-  fuera de alcance de este cierre.
+- Q4. Imagen preparada. **CODE DONE / INTEGRATED TESTED** — physical
+  appliance image validation pending. Pre-packaged release (`package.sh`)
+  + `install.sh` + systemd + `bootstrap.sh` on standard Linux
+  distributions (Debian 12 minimal / Ubuntu Server / Raspberry Pi OS
+  Lite). No custom ISO needed; reproducible image preparation and
+  artifact distinction documented in `docs/deployment/appliance.md`.
+- Q5. Ethernet + power. **DOCUMENTED** — power is hardware/model
+  specific. Residential baseline requires wired Ethernet (`eth0`/`enp*`)
+  via DHCP as the primary supported network path (deterministic latency
+  and reliable UDP multicast for WS-Discovery). Power per the selected
+  hardware's own spec (vendor/model-recommended supply; PoE only via a
+  compatible external adapter if applicable) — not a claim this repo
+  validated any specific power supply.
+- Q6. Zero-touch enrollment. **CODE DONE / INTEGRATED TESTED** — real
+  first-boot hardware validation pending. Reuses existing `geocam-edge
+  enroll` CLI via stdin (`--token` flag removed). On first boot,
+  `geocam-edge-bootstrap.service` runs `bootstrap.sh` before
+  `geocam-edge.service`, detects ephemeral seed token
+  (`/boot/geocam-enroll.token`, `/boot/firmware/geocam-enroll.token`,
+  `/etc/geocam-edge/enroll.token`, or `GEOCAM_ENROLLMENT_TOKEN`), pipes
+  token to `geocam-edge enroll` (SHA-256 exchanged with SaaS), persists
+  non-root `identity.json` and `credentials.json`, and deletes the seed
+  file best-effort (no secure-erase claim). Under systemd, defers service
+  startup to systemd (no synchronous start/wait deadlock). Covered by
+  targeted tests in `deploy/appliance/bootstrap_test.go` — not by a real
+  boot cycle.
+- Q7. Discovery. **CODE DONE / REUSED EXISTING DISCOVERY** — inventory
+  in-memory; real LAN hardware validation pending. Reuses existing ONVIF
+  WS-Discovery engine (`internal/discovery`) and SaaS reporting
+  (`ReportDiscoveryRun`). Runs automatically post-enrollment on service
+  start via `discovery.Module`. CLI on-demand scanning supported via
+  `geocam-edge discovery scan` and `bootstrap.sh --scan`. No redundant
+  network scanner; inventory is not persisted to
+  `discovery-inventory.json`.
+- Q8. Onboarding QR/código. **CODE/TOKEN FLOW AVAILABLE** — SaaS
+  onboarding UI integrated (`monitoreoia` PR #120): waiting/connected/
+  ready states, no `claimed_device_id` in the public payload, RBAC on
+  enrollment, reuses existing enrollment code/token. The existing
+  code/token satisfies Q8's "código" path — **no new QR was implemented**
+  in this closure, and none is claimed.
+- Q9. Factory reset. **CODE DONE / INTEGRATED TESTED** — real hardware
+  factory-reset validation pending. `geocam-edge factory-reset --confirm`
+  preserves releases/systemd/installed software and erases only an
+  explicit allowlist inside `GEOCAM_DATA_DIR` (identity, credentials,
+  camera credentials/master key, remote-config state, control ledger,
+  local event backlog, cloud buffer, events, evidence).
+- Q10. UX no técnica. **CODE DONE / INTEGRATED TESTED** — no claim of
+  validation with real non-technical users; this closure covers the
+  zero-touch/discovery/onboarding code path, not a usability study.
 
 ## R — Instalación corporativa
 

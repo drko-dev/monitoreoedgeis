@@ -86,8 +86,10 @@ func TestInstallCreatesExpectedLayout(t *testing.T) {
 	for _, p := range []string{
 		"opt/geocam-edge/releases/1.0.0/geocam-edge",
 		"opt/geocam-edge/current", // symlink
+		"opt/geocam-edge/current/scripts/bootstrap.sh",
 		"etc/geocam-edge/geocam-edge.env",
 		"etc/systemd/system/geocam-edge.service",
+		"etc/systemd/system/geocam-edge-bootstrap.service",
 		"var/lib/geocam-edge",
 	} {
 		full := filepath.Join(root, p)
