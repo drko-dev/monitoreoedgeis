@@ -35,6 +35,10 @@ type Supervisor struct {
 	descriptor StreamDescriptor
 	descReady  bool
 
+	// started guards the run goroutine. Start is idempotent and Stop on a
+	// supervisor that was never started returns instead of blocking on a
+	// done channel nothing will ever close.
+	started  bool
 	stopFunc context.CancelFunc
 	doneChan chan struct{}
 }
@@ -71,17 +75,42 @@ func NewSupervisor(target CameraTarget, cfg Config, logger *slog.Logger) *Superv
 }
 
 // Start launches the supervision goroutine in the background.
+//
+// Start is idempotent. A second call is a no-op rather than a second
+// goroutine: two goroutines would both close doneChan on exit (panicking
+// with "close of closed channel") and two supervisors for one camera would
+// double the connections and the packet stream.
 func (s *Supervisor) Start(ctx context.Context) {
+	s.mu.Lock()
+	if s.started {
+		s.mu.Unlock()
+		return
+	}
 	subCtx, cancel := context.WithCancel(ctx)
 	s.stopFunc = cancel
+	s.started = true
+	s.mu.Unlock()
 
 	go s.run(subCtx)
 }
 
 // Stop signals the supervisor to shut down and waits for it to complete.
+//
+// Stop on a supervisor that was never started returns immediately: no
+// goroutine exists to close doneChan, so waiting on it would block forever.
+// Calling Stop twice is safe for the same reason — the channel is already
+// closed.
 func (s *Supervisor) Stop() {
-	if s.stopFunc != nil {
-		s.stopFunc()
+	s.mu.RLock()
+	started := s.started
+	stop := s.stopFunc
+	s.mu.RUnlock()
+
+	if !started {
+		return
+	}
+	if stop != nil {
+		stop()
 	}
 	<-s.doneChan
 }
@@ -133,10 +162,11 @@ func (s *Supervisor) run(ctx context.Context) {
 		s.mu.Unlock()
 	}()
 
-	backoff := s.cfg.InitialBackoff
-	if backoff <= 0 {
-		backoff = 1 * time.Second
+	initialBackoff := s.cfg.InitialBackoff
+	if initialBackoff <= 0 {
+		initialBackoff = 1 * time.Second
 	}
+	backoff := initialBackoff
 	maxBackoff := s.cfg.MaxBackoff
 	if maxBackoff <= 0 {
 		maxBackoff = 60 * time.Second
@@ -199,7 +229,11 @@ func (s *Supervisor) run(ctx context.Context) {
 		s.mu.Unlock()
 
 		s.logger.Info("camera stream connected and playing", "addr", s.target.Addr)
-		backoff = s.cfg.InitialBackoff // Reset backoff on successful session
+		// Reset to the *normalised* initial delay, never to the raw config
+		// field: with a zero InitialBackoff the raw field would put the
+		// retry loop back to a zero delay after every successful session,
+		// turning a flapping camera into an unthrottled reconnect storm.
+		backoff = initialBackoff
 
 		// Stream reading loop
 		err = s.streamLoop(ctx, session)
@@ -234,6 +268,17 @@ func (s *Supervisor) streamLoop(ctx context.Context, session *Session) error {
 	// the sibling channel must never reach PacketSink.
 	videoChannel := session.VideoChannel()
 
+	// Config documents PacketTimeout as the silence threshold with a 5s
+	// default, and the supervisor substitutes defaults for InitialBackoff,
+	// MaxBackoff and DialTimeout. A non-positive PacketTimeout must
+	// therefore mean "use the default", not "never time out": ReadPacket
+	// treats a non-positive timeout as "no deadline", which would let a
+	// camera that went silent at the socket level look healthy forever.
+	packetTimeout := s.cfg.PacketTimeout
+	if packetTimeout <= 0 {
+		packetTimeout = DefaultConfig().PacketTimeout
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -241,7 +286,7 @@ func (s *Supervisor) streamLoop(ctx context.Context, session *Session) error {
 		default:
 		}
 
-		channel, payload, err := session.ReadPacket(s.cfg.PacketTimeout)
+		channel, payload, err := session.ReadPacket(packetTimeout)
 		if err != nil {
 			return err
 		}

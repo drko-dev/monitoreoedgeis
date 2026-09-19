@@ -178,6 +178,7 @@ fi
 if [ -f "$SCRIPT_DIR/../systemd/geocam-edge-ota-updater.service.in" ]; then
     sed \
         -e "s|@GEOCAM_OTA_UPDATER_EXEC@|$GEOCAM_LIBEXEC_DIR/ota-updater.sh|g" \
+        -e "s|@GEOCAM_ENV_FILE@|$GEOCAM_CONFIG_DIR/geocam-edge.env|g" \
         -e "s|@GEOCAM_DATA_DIR_PLACEHOLDER@|$GEOCAM_DATA_DIR|g" \
         -e "s|@GEOCAM_PREFIX_PLACEHOLDER@|$GEOCAM_PREFIX|g" \
         -e "s|@GEOCAM_CONFIG_DIR_PLACEHOLDER@|$GEOCAM_CONFIG_DIR|g" \
