@@ -34,6 +34,108 @@ jobs:
           GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/geocam-edge
           GOOS=linux GOARCH=arm64 go build -o /dev/null ./cmd/geocam-edge
 
+      - name: Short soak smoke
+        env:
+          GEOCAM_SOAK: '1'
+          GEOCAM_SOAK_DURATION: 3s
+        run: go test ./internal/soak -run '^TestSoak$' -count=1 -v
+
+      - name: Short soak smoke with race detector
+        env:
+          GEOCAM_SOAK: '1'
+          GEOCAM_SOAK_DURATION: 3s
+        run: go test -race ./internal/soak -run '^TestSoak$' -count=1 -v
+
+  # Hito W10/W11: validate release artifacts for both deployment
+  # architectures. This is cross-build/package evidence; it is not a claim
+  # that physical ARM64 hardware was exercised.
+  multiarch-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.2'
+
+      - name: Build linux deployment binaries
+        run: make build-linux VERSION=ci
+
+      - name: Validate ELF and Go build metadata
+        run: |
+          file bin/geocam-edge-linux-amd64 | tee /tmp/file-amd64
+          grep -Eq 'x86-64|x86_64' /tmp/file-amd64
+          go version -m bin/geocam-edge-linux-amd64 | tee /tmp/go-amd64
+          grep -q 'GOARCH=amd64' /tmp/go-amd64
+
+          file bin/geocam-edge-linux-arm64 | tee /tmp/file-arm64
+          grep -Eq 'ARM aarch64|aarch64' /tmp/file-arm64
+          go version -m bin/geocam-edge-linux-arm64 | tee /tmp/go-arm64
+          grep -q 'GOARCH=arm64' /tmp/go-arm64
+
+      - name: Package appliance artifacts
+        run: bash deploy/appliance/scripts/package.sh ci "$PWD/dist"
+
+      - name: Validate package layout and checksums
+        run: |
+          for arch in amd64 arm64; do
+            artifact="geocam-edge-ci-linux-$arch.tar.gz"
+            checksum="$artifact.sha256"
+
+            test -f "dist/$artifact"
+            test -f "dist/$checksum"
+            (cd dist && sha256sum -c "$checksum")
+
+            stage="$(mktemp -d)"
+            tar xzf "dist/$artifact" -C "$stage"
+
+            test -f "$stage/geocam-edge"
+            test -x "$stage/geocam-edge"
+            test -f "$stage/VERSION"
+            test -f "$stage/ARCH"
+            test -d "$stage/scripts"
+            test -d "$stage/systemd"
+            test -d "$stage/config"
+
+            test "$(cat "$stage/VERSION")" = "ci"
+            test "$(cat "$stage/ARCH")" = "$arch"
+            go version -m "$stage/geocam-edge" | grep -q "GOARCH=$arch"
+
+            rm -rf "$stage"
+          done
+
+  # Exercise the Dockerfile's Go build stage for both deployment
+  # architectures. arm64 runs through QEMU/Buildx and is explicitly not
+  # treated as physical ARM64 runtime validation.
+  docker-go-stage-multiarch:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Go stage
+        run: |
+          docker buildx build \
+            --platform "linux/${{ matrix.arch }}" \
+            --target build \
+            --output "type=local,dest=build-${{ matrix.arch }}" \
+            .
+
+      - name: Validate Docker-stage artifact architecture
+        run: |
+          binary="build-${{ matrix.arch }}/out/geocam-edge"
+          test -f "$binary"
+          file "$binary"
+          go version -m "$binary" | tee /tmp/go-image-stage
+          grep -q "GOARCH=${{ matrix.arch }}" /tmp/go-image-stage
+
   # Hito H: validates the Docker image's LGPL-only ffmpeg build on a real
   # linux/amd64 machine (GitHub-hosted ubuntu-latest runners are amd64 —
   # no QEMU emulation, unlike local verification on an Apple Silicon dev

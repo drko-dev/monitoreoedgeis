@@ -19,12 +19,13 @@ import (
 
 // fakeSender records every heartbeat and returns scripted results.
 type fakeSender struct {
-	mu      sync.Mutex
-	calls   []transport.HeartbeatRequest
-	devIDs  []string
-	creds   []string
-	results []error
-	fired   chan struct{}
+	mu            sync.Mutex
+	calls         []transport.HeartbeatRequest
+	devIDs        []string
+	creds         []string
+	results       []error
+	fired         chan struct{}
+	statusUpdates int
 }
 
 func newFakeSender(results ...error) *fakeSender {
@@ -64,6 +65,18 @@ func (f *fakeSender) count() int {
 	return len(f.calls)
 }
 
+func (f *fakeSender) recordStatus() {
+	f.mu.Lock()
+	f.statusUpdates++
+	f.mu.Unlock()
+}
+
+func (f *fakeSender) statusCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.statusUpdates
+}
+
 // fakeClock records every delay the scheduler asks for and fires timers
 // immediately, so a test exercises the real scheduling decisions without
 // spending real time.
@@ -96,7 +109,7 @@ func quietLogger() *slog.Logger {
 // pinned: a fixed RNG value (0.5, the midpoint, so jitter is a no-op) and a
 // fake timer.
 func testOptions(sender Sender, clock *fakeClock) Options {
-	return Options{
+	opts := Options{
 		Sender:     sender,
 		DeviceID:   "dev-1",
 		Credential: "secret-credential",
@@ -107,6 +120,10 @@ func testOptions(sender Sender, clock *fakeClock) Options {
 		Rand:       func() float64 { return 0.5 },
 		NewTimer:   clock.newTimer,
 	}
+	if f, ok := sender.(*fakeSender); ok {
+		opts.OnStatus = func(Status) { f.recordStatus() }
+	}
+	return opts
 }
 
 // runUntil starts m, blocks until sender has made n calls, then stops the
@@ -126,17 +143,20 @@ func runUntil(t *testing.T, m *Module, sender *fakeSender, n int) Status {
 			t.Fatalf("timed out waiting for %d heartbeats, got %d", n, sender.count())
 		}
 	}
-	// The last send returns before the loop records its outcome; wait for the
-	// bookkeeping to land rather than racing it.
-	var st Status
-	for i := 0; i < 200; i++ {
-		st = m.Status()
-		if st.ConsecutiveFailures+boolToInt(!st.LastSuccessAt.IsZero()) > 0 {
-			break
+	// Heartbeat returns to the fake sender before the module records the
+	// outcome. Wait for the exact status-update count instead of sampling a
+	// partially updated Status and racing the scheduler. Start emits one
+	// status update, and each completed send emits exactly one more.
+	bookkeepingDeadline := time.After(5 * time.Second)
+	for sender.statusCount() < n+1 {
+		select {
+		case <-bookkeepingDeadline:
+			t.Fatalf("timed out waiting for heartbeat bookkeeping: sends=%d status_updates=%d", n, sender.statusCount())
+		default:
+			time.Sleep(time.Millisecond)
 		}
-		time.Sleep(time.Millisecond)
 	}
-	st = m.Status()
+	st := m.Status()
 
 	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -144,13 +164,6 @@ func runUntil(t *testing.T, m *Module, sender *fakeSender, n int) Status {
 		t.Fatalf("Stop: %v", err)
 	}
 	return st
-}
-
-func boolToInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }
 
 // --- construction -----------------------------------------------------------
