@@ -602,8 +602,24 @@ hardware-backed. Ver `docs/security/threat-model.md`,
 
 ## T — OTA
 
-- T1–T10: versión, update disponible, descarga, checksum/firma, upgrade, health,
-  rollback, staged rollout, canaries, incompatibilidades.
+- T1–T4 (versión/SemVer, update disponible vía heartbeat, descarga
+  credential-less, checksum SHA-256 + firma Ed25519 fail-closed) — CODE
+  DONE / TESTED / **MERGED** (PR #61 → `integration/hito-t-ota` → `main`
+  via PR #62, merge `85ef7a0a7175e4512313f73423731eb5175abdeb`).
+- T5–T7 (upgrade privilegiado root-only, health check vía `/readyz`,
+  rollback a versión previa, systemd `.path`+oneshot, snapshot root-owned
+  anti-TOCTOU) — CODE DONE / TESTED / **MERGED** (PR #60, mismo merge que
+  arriba).
+- T8–T10 (staged rollout, canaries, compatibility gates — SaaS
+  `drko-dev/monitoreoia`) — IMPLEMENTED, **NOT MERGED**. Blocker real: no
+  existe suite de tests PostgreSQL/API para `GET /api/v1/edge/ota/next`
+  (solo hay unit tests puros de bucket/canary determinístico, 5/5 PASS);
+  la validación real contra PostgreSQL nunca se ejecutó. Ver
+  `drko-dev/monitoreoia` PR #124 (`feature/hito-t-t8-t10-ota-rollout`,
+  HEAD `e3b67193f02bcf45b334f66953db9531d9855ce4`). SaaS no desplegado a
+  producción para Hito T.
+- Edge PROD: **N/A** — no existe actualmente appliance/VM Edge PROD real
+  documentado.
 
 ## U — SaaS Control Plane
 
