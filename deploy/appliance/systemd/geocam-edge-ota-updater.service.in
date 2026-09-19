@@ -1,0 +1,17 @@
+[Unit]
+Description=GEO CAM Edge privileged OTA updater
+After=local-fs.target geocam-edge.service
+RequiresMountsFor=@GEOCAM_DATA_DIR_PLACEHOLDER@ @GEOCAM_PREFIX_PLACEHOLDER@
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=@GEOCAM_OTA_UPDATER_EXEC@
+# The updater is a narrow root boundary. It receives no request arguments;
+# all request data is revalidated from the fixed OTA directory.
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=@GEOCAM_DATA_DIR_PLACEHOLDER@ @GEOCAM_PREFIX_PLACEHOLDER@ @GEOCAM_CONFIG_DIR_PLACEHOLDER@ @GEOCAM_SYSTEMD_DIR_PLACEHOLDER@ @GEOCAM_LIBEXEC_PLACEHOLDER@ @GEOCAM_OTA_STAGING_PLACEHOLDER@
+PrivateTmp=true
+NoNewPrivileges=false

@@ -25,14 +25,25 @@ ARTIFACT="${1:-}"
 [ -n "$ARTIFACT" ] || die "usage: update.sh <artifact.tar.gz>"
 [ -f "$ARTIFACT" ] || die "artifact not found: $ARTIFACT"
 
-# --- 1. Checksum (mandatory, fail-closed: package.sh always writes one) ----
-[ -f "${ARTIFACT}.sha256" ] || die "no ${ARTIFACT}.sha256 found — checksum verification is mandatory, artifact rejected, nothing changed"
+# --- 1. Checksum (mandatory: package.sh writes <artifact>.sha256; OTA
+#        pending releases may instead provide the IA1-compatible SHA256SUMS
+#        file in the same directory. Both are verified by the same SHA-256
+#        tool; signature verification belongs to ota-updater.sh's current
+#        `geocam-edge ota verify` command.) -------------------------------
+CHECKSUM_FILE="${ARTIFACT}.sha256"
+CHECKSUM_DIR="$(dirname "$ARTIFACT")"
+CHECKSUM_ARG="$(basename "$CHECKSUM_FILE")"
+if [ ! -f "$CHECKSUM_FILE" ] && [ -f "$CHECKSUM_DIR/SHA256SUMS" ]; then
+    CHECKSUM_FILE="$CHECKSUM_DIR/SHA256SUMS"
+    CHECKSUM_ARG="SHA256SUMS"
+fi
+[ -f "$CHECKSUM_FILE" ] || die "no checksum file found — checksum verification is mandatory, artifact rejected, nothing changed"
 
 if have_cmd sha256sum; then
-    ( cd "$(dirname "$ARTIFACT")" && sha256sum -c "$(basename "$ARTIFACT").sha256" ) \
+    ( cd "$CHECKSUM_DIR" && sha256sum -c "$CHECKSUM_ARG" ) \
         || die "checksum verification failed for $ARTIFACT — artifact rejected, nothing changed"
 elif have_cmd shasum; then
-    ( cd "$(dirname "$ARTIFACT")" && shasum -a 256 -c "$(basename "$ARTIFACT").sha256" ) \
+    ( cd "$CHECKSUM_DIR" && shasum -a 256 -c "$CHECKSUM_ARG" ) \
         || die "checksum verification failed for $ARTIFACT — artifact rejected, nothing changed"
 else
     die "no sha256sum/shasum available — cannot verify checksum, artifact rejected, nothing changed"
@@ -52,7 +63,8 @@ if [ -n "$ARTIFACT_ARCH" ] && [ "$ARTIFACT_ARCH" != "$HOST_ARCH" ]; then
     die "artifact architecture ($ARTIFACT_ARCH) does not match host ($HOST_ARCH) — rejected, nothing changed"
 fi
 
-VERSION="$(cat "$WORKDIR/VERSION" 2>/dev/null || echo "")"
+VERSION="$(cat "$WORKDIR/VERSION" 2>/dev/null || true)"
+[ -n "$VERSION" ] || VERSION="${GEOCAM_VERSION:-}"
 [ -n "$VERSION" ] || die "artifact missing VERSION file — rejected, nothing changed"
 
 PREFIX="$(root_path "$GEOCAM_PREFIX")"

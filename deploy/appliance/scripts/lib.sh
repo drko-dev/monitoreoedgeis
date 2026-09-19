@@ -15,6 +15,8 @@ set -euo pipefail
 : "${GEOCAM_CONFIG_DIR:=/etc/geocam-edge}"
 : "${GEOCAM_DATA_DIR:=/var/lib/geocam-edge}"
 : "${GEOCAM_SYSTEMD_DIR:=/etc/systemd/system}"
+: "${GEOCAM_LIBEXEC_DIR:=/usr/libexec/geocam-edge}"
+: "${GEOCAM_OTA_STAGING_DIR:=/run/geocam-edge/ota-staging}"
 : "${GEOCAM_SERVICE_USER:=geocam-edge}"
 : "${GEOCAM_SERVICE_GROUP:=geocam-edge}"
 
