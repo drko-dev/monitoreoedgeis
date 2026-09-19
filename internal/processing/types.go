@@ -94,21 +94,36 @@ type Frame struct {
 // zero mid-pipeline-lifetime, so DecodedFPS/OutputFPS (computed as a delta
 // between two Status() calls) never goes negative across a restart.
 type PipelineStatus struct {
-	CandidateKey       string     `json:"candidate_key"`
-	State              string     `json:"state"` // starting|running|stalled|error|skipped_limit
-	Codec              string     `json:"codec"`
-	InputFPS           float64    `json:"input_fps"`
-	DecodedFPS         float64    `json:"decoded_fps"`
-	OutputFPS          float64    `json:"output_fps"`
-	RTPPacketsReceived int64      `json:"rtp_packets_received"`
-	FramesReceived     int64      `json:"frames_received"`
-	FramesDecoded      int64      `json:"frames_decoded"`
-	FramesSampled      int64      `json:"frames_sampled"`
-	FramesDropped      int64      `json:"frames_dropped"`
-	QueueDepth         int        `json:"queue_depth"`
-	BufferUsage        int        `json:"buffer_usage"`
-	DecodeLatencyMs    float64    `json:"decode_latency_ms"`
-	LastFrameAt        *time.Time `json:"last_frame_at,omitempty"`
+	CandidateKey       string  `json:"candidate_key"`
+	State              string  `json:"state"` // starting|running|stalled|error|skipped_limit
+	Codec              string  `json:"codec"`
+	InputFPS           float64 `json:"input_fps"`
+	DecodedFPS         float64 `json:"decoded_fps"`
+	OutputFPS          float64 `json:"output_fps"`
+	RTPPacketsReceived int64   `json:"rtp_packets_received"`
+	FramesReceived     int64   `json:"frames_received"`
+	FramesDecoded      int64   `json:"frames_decoded"`
+	FramesSampled      int64   `json:"frames_sampled"`
+	FramesDropped      int64   `json:"frames_dropped"`
+	QueueDepth         int     `json:"queue_depth"`
+	BufferUsage        int     `json:"buffer_usage"`
+	// RingBufferDropped counts frames the small in-process history ring
+	// overwrote because it was full. It is a subset of FramesDropped (which
+	// folds it in), reported separately so history loss for clip/debug
+	// snapshots is distinguishable from decoder/queue loss. The counter
+	// existed internally for a long time with no reader at all.
+	RingBufferDropped int64 `json:"ring_buffer_dropped"`
+	// UnsupportedNALTypes counts RTP payloads whose H.264 NAL type this
+	// depacketizer does not implement (FU-B, MTAP, STAP-B, reserved). Also a
+	// subset of FramesDropped, and also previously uncounted in /status.
+	UnsupportedNALTypes int64 `json:"unsupported_nal_types"`
+	// OversizedAUsDropped counts access units abandoned because reassembly
+	// exceeded the protocol-safety ceiling (maxAccessUnitBytes /
+	// maxAccessUnitNALUs) — a sender that never closes a frame, rather than
+	// packet loss. See H264Depacketizer.
+	OversizedAUsDropped int64      `json:"oversized_aus_dropped"`
+	DecodeLatencyMs     float64    `json:"decode_latency_ms"`
+	LastFrameAt         *time.Time `json:"last_frame_at,omitempty"`
 	// Hybrid is nil unless Milestone J's local evaluator is active for this
 	// camera (Config.Hybrid.Enabled).
 	Hybrid *HybridStatus `json:"hybrid,omitempty"`
@@ -143,9 +158,23 @@ type CloudBufferStats struct {
 	// it can never be sent under that config, no matter how long the drain
 	// loop waits. Distinct from DroppedFull (a live buffer that was full at
 	// enqueue time): this is a replay-time, config-driven discard.
-	DroppedOversize int64      `json:"dropped_oversize"`
-	Capacity        int        `json:"capacity,omitempty"`
-	OldestPending   *time.Time `json:"oldest_pending,omitempty"`
+	DroppedOversize int64 `json:"dropped_oversize"`
+	// DroppedAge counts buffered frames discarded because they sat in the
+	// spool longer than GEOCAM_CLOUD_BUFFER_MAX_AGE. The eviction itself is
+	// deliberate (a stale frame of a past event is worth less than the space
+	// it holds), but it used to happen with no counter and no log at all, so
+	// a frame could vanish from the spool with nothing to show for it.
+	DroppedAge int64 `json:"dropped_age"`
+	// DroppedOverCapacity counts entries discarded while recovering a spool
+	// whose on-disk contents exceeded the configured maxFrames/maxBytes —
+	// typically because the bound was lowered between releases, or the
+	// process died while over the bound. Recovery evicts oldest-first (the
+	// newest frames are the ones still likely to matter) and counts every
+	// eviction, so an over-capacity spool is bounded and visible instead of
+	// silently replayed at its over-capacity footprint.
+	DroppedOverCapacity int64      `json:"dropped_over_capacity"`
+	Capacity            int        `json:"capacity,omitempty"`
+	OldestPending       *time.Time `json:"oldest_pending,omitempty"`
 }
 
 // CloudBufferReporter is implemented by a Sink that exposes I6 buffer
