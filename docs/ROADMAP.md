@@ -523,12 +523,18 @@ por punto abajo. Perfiles, preflight operativo, matrices y gaps:
 
 ## S — Seguridad
 
-**HITO S1–S4 — DOCUMENTED / PARTIAL WHERE EXPLICITLY MARKED**
+**HITO S1–S8 — DOCUMENTED / IMPLEMENTED / PARTIAL WHERE EXPLICITLY
+MARKED** (integra #55, #57; S9-S11 de #56 se agregan en el mismo cierre)
 
 - S1 Threat model. **DOCUMENTED** — assets, trust boundaries, concrete threats, mitigations, owners and remaining gaps: `docs/security/threat-model.md`.
 - S2 Unique secrets. **IMPLEMENTED** — per-device credential uses 32 bytes from `crypto/rand`; only its SHA-256 hash crosses enrollment; camera master key is a distinct local 32-byte random key; enrollment token is distinct from both. No shared/default/hardcoded production credential found in the audited paths.
 - S3 TLS. **IMPLEMENTED** — all Edge→SaaS clients reuse `internal/transport.Client`; HTTPS is required by default, insecure HTTP requires explicit development configuration, and normal hostname/certificate verification remains active. ONVIF/RTSP is a separate CCTV-LAN boundary.
 - S4 Local data protection. **PARTIAL** — camera credentials are AES-256-GCM encrypted and local state uses restrictive permissions/atomic writes. Device credential at-rest encryption is **NOT ESTABLISHED / REQUIRES KEY-MANAGEMENT DECISION** because no TPM/HSM/KMS/Vault/OS-keychain trust root exists. Full classification: `docs/security/edge-security-baseline.md`.
+- **S5 Revocation:** Edge uses the shared authenticated transport path for heartbeat, control, events, frames, remote config and camera-credential sync. A revoked/suspended device is rejected on the next request; no push revocation is claimed. Re-enrollment is explicit and token-bound.
+- **S6 Rotation:** Edge self-rotation generates the new credential locally, submits only its hash, saves credentials atomically, and uses the existing `rotation_id` plus bounded grace window. Reuse of a `rotation_id` with another hash is rejected. **Automatic rotation schedule: NOT DEFINED.**
+- **S7 Secure enrollment:** device credential is generated locally; SaaS receives only the hash. Enrollment is bounded, strict, one-time/concurrency-safe and does not expose the raw token in logs or argv. Bootstrap uses the existing flow; no new QR/protocol added.
+- **S8 Replay protection:** enrollment claim, credential rotation, control commands, event UUID/idempotency and remote-config version handling use their existing stateful mechanisms. These prevent duplicate state-changing effects where covered; they are not bearer-secret anti-theft protection. Detailed lifecycle audit: `docs/security/device-lifecycle.md`.
+- S9–S11: ver más abajo (integrados en el mismo cierre).
 - No merge or deploy is claimed for this closure; no hardware-backed security or signed-release guarantee is claimed.
 
 ## T — OTA
