@@ -242,3 +242,51 @@ func TestAgentDegradedOnCorruptControlLedger(t *testing.T) {
 	cancel()
 	_ = <-done
 }
+
+// TestAgentDegradedOnCorruptRemoteConfigState: a corrupt
+// remote_config_state.json (Y8) must never be silently discarded or
+// defaulted — newRemoteConfigModule wraps remoteconfig.ErrCorruptState into
+// remoteConfigErr, and the agent must fail closed exactly like the identity,
+// credentials and control-ledger stores (mirrors
+// TestAgentDegradedOnCorruptControlLedger).
+func TestAgentDegradedOnCorruptRemoteConfigState(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.SaaSURL = "https://saas.example.com"
+	identPath := filepath.Join(cfg.DataDir, "identity.json")
+	_ = os.WriteFile(identPath, []byte(`{"edge_id":"550e8400-e29b-41d4-a716-446655440000","created_at":"2026-09-18T00:00:00Z","schema_version":1}`), 0o600)
+	credsPath := filepath.Join(cfg.DataDir, "credentials.json")
+	_ = os.WriteFile(credsPath, []byte(`{"edge_id":"550e8400-e29b-41d4-a716-446655440000","device_id":"dev-1","credential":"cred-1","enrolled_at":"2026-09-18T00:00:00Z","schema_version":1}`), 0o600)
+
+	statePath := filepath.Join(cfg.DataDir, "remote_config_state.json")
+	corrupt := []byte("{truncated-json")
+	if err := os.WriteFile(statePath, corrupt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := New(cfg)
+	if a.remoteConfigErr == nil {
+		t.Fatal("expected remoteConfigErr != nil due to corrupt remote_config_state.json, got nil")
+	}
+	if a.RemoteConfig() != nil {
+		t.Error("expected nil RemoteConfig module when the store failed to open")
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+
+	waitForState(t, a, health.StateDegraded)
+	cancel()
+	_ = <-done
+
+	// The corrupt file itself must be preserved untouched for diagnosis —
+	// nothing may overwrite it with a fresh default state.
+	got, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("re-reading remote_config_state.json: %v", err)
+	}
+	if string(got) != string(corrupt) {
+		t.Errorf("remote_config_state.json was modified: before=%q after=%q", corrupt, got)
+	}
+}

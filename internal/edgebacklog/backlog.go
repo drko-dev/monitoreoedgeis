@@ -159,12 +159,19 @@ func (b *Backlog) recover() error {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(b.cfg.Dir, "pending", entry.Name()))
+		pendingPath := filepath.Join(b.cfg.Dir, "pending", entry.Name())
+		data, err := os.ReadFile(pendingPath)
 		if err != nil {
 			continue
 		}
 		var r record
 		if json.Unmarshal(data, &r) != nil || r.Sequence == 0 || r.Submission.Event.EventUUID == "" {
+			// Corrupt or truncated record (e.g. a partial write left behind by
+			// a power loss). Move it aside instead of leaving it silently
+			// stuck in pending/ forever: quarantine already exists as the
+			// diagnosable, counted home for records this backlog cannot use.
+			_ = os.Rename(pendingPath, filepath.Join(b.cfg.Dir, "quarantine", entry.Name()))
+			b.quarantined++
 			continue
 		}
 		b.queue = append(b.queue, r)
@@ -343,7 +350,19 @@ func (b *Backlog) writeLocked(r record) error {
 		return err
 	}
 	tmp := b.path(r) + ".tmp"
-	if err = os.WriteFile(tmp, data, 0o640); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, b.path(r))
