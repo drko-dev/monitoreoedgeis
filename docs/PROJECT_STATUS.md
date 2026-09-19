@@ -1196,6 +1196,37 @@ is never read inside `internal/rtsp`.
 Verification: `go test ./...` PASS, `go test -race` PASS on all touched
 packages, `go vet ./...` clean, `gofmt -l .` clean, focal `-count=10` stable.
 
+
+## Hito X — Performance/capacidad — MERGED
+
+Integrated via PR #74 to `main @ 70aba8c0d0d176068d361cdfc330ae7193597ced`,
+combining accepted work from PR #69 (camera scale + CPU/RAM), PR #70
+(decode/inference FPS) and PR #72 (network instrumentation + capacity evidence
+matrix). Final integration CI completed successfully.
+
+Validation evidence:
+- synthetic camera-scale harness supports 1/5/10/25/50 cameras;
+- dedicated 25-camera integration validation: 25/25 online, 0 errors, 1475
+  packets over 3 seconds on the GitHub Linux runner;
+- process CPU/RSS/goroutine/FD instrumentation is available with explicit
+  MEASURED / DERIVED / UNAVAILABLE semantics;
+- real decode pipeline was benchmarked with deterministic synthetic H.264;
+- real YOLO inference was benchmarked on CPU using `yolo11s-pose.pt` and
+  `yolo11n.pt`;
+- network instrumentation counts application payload bytes without inventing
+  HTTP/TLS overhead;
+- capacity-matrix evidence distinguishes MEASURED, DERIVED and NOT_VALIDATED.
+
+Explicit non-claims:
+- no commercial camera-capacity limit is certified from synthetic loopback runs;
+- CUDA/GPU performance is NOT VALIDATED;
+- physical ARM64 hardware is NOT VALIDATED;
+- real-camera / real-network production capacity is NOT VALIDATED;
+- Apple M4 CPU results are not extrapolated to Linux appliances or GPUs.
+
+Edge PROD: **N/A** — no real production Edge appliance/VM target is documented.
+SaaS PROD: **NOT TOUCHED** — Hito X contains no SaaS deployment change.
+
 ## HOW ANOTHER AI SHOULD CONTINUE
 
 1. Read `AGENTS.md`.
