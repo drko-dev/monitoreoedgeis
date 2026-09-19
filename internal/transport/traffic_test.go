@@ -36,13 +36,13 @@ func TestTrafficMeterConcurrentSnapshotAndReset(t *testing.T) {
 
 func TestTrafficPathClassification(t *testing.T) {
 	cases := map[string]TrafficCategory{
-		HeartbeatPath:             TrafficHeartbeat,
-		DiscoveryNextPath:         TrafficDiscovery,
-		FramesPath:                TrafficFrames,
-		LocalEventsPath:           TrafficEvents,
-		OTANextPath:               TrafficOTA,
-		ControlNextPath:           TrafficControl,
-		"/api/v1/edge/other":      TrafficControl,
+		HeartbeatPath:              TrafficHeartbeat,
+		DiscoveryNextPath:          TrafficDiscovery,
+		FramesPath:                 TrafficFrames,
+		LocalEventsPath:            TrafficEvents,
+		OTANextPath:                TrafficOTA,
+		ControlNextPath:            TrafficControl,
+		"/api/v1/edge/other":       TrafficControl,
 		"/api/v1/discovery/report": TrafficDiscovery,
 	}
 	for path, want := range cases {
