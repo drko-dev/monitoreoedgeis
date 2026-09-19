@@ -18,6 +18,7 @@
 | H     | NEXT                  |
 | O     | CODE DONE / INTEGRATED TESTED / MERGED |
 | P     | CODE DONE / INTEGRATED TESTED / MERGED |
+| Q1–Q3 | DOCUMENTATION DONE     |
 | I–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
@@ -352,9 +353,28 @@ mechanism is ready but untested end-to-end against a real tag push).
 
 ## Q — Appliance residencial
 
-- Q1–Q10: hardware mínimo, Raspberry/Orange Pi, mini-PC, imagen preparada,
-  Ethernet+power, zero-touch enrollment, discovery, QR/código, factory reset,
-  UX no técnica.
+**HITO Q (Q1–Q3) — DOCUMENTATION DONE** (branch
+`feature/appliance-q-hardware`). Requisitos de hardware residencial
+definidos a partir de código y mediciones reales existentes — ver
+`docs/deployment/hardware.md`. Sin código nuevo: la identificación de
+hardware (CPU arch/RAM/disk/temperatura) ya existía (`internal/platform`,
+Hito N) y se reutilizó tal cual.
+
+- Q1. Hardware mínimo. **DONE (documentado)** — matriz de RAM/disk/red por
+  perfil (Cloud/Hybrid gateway vs. Full Edge con YOLO local) en
+  `docs/deployment/hardware.md`. El costo de red del gateway usa el número
+  real medido en `docs/performance/i10-edge-cloud-cost-metrics.md`
+  (~9.12 Mbps peor caso). El costo de inferencia CPU en ARM64/amd64 **no
+  está medido** — no se inventó ningún benchmark; el doc lo marca
+  explícitamente como pendiente.
+- Q2. Raspberry Pi / Orange Pi (ARM64). **DONE (documentado)** — realista
+  para Cloud/Hybrid gateway; Full Edge con YOLO local queda marcado como
+  no verificado (sin medición real de RAM/CPU en esta clase de placa).
+- Q3. Mini-PC (AMD64). **DONE (documentado)** — mismo criterio: cómodo
+  para Cloud/Hybrid gateway, Full Edge sin medición real todavía.
+- Q4–Q10: imagen preparada, Ethernet+power, zero-touch enrollment,
+  discovery, QR/código, factory reset, UX no técnica. **NOT DONE** —
+  fuera de alcance de este cierre.
 
 ## R — Instalación corporativa
 

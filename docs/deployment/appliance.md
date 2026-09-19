@@ -24,6 +24,9 @@ this document does not claim a real installation happened if it didn't.
   tool (on the machine producing the package), to extract a static ffmpeg
   binary by reusing the existing root `Dockerfile`'s `ffmpeg-build` stage —
   see [ffmpeg](#ffmpeg).
+- For sizing residential/small-site hardware (RAM, storage, network,
+  GPU/NPU, ARM64 vs. amd64) see
+  [`docs/deployment/hardware.md`](hardware.md).
 
 ## Layout
 
