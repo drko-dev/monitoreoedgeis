@@ -970,11 +970,20 @@ func runOTAVerifyCmd(args []string) {
 	}
 
 	if *artifactDir != "" {
-		if err := ota.VerifyReleaseDir(*artifactDir, pubKey, curVer); err != nil {
+		meta, err := ota.VerifyReleaseDir(*artifactDir, pubKey, curVer)
+		if err != nil {
+			// Deliberately no "artifact=" line on any failure path: a
+			// caller (IA2's privileged updater) must never see that
+			// token unless every check -- signature, checksum, forward
+			// version, VERSION/ARCH binding -- has fully passed.
 			fmt.Fprintf(os.Stderr, "geocam-edge ota verify: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Println("OK: signature valid, checksum matches, VERSION/ARCH bound to the release descriptor.")
+		// Exactly one line with this "artifact=" prefix, printed only
+		// after full success -- the parseable contract PR #60's
+		// privileged updater consumes.
+		fmt.Printf("artifact=%s\n", meta.ArtifactName)
 		return
 	}
 
@@ -1309,9 +1318,22 @@ Verify a downloaded OTA release (Hito T4), fail-closed, in order:
 -artifact-dir is preferred: it points at a directory produced by this
 appliance's own OTA download (metadata.json + SHA256SUMS + SHA256SUMS.sig +
 the named artifact), and is the exact contract IA2's privileged updater
-reuses unmodified against a root-owned snapshot of that directory. Flag
-mode (-artifact/-sha256sums/-signature) is for ad-hoc verification; step 4
-only runs there when both -version and -arch are given.
+reuses unmodified against a root-owned snapshot of that directory. It
+independently revalidates metadata.json's artifact_name as a safe local
+filename (no path separators, no "..", not a symlink) rather than trusting
+that the original download already did.
+
+On full success in -artifact-dir mode, stdout contains EXACTLY ONE line
+with the prefix "artifact=", naming the verified artifact:
+
+  artifact=geocam-edge-v2.0.0-linux-amd64.tar.gz
+
+That line is the parseable, machine-readable success signal -- it is never
+printed on any failure path, regardless of which check failed.
+
+Flag mode (-artifact/-sha256sums/-signature) is for ad-hoc verification;
+step 4 only runs there when both -version and -arch are given, and it
+never prints an "artifact=" line.
 `
 
 func printOTAVerifyUsage(w io.Writer) { fmt.Fprint(w, otaVerifyUsage) }

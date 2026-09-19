@@ -77,16 +77,18 @@ func newTestApplianceRelease(t *testing.T, arch, version string, capturedHeaders
 // newDownloaderForTest builds a FileDownloader whose httpClient trusts the
 // given test server's TLS certificate, so it can talk to httptest.NewTLSServer
 // without disabling the download path's own security-of-CONTENT checks
-// (signature/checksum/binding). It DOES relax the host-safety check
-// (allowlist + private-IP rejection) to accept the test server's own
-// 127.0.0.1 address -- production wiring (internal/agent) never does this;
-// see TestValidateArtifactURL_* for the host-safety checks exercised
-// against the real, unrelaxed defaults.
+// (signature/checksum/binding). It DOES relax both host-safety checks
+// (official-path restriction on the initial URL, private-IP rejection) to
+// accept the test server's own 127.0.0.1 address -- production wiring
+// (internal/agent) never does this; see TestValidateInitialArtifactURL_*
+// and TestValidateRedirectURL_* for those checks exercised against the
+// real, unrelaxed defaults.
 func newDownloaderForTest(t *testing.T, srv *httptest.Server, dataDir string, pub ed25519.PublicKey, currentVersion, arch string) *FileDownloader {
 	t.Helper()
 	d := NewFileDownloader(dataDir, pub, currentVersion, arch, nil)
-	d.allowedHosts = map[string]bool{"127.0.0.1": true}
+	d.allowedRedirectHosts = map[string]bool{"127.0.0.1": true}
 	d.skipHostSafetyForTest = true
+	d.skipInitialHostCheckForTest = true
 	d.httpClient = srv.Client()
 	d.httpClient.CheckRedirect = d.checkRedirect
 	return d
@@ -286,68 +288,106 @@ func TestFetchAndStage_RejectsPathTraversalReleaseID(t *testing.T) {
 	}
 }
 
-// --- BLOCKER 2: SSRF / arbitrary host ------------------------------------
+// --- BLOCKER 2: SSRF / arbitrary host, and arbitrary repo ----------------
 
-func TestValidateArtifactURL_RejectsNonHTTPS(t *testing.T) {
+func TestValidateInitialArtifactURL_RejectsNonHTTPS(t *testing.T) {
 	d := NewFileDownloader(t.TempDir(), nil, "v1.0.0", "amd64", nil)
-	if err := d.validateArtifactURL("http://github.com/x"); err == nil {
+	u := "http://github.com/" + officialOwnerRepo + "/releases/download/v1.0.0/x.tar.gz"
+	if err := d.validateInitialArtifactURL(u); err == nil {
 		t.Fatal("expected a non-https initial URL to be rejected")
 	}
 }
 
-func TestValidateArtifactURL_RejectsInitialLoopback(t *testing.T) {
+func TestValidateInitialArtifactURL_RejectsLoopback(t *testing.T) {
 	d := NewFileDownloader(t.TempDir(), nil, "v1.0.0", "amd64", nil)
-	if err := d.validateArtifactURL("https://127.0.0.1/x"); err == nil {
-		t.Fatal("expected the INITIAL URL to reject a loopback host (not just redirects)")
+	if err := d.validateInitialArtifactURL("https://127.0.0.1/x"); err == nil {
+		t.Fatal("expected the INITIAL URL to reject a loopback host")
 	}
 }
 
-func TestValidateArtifactURL_RejectsInitialPrivateRFC1918(t *testing.T) {
+func TestValidateInitialArtifactURL_RejectsPrivateRFC1918(t *testing.T) {
 	d := NewFileDownloader(t.TempDir(), nil, "v1.0.0", "amd64", nil)
-	if err := d.validateArtifactURL("https://10.1.2.3/x"); err == nil {
+	if err := d.validateInitialArtifactURL("https://10.1.2.3/x"); err == nil {
 		t.Fatal("expected the INITIAL URL to reject an RFC1918 private host")
 	}
 }
 
-func TestValidateArtifactURL_RejectsDisallowedPublicHost(t *testing.T) {
+// TestValidateInitialArtifactURL_RejectsOtherOwnerRepo is BLOCKER 2's core
+// regression: github.com alone is not enough -- a descriptor pointing at
+// a DIFFERENT owner/repo's release must be rejected even though the host
+// is genuinely github.com.
+func TestValidateInitialArtifactURL_RejectsOtherOwnerRepo(t *testing.T) {
 	d := NewFileDownloader(t.TempDir(), nil, "v1.0.0", "amd64", nil)
-	if err := d.validateArtifactURL("https://evil.example.com/x"); err == nil {
-		t.Fatal("expected a public host outside the GitHub Releases allowlist to be rejected")
+	d.skipHostSafetyForTest = true
+	if err := d.validateInitialArtifactURL("https://github.com/some-other-owner/some-other-repo/releases/download/v1.0.0/x.tar.gz"); err == nil {
+		t.Fatal("expected a different owner/repo's release URL to be rejected")
 	}
 }
 
-// TestValidateArtifactURL_AcceptsOfficialHosts isolates the allowlist
-// decision from a real DNS lookup (skipHostSafetyForTest) so this test
-// stays hermetic/offline -- the private/loopback rejection itself is
-// covered by the tests above using IP-literal hosts, which never reach DNS.
-func TestValidateArtifactURL_AcceptsOfficialHosts(t *testing.T) {
+func TestValidateInitialArtifactURL_RejectsNonReleasePath(t *testing.T) {
 	d := NewFileDownloader(t.TempDir(), nil, "v1.0.0", "amd64", nil)
 	d.skipHostSafetyForTest = true
 	for _, u := range []string{
-		"https://github.com/drko-dev/monitoreoedgeis/releases/download/v1.0.0/x.tar.gz",
-		"https://objects.githubusercontent.com/x",
-		"https://github-releases.githubusercontent.com/x",
+		"https://github.com/" + officialOwnerRepo, // repo root, not a release asset
+		"https://github.com/" + officialOwnerRepo + "/archive/refs/heads/main.zip",
+		"https://github.com/" + officialOwnerRepo + "/issues/1",
 	} {
-		if err := d.validateArtifactURL(u); err != nil {
-			t.Errorf("expected official host in %q to be accepted, got: %v", u, err)
+		if err := d.validateInitialArtifactURL(u); err == nil {
+			t.Errorf("expected non-release-download path %q to be rejected", u)
 		}
 	}
 }
 
-// TestFetchAndStage_RejectsDisallowedInitialHost is BLOCKER 2's exact
-// regression: a release descriptor pointing at a host outside the GitHub
-// Releases allowlist must be rejected on the INITIAL request, not only on
-// a redirect.
-func TestFetchAndStage_RejectsDisallowedInitialHost(t *testing.T) {
+// TestValidateInitialArtifactURL_AcceptsOfficialReleasePath isolates the
+// host/path decision from a real DNS lookup (skipHostSafetyForTest) so
+// this test stays hermetic/offline.
+func TestValidateInitialArtifactURL_AcceptsOfficialReleasePath(t *testing.T) {
 	d := NewFileDownloader(t.TempDir(), nil, "v1.0.0", "amd64", nil)
-	release := &transport.OTARelease{
-		ReleaseID: "rel-1", Version: "v2.0.0", Architecture: "amd64",
-		ArtifactURL:   "https://evil.example.com/artifact.tar.gz",
-		SHA256SUMSURL: "https://evil.example.com/SHA256SUMS",
-		SignatureURL:  "https://evil.example.com/SHA256SUMS.sig",
+	d.skipHostSafetyForTest = true
+	u := "https://github.com/" + officialOwnerRepo + "/releases/download/v1.0.0/geocam-edge-v1.0.0-linux-amd64.tar.gz"
+	if err := d.validateInitialArtifactURL(u); err != nil {
+		t.Fatalf("expected the official release-download path to be accepted, got: %v", err)
 	}
-	if err := d.FetchAndStage(context.Background(), release); err == nil {
-		t.Fatal("expected a non-allowlisted initial artifact host to be rejected")
+}
+
+// TestFetchAndStage_RejectsDisallowedInitialHost is BLOCKER 2's exact
+// regression at the FetchAndStage level: a release descriptor pointing
+// outside the official release path must be rejected on the INITIAL
+// request, not only on a redirect.
+func TestFetchAndStage_RejectsDisallowedInitialHost(t *testing.T) {
+	for name, release := range map[string]*transport.OTARelease{
+		"different host": {
+			ReleaseID: "rel-1", Version: "v2.0.0", Architecture: "amd64",
+			ArtifactURL:   "https://evil.example.com/artifact.tar.gz",
+			SHA256SUMSURL: "https://evil.example.com/SHA256SUMS",
+			SignatureURL:  "https://evil.example.com/SHA256SUMS.sig",
+		},
+		"different owner/repo on github.com": {
+			ReleaseID: "rel-2", Version: "v2.0.0", Architecture: "amd64",
+			ArtifactURL:   "https://github.com/some-other-owner/some-other-repo/releases/download/v2.0.0/artifact.tar.gz",
+			SHA256SUMSURL: "https://github.com/some-other-owner/some-other-repo/releases/download/v2.0.0/SHA256SUMS",
+			SignatureURL:  "https://github.com/some-other-owner/some-other-repo/releases/download/v2.0.0/SHA256SUMS.sig",
+		},
+	} {
+		d := NewFileDownloader(t.TempDir(), nil, "v1.0.0", "amd64", nil)
+		if err := d.FetchAndStage(context.Background(), release); err == nil {
+			t.Errorf("%s: expected the initial artifact host/path to be rejected", name)
+		}
+	}
+}
+
+func TestValidateRedirectURL_AcceptsOfficialCDNHost(t *testing.T) {
+	d := NewFileDownloader(t.TempDir(), nil, "v1.0.0", "amd64", nil)
+	d.skipHostSafetyForTest = true
+	if err := d.validateRedirectURL("https://objects.githubusercontent.com/x"); err != nil {
+		t.Fatalf("expected the official release-asset CDN redirect host to be accepted, got: %v", err)
+	}
+}
+
+func TestValidateRedirectURL_RejectsDisallowedHost(t *testing.T) {
+	d := NewFileDownloader(t.TempDir(), nil, "v1.0.0", "amd64", nil)
+	if err := d.validateRedirectURL("https://evil.example.com/x"); err == nil {
+		t.Fatal("expected a redirect host outside the CDN allowlist to be rejected")
 	}
 }
 
@@ -365,7 +405,7 @@ func TestCheckRedirect_RejectsPrivateTarget(t *testing.T) {
 func TestCheckRedirect_RejectsTooManyHops(t *testing.T) {
 	d := NewFileDownloader(t.TempDir(), nil, "v1.0.0", "amd64", nil)
 	d.skipHostSafetyForTest = true
-	req, err := http.NewRequest(http.MethodGet, "https://github.com/x", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://objects.githubusercontent.com/x", nil)
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -214,8 +215,75 @@ func TestVerifyReleaseDir_MultiArchManifestSingleStagedArtifact(t *testing.T) {
 		t.Fatalf("write metadata: %v", err)
 	}
 
-	if err := VerifyReleaseDir(dir, pub, "v1.0.0"); err != nil {
+	gotMeta, err := VerifyReleaseDir(dir, pub, "v1.0.0")
+	if err != nil {
 		t.Fatalf("VerifyReleaseDir: %v", err)
+	}
+	if gotMeta.ArtifactName != amd64Name {
+		t.Errorf("VerifyReleaseDir returned artifact_name %q, want %q", gotMeta.ArtifactName, amd64Name)
+	}
+}
+
+// --- BLOCKER 1: --artifact-dir independently revalidates artifact_name --
+
+func TestSafeArtifactPathInDir_RejectsTraversalAndInvalidForms(t *testing.T) {
+	dir := t.TempDir()
+	bad := []string{
+		"", "../outside.tar.gz", "..", "a/b.tar.gz", `a\b.tar.gz`,
+		"../../etc/passwd", "not-a-tarball.txt", strings.Repeat("a", 130) + ".tar.gz",
+	}
+	for _, name := range bad {
+		if _, err := safeArtifactPathInDir(dir, name); err == nil {
+			t.Errorf("safeArtifactPathInDir(%q) = nil, want error", name)
+		}
+	}
+}
+
+func TestSafeArtifactPathInDir_RejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "real.tar.gz")
+	if err := os.WriteFile(outside, []byte("bytes"), 0o644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	link := filepath.Join(dir, "artifact.tar.gz")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink not supported in this environment: %v", err)
+	}
+
+	if _, err := safeArtifactPathInDir(dir, "artifact.tar.gz"); err == nil {
+		t.Fatal("expected a symlinked artifact_name to be rejected")
+	}
+}
+
+// TestVerifyReleaseDir_RejectsMaliciousArtifactNameInMetadata is BLOCKER
+// 1's exact regression: --artifact-dir must independently revalidate
+// metadata.json's artifact_name, never simply trust that whatever staged
+// it already validated the name.
+func TestVerifyReleaseDir_RejectsMaliciousArtifactNameInMetadata(t *testing.T) {
+	dir := t.TempDir()
+	sentinel := filepath.Join(filepath.Dir(dir), "sentinel-outside.tar.gz")
+	if err := os.WriteFile(sentinel, []byte("sensitive"), 0o600); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+	defer os.Remove(sentinel)
+
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS"), []byte("deadbeef  x\n"), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS.sig"), []byte("sig"), 0o644); err != nil {
+		t.Fatalf("write signature: %v", err)
+	}
+	meta := ReleaseMetadata{
+		ReleaseID: "rel-evil", Version: "v2.0.0", Architecture: "amd64",
+		ArtifactName: "../sentinel-outside.tar.gz", StagedAt: time.Now().UTC(),
+	}
+	if err := writeJSONAtomic(filepath.Join(dir, "metadata.json"), meta); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	pub, _, _ := ed25519.GenerateKey(nil)
+	if _, err := VerifyReleaseDir(dir, pub, "v1.0.0"); err == nil {
+		t.Fatal("expected a path-traversal artifact_name in metadata.json to be rejected")
 	}
 }
 

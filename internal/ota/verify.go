@@ -264,34 +264,69 @@ func VerifyReleaseFiles(artifactPath string, manifest, sig []byte, pubKey ed2551
 	return nil
 }
 
+// safeArtifactPathInDir independently revalidates artifactName (from
+// metadata.json) as a safe local basename before resolving it against dir
+// -- --artifact-dir is a root-owned re-verification boundary (IA2's
+// privileged updater, or an operator re-running this CLI) and must never
+// simply trust that FileDownloader already validated this name when it
+// was first staged. Rejects anything but a bare, closed-alphabet .tar.gz
+// filename (validateArtifactName), confirms the resolved path's parent is
+// exactly dir (belt and suspenders on top of that pattern), and refuses a
+// symlink -- an attacker who can write into a staging/snapshot directory
+// must not be able to redirect "the artifact" anywhere else on disk.
+func safeArtifactPathInDir(dir, artifactName string) (string, error) {
+	if err := validateArtifactName(artifactName); err != nil {
+		return "", fmt.Errorf("ota: metadata.json artifact_name: %w", err)
+	}
+	cleanDir := filepath.Clean(dir)
+	path := filepath.Join(cleanDir, artifactName)
+	if filepath.Dir(path) != cleanDir {
+		return "", fmt.Errorf("ota: metadata.json artifact_name %q does not resolve inside %q", artifactName, dir)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", fmt.Errorf("ota: artifact %q named in metadata.json not found: %w", artifactName, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("ota: artifact %q must not be a symlink", artifactName)
+	}
+	return path, nil
+}
+
 // VerifyReleaseDir runs VerifyReleaseFiles against a staged release
 // directory (DataDir/ota/pending/<release-id>/, or a root-owned snapshot
 // of one) using its metadata.json for the release's identity -- the
 // `--artifact-dir` contract shared between this appliance's own
 // FetchAndStage, the `geocam-edge ota verify --artifact-dir` CLI, and
 // IA2's privileged updater. The directory must contain metadata.json,
-// SHA256SUMS, SHA256SUMS.sig, and the file named by
-// metadata.json's artifact_name.
-func VerifyReleaseDir(dir string, pubKey ed25519.PublicKey, currentVersion string) error {
+// SHA256SUMS, SHA256SUMS.sig, and the file named by metadata.json's
+// artifact_name (independently revalidated here -- see
+// safeArtifactPathInDir).
+//
+// Returns the loaded ReleaseMetadata only on full success; a caller must
+// never surface meta.ArtifactName (e.g. as the `artifact=` line printed by
+// `geocam-edge ota verify`) when the returned error is non-nil.
+func VerifyReleaseDir(dir string, pubKey ed25519.PublicKey, currentVersion string) (ReleaseMetadata, error) {
 	meta, err := LoadReleaseMetadata(dir)
 	if err != nil {
-		return err
+		return ReleaseMetadata{}, err
 	}
-	manifestPath := filepath.Join(dir, "SHA256SUMS")
-	sigPath := filepath.Join(dir, "SHA256SUMS.sig")
-	artifactPath := filepath.Join(dir, meta.ArtifactName)
-
-	manifest, err := os.ReadFile(manifestPath)
+	artifactPath, err := safeArtifactPathInDir(dir, meta.ArtifactName)
 	if err != nil {
-		return fmt.Errorf("ota: read SHA256SUMS: %w", err)
-	}
-	sig, err := os.ReadFile(sigPath)
-	if err != nil {
-		return fmt.Errorf("ota: read SHA256SUMS.sig: %w", err)
-	}
-	if _, err := os.Stat(artifactPath); err != nil {
-		return fmt.Errorf("ota: artifact %q named in metadata.json not found: %w", meta.ArtifactName, err)
+		return ReleaseMetadata{}, err
 	}
 
-	return VerifyReleaseFiles(artifactPath, manifest, sig, pubKey, meta.ArtifactName, currentVersion, meta.Version, meta.Architecture)
+	manifest, err := os.ReadFile(filepath.Join(dir, "SHA256SUMS"))
+	if err != nil {
+		return ReleaseMetadata{}, fmt.Errorf("ota: read SHA256SUMS: %w", err)
+	}
+	sig, err := os.ReadFile(filepath.Join(dir, "SHA256SUMS.sig"))
+	if err != nil {
+		return ReleaseMetadata{}, fmt.Errorf("ota: read SHA256SUMS.sig: %w", err)
+	}
+
+	if err := VerifyReleaseFiles(artifactPath, manifest, sig, pubKey, meta.ArtifactName, currentVersion, meta.Version, meta.Architecture); err != nil {
+		return ReleaseMetadata{}, err
+	}
+	return meta, nil
 }

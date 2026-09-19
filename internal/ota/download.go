@@ -31,12 +31,23 @@ type Downloader interface {
 	FetchAndStage(ctx context.Context, release *transport.OTARelease) error
 }
 
-// defaultAllowedArtifactHosts are the only hosts FileDownloader will ever
-// contact for artifact bytes: github.com itself (the SaaS-issued initial
-// URL) and GitHub's release-asset redirect targets. This is deliberately
-// NOT a general arbitrary-HTTPS downloader.
-var defaultAllowedArtifactHosts = map[string]bool{
-	"github.com":                            true,
+// officialOwnerRepo is the only GitHub repo this downloader will ever
+// treat as an OTA artifact source.
+const officialOwnerRepo = "drko-dev/monitoreoedgeis"
+
+// officialReleasePathPrefix is the path every INITIAL (SaaS-issued)
+// artifact/SHA256SUMS/signature URL must start with: github.com alone is
+// not enough -- an attacker-controlled SaaS response pointing at
+// `https://github.com/some-other-owner/some-other-repo/...` must be
+// rejected even though the host is genuinely github.com.
+const officialReleasePathPrefix = "/" + officialOwnerRepo + "/releases/download/"
+
+// defaultAllowedRedirectHosts are the only hosts a redirect FROM the
+// initial github.com release-download URL may point to: GitHub's own
+// release-asset CDN. The initial URL itself is checked separately and
+// more strictly (see validateInitialArtifactURL) -- this allowlist exists
+// only for what a legitimate github.com redirect chain actually needs.
+var defaultAllowedRedirectHosts = map[string]bool{
 	"objects.githubusercontent.com":         true,
 	"github-releases.githubusercontent.com": true,
 	"release-assets.githubusercontent.com":  true,
@@ -49,12 +60,14 @@ var defaultAllowedArtifactHosts = map[string]bool{
 // # Security
 //
 // httpClient here is entirely separate from the Edge<->SaaS
-// transport.Client: it never sets Authorization or X-Device-Id. Every
-// request -- the initial, SaaS-issued URL AND every redirect target --
-// goes through validateArtifactURL: HTTPS only, host must be on the
-// GitHub-Releases allowlist, and the resolved address must not be
-// private/loopback/link-local/unspecified. A redirect off the allowlist,
-// or to a private network, is refused before it is ever followed.
+// transport.Client: it never sets Authorization or X-Device-Id. The
+// initial artifact/SHA256SUMS/signature URLs must be HTTPS and this
+// repo's own official GitHub Releases download path (see
+// validateInitialArtifactURL); every subsequent redirect target must be
+// HTTPS and on the GitHub release-asset CDN allowlist (see
+// validateRedirectURL). Both checks also reject a resolved address that
+// is private/loopback/link-local/unspecified. This is deliberately NOT a
+// general arbitrary-HTTPS downloader.
 type FileDownloader struct {
 	dataDir      string
 	architecture string
@@ -63,13 +76,19 @@ type FileDownloader struct {
 	logger       *slog.Logger
 	httpClient   *http.Client
 
-	allowedHosts map[string]bool
+	allowedRedirectHosts map[string]bool
 	// skipHostSafetyForTest disables the private/loopback-address
-	// rejection in validateArtifactURL. Set ONLY by this package's own
-	// tests (which must talk to an httptest server bound to 127.0.0.1);
-	// production wiring (internal/agent) never touches this field, so it
-	// is always false outside internal/ota's test binary.
+	// rejection in validateInitialArtifactURL/validateRedirectURL. Set
+	// ONLY by this package's own tests (which must talk to an httptest
+	// server bound to 127.0.0.1); production wiring (internal/agent)
+	// never touches this field.
 	skipHostSafetyForTest bool
+	// skipInitialHostCheckForTest disables the "must be github.com on
+	// this repo's own release path" restriction on the INITIAL URL,
+	// falling back to an HTTPS-only check. Set ONLY by this package's own
+	// tests (an httptest server cannot be github.com); production wiring
+	// never touches this field.
+	skipInitialHostCheckForTest bool
 }
 
 // NewFileDownloader builds a FileDownloader. pubKey is the Ed25519 public
@@ -81,12 +100,12 @@ func NewFileDownloader(dataDir string, pubKey ed25519.PublicKey, currentVersion,
 		logger = slog.Default()
 	}
 	d := &FileDownloader{
-		dataDir:      dataDir,
-		architecture: architecture,
-		version:      currentVersion,
-		pubKey:       pubKey,
-		logger:       logger,
-		allowedHosts: defaultAllowedArtifactHosts,
+		dataDir:              dataDir,
+		architecture:         architecture,
+		version:              currentVersion,
+		pubKey:               pubKey,
+		logger:               logger,
+		allowedRedirectHosts: defaultAllowedRedirectHosts,
 	}
 	d.httpClient = &http.Client{
 		Timeout:       artifactHTTPTimeout,
@@ -95,37 +114,17 @@ func NewFileDownloader(dataDir string, pubKey ed25519.PublicKey, currentVersion,
 	return d
 }
 
-// checkRedirect is http.Client.CheckRedirect: a redirect target is
-// controlled by whatever server answered the previous request, so it gets
-// exactly the same validation as the initial request -- see
-// validateArtifactURL.
+// checkRedirect is http.Client.CheckRedirect.
 func (d *FileDownloader) checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 5 {
 		return errors.New("ota: too many redirects")
 	}
-	return d.validateArtifactURL(req.URL.String())
+	return d.validateRedirectURL(req.URL.String())
 }
 
-// validateArtifactURL enforces HTTPS, restricts the host to the GitHub
-// Releases allowlist, and (unless skipHostSafetyForTest) rejects any host
-// that resolves to a private, loopback, link-local or unspecified
-// address. Applied to BOTH the initial artifact/SHA256SUMS/signature URLs
-// and every redirect target -- defense in depth, not redirect-only.
-func (d *FileDownloader) validateArtifactURL(raw string) error {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return fmt.Errorf("ota: invalid artifact URL: %w", err)
-	}
-	if u.Scheme != "https" {
-		return fmt.Errorf("ota: artifact URL must use https, got %q", u.Scheme)
-	}
-	host := u.Hostname()
-	if host == "" {
-		return errors.New("ota: artifact URL has no host")
-	}
-	if !d.allowedHosts[strings.ToLower(host)] {
-		return fmt.Errorf("ota: artifact host %q is not an allowed GitHub Releases host, rejected", host)
-	}
+// checkHostSafety rejects a host that resolves to a private, loopback,
+// link-local or unspecified address, unless skipHostSafetyForTest is set.
+func (d *FileDownloader) checkHostSafety(host string) error {
 	if d.skipHostSafetyForTest {
 		return nil
 	}
@@ -139,6 +138,56 @@ func (d *FileDownloader) validateArtifactURL(raw string) error {
 		}
 	}
 	return nil
+}
+
+// validateInitialArtifactURL enforces HTTPS and requires the URL to be
+// this repo's own official GitHub Releases download path
+// (https://github.com/drko-dev/monitoreoedgeis/releases/download/<tag>/<asset>)
+// -- not merely "any github.com URL", let alone any HTTPS URL. Applied to
+// all three SaaS-issued URLs (artifact_url/sha256sums_url/signature_url)
+// before a single byte is requested from any of them.
+func (d *FileDownloader) validateInitialArtifactURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("ota: invalid artifact URL: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("ota: artifact URL must use https, got %q", u.Scheme)
+	}
+	if d.skipInitialHostCheckForTest {
+		return nil
+	}
+	host := strings.ToLower(u.Hostname())
+	if host != "github.com" {
+		return fmt.Errorf("ota: initial artifact URL host %q must be github.com", u.Hostname())
+	}
+	if !strings.HasPrefix(u.Path, officialReleasePathPrefix) {
+		return fmt.Errorf("ota: initial artifact URL path %q is not an official %s release-download path", u.Path, officialOwnerRepo)
+	}
+	return d.checkHostSafety(host)
+}
+
+// validateRedirectURL enforces HTTPS, restricts the host to the GitHub
+// release-asset CDN allowlist, and rejects a resolved
+// private/loopback/link-local/unspecified address. Applied to every
+// redirect target -- a redirect is controlled by whatever server answered
+// the previous request, unlike the initial URL.
+func (d *FileDownloader) validateRedirectURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("ota: invalid redirect URL: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("ota: redirect URL must use https, got %q", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("ota: redirect URL has no host")
+	}
+	if !d.allowedRedirectHosts[strings.ToLower(host)] {
+		return fmt.Errorf("ota: redirect host %q is not an allowed GitHub release-asset host, rejected", host)
+	}
+	return d.checkHostSafety(host)
 }
 
 func isPrivateOrLocal(ip net.IP) bool {
@@ -313,7 +362,7 @@ func (d *FileDownloader) FetchAndStage(ctx context.Context, release *transport.O
 	// fallback -- run here exactly as `geocam-edge ota verify
 	// --artifact-dir` and IA2's privileged updater run it against a
 	// staged/snapshotted copy of this same directory.
-	if err := VerifyReleaseDir(scratch, d.pubKey, d.version); err != nil {
+	if _, err := VerifyReleaseDir(scratch, d.pubKey, d.version); err != nil {
 		return err
 	}
 
@@ -357,7 +406,7 @@ func (d *FileDownloader) writeApplyRequest(releaseID string) error {
 // download GETs rawURL with NO Edge credentials and writes the body to
 // dest.
 func (d *FileDownloader) download(ctx context.Context, rawURL, dest string) error {
-	if err := d.validateArtifactURL(rawURL); err != nil {
+	if err := d.validateInitialArtifactURL(rawURL); err != nil {
 		return err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)

@@ -61,15 +61,23 @@ queued.
 
 `FileDownloader` uses a completely separate `http.Client` from the
 Edge↔SaaS `transport.Client` — it never sets `Authorization` or
-`X-Device-Id`. `validateArtifactURL` applies the SAME full guard to the
-**initial** SaaS-issued URL and to every redirect target: HTTPS only, host
-must be on a fixed GitHub Releases allowlist (`github.com`,
-`objects.githubusercontent.com` and the other GitHub release-asset CDN
-hostnames), and the resolved address must not be
-private/loopback/link-local/unspecified. This is not a general
-arbitrary-HTTPS downloader — a host outside that allowlist is rejected
-before a single byte is requested, on the initial request just as much as
-on a redirect.
+`X-Device-Id`. Two distinct, stricter-on-the-initial-request checks:
+
+- `validateInitialArtifactURL` — applied to the three SaaS-issued URLs
+  (`artifact_url`/`sha256sums_url`/`signature_url`) before a single byte is
+  requested from any of them. HTTPS required, and the host+path must be
+  `github.com` on **this repo's own** release-download path:
+  `https://github.com/drko-dev/monitoreoedgeis/releases/download/<tag>/<asset>`.
+  `github.com` alone is not enough — `https://github.com/some-other-owner/
+  some-other-repo/...` is rejected even though the host is genuinely
+  github.com.
+- `validateRedirectURL` — applied to every redirect target. HTTPS
+  required, host must be on the GitHub release-asset CDN allowlist
+  (`objects.githubusercontent.com` and siblings) — this is where a real
+  GitHub Releases download actually ends up.
+
+Both additionally reject a resolved private/loopback/link-local/
+unspecified address. This is not a general arbitrary-HTTPS downloader.
 
 `release_id` (from the SaaS-authenticated release descriptor) is validated
 against a closed character class (`[A-Za-z0-9._-]`, ≤64 chars, must
@@ -123,11 +131,29 @@ preferred, canonical contract: it reads `metadata.json` (`release_id`,
 `version`, `architecture`, `artifact_name`) plus `SHA256SUMS`,
 `SHA256SUMS.sig` and the named artifact from that one directory, and runs
 `ota.VerifyReleaseDir` — the exact function `FetchAndStage` itself calls.
-IA2's privileged updater copies a pending-release directory to a
-root-owned snapshot and re-runs this unmodified before activating
-anything. A `-artifact`/`-sha256sums`/`-signature` flag mode also exists
-for ad-hoc verification of individual files; the VERSION/ARCH binding step
-only runs there when both `-version` and `-arch` are given.
+`VerifyReleaseDir` independently revalidates `metadata.json`'s
+`artifact_name` as a safe local filename (closed `.tar.gz` pattern, no
+path separators, no `..`, resolved path stays inside the directory, not a
+symlink) — it never simply trusts that the original download already
+validated it, since `--artifact-dir` is itself a re-verification boundary
+(a root-owned snapshot, or an operator-supplied directory).
+
+On full success, stdout contains **exactly one** line with the prefix
+`artifact=`, naming the verified artifact — the parseable, machine-
+readable contract IA2's privileged updater consumes:
+
+```
+artifact=geocam-edge-v2.0.0-linux-amd64.tar.gz
+```
+
+That line is never printed on any failure path, regardless of which check
+failed (signature, checksum, forward version, VERSION/ARCH binding, or the
+`artifact_name` safety check itself).
+
+A `-artifact`/`-sha256sums`/`-signature` flag mode also exists for ad-hoc
+verification of individual files; it never prints an `artifact=` line, and
+the VERSION/ARCH binding step only runs there when both `-version` and
+`-arch` are given.
 
 ## Release pipeline
 
