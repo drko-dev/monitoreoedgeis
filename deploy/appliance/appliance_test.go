@@ -604,3 +604,147 @@ func TestSystemdUnitTemplateStructure(t *testing.T) {
 		t.Error("[Service] section must come before [Install]")
 	}
 }
+
+// TestUpdateReadinessFailureRollsBackAndPreservesData exercises the real
+// update.sh readiness-failure path without touching the host. It points every
+// appliance path at a temporary directory and injects fake privileged/system
+// commands through PATH. The first readiness probe fails, forcing update.sh to
+// invoke rollback.sh; the rollback readiness probe then succeeds.
+func TestUpdateReadinessFailureRollsBackAndPreservesData(t *testing.T) {
+	requireBash(t)
+
+	root := t.TempDir()
+	prefix := filepath.Join(root, "opt", "geocam-edge")
+	configDir := filepath.Join(root, "etc", "geocam-edge")
+	dataDir := filepath.Join(root, "var", "lib", "geocam-edge")
+	systemdDir := filepath.Join(root, "etc", "systemd", "system")
+	fakeBinDir := filepath.Join(root, "fake-bin")
+	if err := os.MkdirAll(fakeBinDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeFakeCommand := func(name, body string) {
+		t.Helper()
+		path := filepath.Join(fakeBinDir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+			t.Fatalf("writing fake %s: %v", name, err)
+		}
+	}
+
+	writeFakeCommand("uname", `case "$1" in
+  -s) echo Linux ;;
+  -m) echo x86_64 ;;
+  *) echo Linux ;;
+esac`)
+	writeFakeCommand("getent", "exit 0")
+	writeFakeCommand("chown", "exit 0")
+	writeFakeCommand("systemctl", "exit 0")
+
+	curlState := filepath.Join(root, "curl-count")
+	writeFakeCommand("curl", `state="${GEOCAM_TEST_CURL_STATE:?}"
+n=0
+[ -f "$state" ] && n="$(cat "$state")"
+n=$((n + 1))
+printf '%s\n' "$n" > "$state"
+[ "$n" -ge 2 ]`)
+
+	baseEnv := []string{
+		"PATH=" + fakeBinDir + ":" + os.Getenv("PATH"),
+		"GEOCAM_INSTALL_ROOT=",
+		"GEOCAM_PREFIX=" + prefix,
+		"GEOCAM_CONFIG_DIR=" + configDir,
+		"GEOCAM_DATA_DIR=" + dataDir,
+		"GEOCAM_SYSTEMD_DIR=" + systemdDir,
+		"GEOCAM_TEST_BINARY_ARCH=amd64",
+		"GEOCAM_WAIT_READY_ATTEMPTS=1",
+		"GEOCAM_WAIT_READY_INTERVAL=0",
+		"GEOCAM_TEST_CURL_STATE=" + curlState,
+	}
+
+	runRealTargetScript := func(name string, extraEnv []string, args ...string) (string, error) {
+		t.Helper()
+		cmd := exec.Command("bash", append([]string{filepath.Join(scriptsDir(t), name)}, args...)...)
+		env := make([]string, 0, len(os.Environ())+len(baseEnv)+len(extraEnv))
+		for _, kv := range os.Environ() {
+			switch {
+			case strings.HasPrefix(kv, "PATH="),
+				strings.HasPrefix(kv, "GEOCAM_INSTALL_ROOT="),
+				strings.HasPrefix(kv, "GEOCAM_PREFIX="),
+				strings.HasPrefix(kv, "GEOCAM_CONFIG_DIR="),
+				strings.HasPrefix(kv, "GEOCAM_DATA_DIR="),
+				strings.HasPrefix(kv, "GEOCAM_SYSTEMD_DIR="),
+				strings.HasPrefix(kv, "GEOCAM_TEST_BINARY_ARCH="),
+				strings.HasPrefix(kv, "GEOCAM_WAIT_READY_ATTEMPTS="),
+				strings.HasPrefix(kv, "GEOCAM_WAIT_READY_INTERVAL="),
+				strings.HasPrefix(kv, "GEOCAM_TEST_CURL_STATE="):
+				continue
+			}
+			env = append(env, kv)
+		}
+		env = append(env, baseEnv...)
+		env = append(env, extraEnv...)
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	// Install v1 on the isolated fake real-Linux target.
+	bin := fakeBinary(t, t.TempDir(), "geocam-edge")
+	if out, err := runRealTargetScript("install.sh", []string{"GEOCAM_VERSION=1.0.0"}, bin); err != nil {
+		t.Fatalf("install v1 failed: %v\n%s", err, out)
+	}
+
+	identityPath := filepath.Join(dataDir, "identity.json")
+	credentialsPath := filepath.Join(dataDir, "credentials.json")
+	bufferDir := filepath.Join(dataDir, "cloud_buffer")
+	bufferPath := filepath.Join(bufferDir, "frame.bin")
+	if err := os.MkdirAll(bufferDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(identityPath, []byte(`{"edge_id":"persist-me"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(credentialsPath, []byte(`{"credential":"persist-me-too"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bufferPath, []byte("offline-frame"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	artifact := buildArtifact(t, t.TempDir(), "2.0.0", "amd64")
+
+	// v2 activation reaches readiness, fails there, and must auto-rollback.
+	out, err := runRealTargetScript("update.sh", nil, artifact)
+	if err == nil {
+		t.Fatalf("update v2 should fail readiness and rollback; output:\n%s", out)
+	}
+	if !strings.Contains(out, "rolled back") {
+		t.Fatalf("update output does not show automatic rollback:\n%s", out)
+	}
+
+	target, err := os.Readlink(filepath.Join(prefix, "current"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != "releases/1.0.0" {
+		t.Fatalf("after failed v2 readiness, current -> %q, want releases/1.0.0", target)
+	}
+	if _, err := os.Stat(filepath.Join(prefix, "releases", "1.0.0", "geocam-edge")); err != nil {
+		t.Fatalf("v1 release missing after automatic rollback: %v", err)
+	}
+
+	for path, want := range map[string]string{
+		identityPath:    `{"edge_id":"persist-me"}`,
+		credentialsPath: `{"credential":"persist-me-too"}`,
+		bufferPath:      "offline-frame",
+	} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading preserved %s: %v", path, err)
+		}
+		if string(got) != want {
+			t.Fatalf("persistent data changed at %s: got %q want %q", path, got, want)
+		}
+	}
+}
+
