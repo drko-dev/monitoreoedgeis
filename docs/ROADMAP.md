@@ -18,7 +18,7 @@
 | H     | NEXT                  |
 | O     | CODE DONE / INTEGRATED TESTED / MERGED |
 | P     | CODE DONE / INTEGRATED TESTED / MERGED |
-| Q1–Q10| CODE DONE / INTEGRATED TESTED / MERGED (SaaS prod: NOT DEPLOYED, SSH blocker; Edge prod: N/A) |
+| Q1–Q10| CODE DONE / INTEGRATED TESTED / MERGED / SAAS PROD DEPLOYED (Edge prod: N/A) |
 | I–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
@@ -353,18 +353,26 @@ mechanism is ready but untested end-to-end against a real tag push).
 
 ## Q — Appliance residencial
 
-**HITO Q (Q1–Q10) — CODE DONE / INTEGRATED TESTED / MERGED** (PR #47
-mergeado a `main` @ `25a7d8ea27a082b957c19a7fbf691b063014bdff`, integra
-#44/#45/#46; `monitoreoia` PR #121 mergeado a su `main` @
+**HITO Q (Q1–Q10) — CODE DONE / INTEGRATED TESTED / MERGED / SAAS PROD
+DEPLOYED** (PR #47 mergeado a `main` @
+`25a7d8ea27a082b957c19a7fbf691b063014bdff`, integra #44/#45/#46;
+`monitoreoia` PR #121 mergeado a su `main` @
 `66a5bec920f23a09dc28531db44274ad1c97df21`, integra #120 para Q8).
-**SAAS PROD: NOT DEPLOYED en este cierre** — deploy productivo autorizado
-pero bloqueado por falta de credencial SSH funcional hacia el host
-documentado (`vps-6387636-x.dattaweb.com`) en este entorno de trabajo; no
-es una limitación del código ni de la integración. **EDGE PROD: N/A**
-— no existe un target Edge/appliance/VM productivo real documentado
-distinto del VPS SaaS. Arquitectura y evidencia de red documentadas a
-partir de código y mediciones reales existentes — ver
-`docs/deployment/hardware.md`. Ningún hardware físico fue validado en
+**SAAS PROD: DEPLOYED** — `monitoreoia` main `66a5bec9` construido con
+Buildah (`geocam-cloud:66a5bec`, `geocam-cloud-worker:66a5bec`),
+importado a containerd e instalado vía `helm upgrade` (release `geocam`,
+namespace `geocam`, revisión 31) en `vps-6387636-x.dattaweb.com`. Este
+rollout también deja en producción las migraciones 038/039 de Hito O,
+pendientes desde su propio merge. Verificado post-deploy: pods
+`geocam-app`/`geocam-worker` `1/1 Running` con la imagen `66a5bec`,
+`schema_migrations` con 038/039 aplicadas, `/api/health` `200`,
+`/api/ready` `200`, `/login` `200`, `/dispositivos-edge` `303`
+(redirect a login sin sesión, no 500), `/api/v1/gateway/enrollments`
+`401` (auth requerida, no 500). **EDGE PROD: N/A** — no existe un target
+Edge/appliance/VM productivo real documentado distinto del VPS SaaS.
+Arquitectura y evidencia de red documentadas a partir de código y
+mediciones reales existentes — ver `docs/deployment/hardware.md`.
+Ningún hardware físico fue validado en
 este cierre; cada punto marca explícitamente qué sigue pendiente de
 hardware real.
 
