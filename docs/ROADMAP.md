@@ -444,14 +444,18 @@ hardware real.
   never on the Edge appliance or cameras. Edge daemon requires no VPN keys, certs,
   tunnels, or cryptographic agents; it consumes standard routed IP connectivity.
   Documented with architecture and port flows in `docs/deployment/corporate-networking.md`.
-- R5. Subnet routing. **DONE (ROUTED ACCESS SUPPORTED / DISCOVERY LIMITATION DOCUMENTED)** —
+- R5. Subnet routing. **DONE (ROUTED RTSP TRANSPORT SUPPORTED / PROVISIONING GAP DOCUMENTED)** —
   RTSP unicast streaming (TCP 554) and ONVIF device management (HTTP/SOAP unicast)
-  natively cross routed L3 boundaries and private subnets (RFC 1918). Unicast
-  camera targets (manual or Remote Config candidates) work across subnets.
-  **Limitation explicitly documented**: ONVIF WS-Discovery uses UDP multicast
-  (239.255.255.250:3702, TTL=1) and is structurally restricted to the local L2
-  broadcast domain; it does not cross IP routers without specialized network
-  proxies.
+  natively cross routed L3 boundaries and private subnets (RFC 1918) via standard TCP/IP.
+  `ROUTED RTSP TRANSPORT CAPABILITY: SUPPORTED`.
+  **Gaps explicitly documented**:
+  `CROSS-SUBNET TARGET PROVISIONING / AUTOMATIC DISCOVERY: CURRENT GAP / NOT IMPLEMENTED`.
+  (1) Automatic discovery: ONVIF WS-Discovery uses UDP multicast (`239.255.255.250:3702`)
+      over local network interfaces and does not cross IP routers without external multicast relay.
+  (2) Cross-subnet provisioning: Remote Config (`internal/remoteconfig`) tunes video
+      parameters for known cameras (`candidate_key`), but explicitly blocks injecting new
+      network targets/URLs (`DisallowedKeys`). Automatic provisioning of unannounced
+      cross-subnet cameras is a current gap / not implemented in this milestone.
 - R6. VLANs. **DONE (DOCUMENTED / OS-MANAGED 802.1Q ARCHITECTURE)** — Edge
   daemon does not manage 802.1Q tags or virtual network interfaces. Supports
   either dedicated access ports (switch untagged) or OS-managed trunk subinterfaces

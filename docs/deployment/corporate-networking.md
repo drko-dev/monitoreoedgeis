@@ -24,13 +24,16 @@ discovery), they are called out plainly rather than glossed over.
      customer's infrastructure** (edge firewall, corporate router, gateway, or
      host-level OS network stack).
 
-2. **No Public IP Requirement for Cameras**:
-   - Cameras must **never** be exposed with public IP addresses or port-forwarded
-     through corporate WAN firewalls.
-   - The agent strictly enforces private IPv4 addresses (RFC 1918: `10.0.0.0/8`,
-     `172.16.0.0/12`, `192.168.0.0/16`; RFC 3927: `169.254.0.0/16`) for camera
-     targets. Public IPs are rejected as potential SSRF vectors
-     (see `internal/discovery/security.go`).
+2. **Private IP Enforcement on Discovered ONVIF XAddrs**:
+   - Discovered ONVIF XAddr destinations are restricted to allowed private IPv4
+     ranges (RFC 1918: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`;
+     RFC 3927: `169.254.0.0/16`) by `ValidateXAddr` (`internal/discovery/security.go`).
+   - Public ONVIF XAddr discovered targets, loopback, and cloud metadata endpoints
+     (`169.254.169.254`) are rejected fail-closed to eliminate SSRF vectors.
+   - Note: This enforcement applies specifically to discovered ONVIF XAddr URLs
+     via `ValidateXAddr`; it is not a global packet-filter policy across arbitrary
+     camera targets. In corporate architectures, cameras must reside on private
+     subnets and must not be exposed with public IP addresses.
 
 3. **Standard Outbound Egress**:
    - The Edge connects **outbound-only** to the SaaS control plane over standard
@@ -50,7 +53,7 @@ is routed over an encrypted tunnel terminated at customer gateways:
 │                       (https://saas.geocam.io)                         │
 └───────────────────────────────────▲────────────────────────────────────┘
                                     │ HTTPS (TCP 443 Outbound)
-                                    │ TLS 1.2 / TLS 1.3
+                                    │ TLS (Standard Verification)
      ═══════════════════════════════╪════════════════════════════════════
        Customer Corporate Network   │
      ═══════════════════════════════╪════════════════════════════════════
@@ -111,32 +114,36 @@ Corporate CCTV deployments commonly place IP cameras on a dedicated, isolated su
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│ ROUTED CAMERA ACCESS:             SUPPORTED                            │
-│ CROSS-SUBNET AUTOMATIC DISCOVERY: NOT SUPPORTED (L2 MULTICAST BOUND)  │
+│ ROUTED RTSP TRANSPORT CAPABILITY:                   SUPPORTED          │
+│ CROSS-SUBNET TARGET PROVISIONING / AUTO-DISCOVERY:  CURRENT GAP /      │
+│                                                     NOT IMPLEMENTED    │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-1. **Unicast Camera Access (SUPPORTED)**:
+1. **RTSP TCP Transport Capability (SUPPORTED)**:
    - **RTSP Streaming**: Handled by `internal/rtsp.DialContext(ctx, "tcp", addr)`.
      Standard TCP unicast connects seamlessly across any IP-routed hop (inter-VLAN
-     routing, L3 switch, or VPN).
+     routing, L3 switch, or site-to-site VPN) whenever an IP:port destination is
+     configured.
    - **ONVIF Metadata**: Handled by `internal/discovery/onvif` via standard HTTP/SOAP
      unicast POST requests to the camera's IP and port.
-   - **Configuration**: Routed camera streams are declared explicitly through
-     Remote Config (`CandidateKey` and `Addr`, e.g. `10.100.2.10:554`) or static
-     stream targets.
 
-2. **Automatic WS-Discovery (NOT SUPPORTED ACROSS SUBNETS)**:
-   - WS-Discovery (`internal/discovery/wsdiscovery`) relies on UDP multicast to
-     `239.255.255.250:3702` on local physical interfaces.
-   - Standard IP routers and firewalls **do not route multicast** across subnet
-     boundaries (TTL=1 broadcast domain isolation).
-   - **Gap statement**: If cameras live on a routed subnet where the Edge host has
-     no physical or virtual Layer 2 presence, **automatic discovery will not detect
-     them**.
-   - **Resolution**: Operators must declare camera endpoints explicitly in SaaS
-     remote configuration, or provide the Edge host with an interface in that L2
-     broadcast domain (see VLAN Topology B below).
+2. **Cross-Subnet Provisioning and Auto-Discovery Limitation (CURRENT GAP / NOT IMPLEMENTED)**:
+   - **Automatic WS-Discovery**: Relies on UDP multicast to `239.255.255.250:3702`
+     sent over local network interfaces. Standard IP routers and firewalls do not forward
+     multicast across subnet boundaries without dedicated multicast routing or relay
+     proxies. GEO CAM does not implement multicast routing or relay; automatic discovery
+     is structurally confined to the local L2 broadcast domain.
+   - **Remote Config Boundary**: In the current architecture (`internal/remoteconfig`),
+     Remote Config only tunes processing parameters (`target_fps`, `output_width`,
+     `output_height`, `hybrid_rois`) for known cameras (`candidate_key`). Furthermore,
+     `DisallowedKeys` explicitly forbids injecting network target identifiers (`rtsp_url`,
+     `url`, `path`, etc.).
+   - **Gap statement**: The control plane cannot dynamically provision or announce
+     a previously unknown camera residing in an unattached remote subnet via Remote Config.
+     Cross-subnet target provisioning is not implemented in this milestone.
+   - **Alternative**: To access cameras in other VLANs/subnets, operators can assign
+     the Edge host an interface in that L2 broadcast domain (see VLAN Topology B below).
 
 ---
 
@@ -200,23 +207,28 @@ All VLAN interfaces are provisioned and managed by customer network administrato
 
 ## 5. Port and Protocol Matrix
 
-This table lists **every network port and protocol** actually used by the code.
-No other ports are opened or required.
+This table summarizes the network ports and protocols used by the edge daemon in
+standard deployments. Destination ports for SaaS and camera streams reflect standard
+defaults and may vary based on configuration.
 
 | Purpose | Protocol | Port / Address | Direction | Destination | Encryption | Code Reference |
 |---|---|---|---|---|---|---|
-| **SaaS Control & Telemetry** | HTTPS (TCP) | 443 (or custom SaaS URL port) | Outbound | SaaS Cloud Base URL | TLS 1.2 / 1.3 (Mandatory) | `internal/transport/client.go` |
+| **SaaS Control & Telemetry** | HTTPS (TCP) | 443 (or custom SaaS URL port) | Outbound | SaaS Cloud Base URL | HTTPS / TLS (Standard verification, no InsecureSkipVerify) | `internal/transport/client.go` |
 | **RTSP Camera Video** | RTSP / TCP | 554 (or camera RTSP port) | Outbound | IP Cameras / NVRs | Plaintext / Unencrypted | `internal/rtsp/client.go` |
-| **ONVIF Device Metadata** | HTTP / SOAP | 80, 8000, 8080, 8899 | Outbound | IP Cameras | HTTP (SOAP XML) | `internal/discovery/onvif/soap.go` |
+| **ONVIF Device Metadata** | HTTP / SOAP | Port provided by validated XAddr (default 80 HTTP / 443 HTTPS) | Outbound | IP Cameras | HTTP or HTTPS (SOAP XML) | `internal/discovery/onvif/soap.go`, `internal/discovery/security.go` |
 | **WS-Discovery Probes** | UDP Multicast | `239.255.255.250:3702` | Outbound | Local L2 Broadcast Domain | Plaintext (Multicast) | `internal/discovery/wsdiscovery/multicast.go` |
-| **Local Health & Diagnostics** | HTTP (TCP) | `127.0.0.1:8091` | Loopback | Localhost only | Plaintext (Localhost) | `internal/health/health.go` |
+| **Local Health & Diagnostics** | HTTP (TCP) | `127.0.0.1:8091` (default) | Loopback | Localhost | Plaintext (Localhost) | `internal/health/health.go`, `internal/config/config.go` |
 
 > [!IMPORTANT]
-> **No WAN Inbound Ports**: GEO CAM never listens on WAN interfaces. No port
-> forwarding (DNAT) is ever required.
+> **Local Health Binding**: By default, the health surface binds only to loopback
+> (`127.0.0.1:8091`). Do not expose `GEOCAM_HEALTH_ADDR` externally unless explicitly
+> required and protected by host/network policy.
 >
-> **No VPN Ports**: VPN ports (e.g. UDP 51820 for WireGuard, UDP 500/4500 for IPsec)
-> belong entirely to customer edge routers or host OS tunnels.
+> **Inbound Ports**: In default operation, GEO CAM does not listen on external network
+> interfaces. No inbound port forwarding (DNAT) is required.
+>
+> **No In-Daemon VPN Ports**: VPN ports (e.g. UDP 51820 for WireGuard, UDP 500/4500 for IPsec)
+> belong entirely to customer edge routers, firewalls, or host OS tunnels.
 
 ---
 
