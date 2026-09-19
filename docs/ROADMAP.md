@@ -18,6 +18,7 @@
 | H     | NEXT                  |
 | O     | CODE DONE / INTEGRATED TESTED / MERGED |
 | P     | CODE DONE / INTEGRATED TESTED / MERGED |
+| Q1–Q3 | PARTIAL / DOCUMENTED   |
 | I–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
@@ -352,9 +353,35 @@ mechanism is ready but untested end-to-end against a real tag push).
 
 ## Q — Appliance residencial
 
-- Q1–Q10: hardware mínimo, Raspberry/Orange Pi, mini-PC, imagen preparada,
-  Ethernet+power, zero-touch enrollment, discovery, QR/código, factory reset,
-  UX no técnica.
+**HITO Q (Q1–Q3) — PARTIAL / DOCUMENTED** (branch
+`feature/appliance-q-hardware`). Arquitectura y evidencia de red
+documentadas a partir de código y mediciones reales existentes — ver
+`docs/deployment/hardware.md`. Mínimos reales de RAM/storage **pendientes
+de benchmark de hardware real** (no inventados, marcados explícitamente
+como NOT ESTABLISHED). Sin código nuevo: la identificación de hardware
+(CPU arch/RAM/disk/temperatura) ya existía (`internal/platform`, Hito N)
+y se reutilizó tal cual.
+
+- Q1. Hardware mínimo. **PARTIAL / DOCUMENTED** — arquitectura soportada
+  (`linux/amd64`/`linux/arm64`), separación de perfiles (Cloud/Hybrid
+  gateway vs. Full Edge con YOLO local) y evidencia de red documentadas
+  en `docs/deployment/hardware.md`. La cifra de red del gateway
+  (~9.12 Mbps) es un **benchmark local sintético** (una cámara, ruido
+  pseudo-aleatorio, sin red/SaaS real) — se documenta como tal, no como
+  medición de producción. Los mínimos reales de RAM/storage **no están
+  establecidos** — no se inventó ningún benchmark; el doc lo marca
+  explícitamente como pendiente de medición real. El costo de inferencia
+  CPU en ARM64/amd64 tampoco está medido.
+- Q2. Raspberry Pi / Orange Pi (ARM64). **DOCUMENTED CANDIDATE / NOT
+  HARDWARE VALIDATED** — candidato documentado para Cloud/Hybrid gateway;
+  Full Edge con YOLO local NOT PERFORMANCE VALIDATED (sin medición real
+  de RAM/CPU en esta clase de placa).
+- Q3. Mini-PC (AMD64). **DOCUMENTED CANDIDATE / NOT HARDWARE VALIDATED** —
+  mismo criterio: candidato documentado para Cloud/Hybrid gateway y Full
+  Edge, sin medición real todavía.
+- Q4–Q10: imagen preparada, Ethernet+power, zero-touch enrollment,
+  discovery, QR/código, factory reset, UX no técnica. **NOT DONE** —
+  fuera de alcance de este cierre.
 
 ## R — Instalación corporativa
 
