@@ -200,6 +200,12 @@ layer on top of standard base Linux distributions (Debian 12 minimal, Ubuntu
    (eMMC, SD card, or NVMe SSD).
 2. **Appliance Provisioning**:
    - Extract the pre-packaged release: `tar xzf geocam-edge-<version>-linux-<arch>.tar.gz`.
+     > [!NOTE]
+     > El appliance tarball completo (que incluye el binario `geocam-edge`,
+     > `scripts/`, `systemd/`, `config/`, `VERSION` y `ARCH`) es el generado por
+     > `deploy/appliance/scripts/package.sh`. No debe confundirse con el tarball de
+     > GitHub Release P6 actual (`.github/workflows/release.yml`), que hoy empaqueta
+     > únicamente el binario suelto.
    - Execute installation: `sudo GEOCAM_VERSION=<version> ./scripts/install.sh ./geocam-edge ./ffmpeg`.
    - This writes:
      - Versioned binaries and helper scripts in `/opt/geocam-edge/releases/<version>/`.
@@ -208,8 +214,8 @@ layer on top of standard base Linux distributions (Debian 12 minimal, Ubuntu
      - Config template `/etc/geocam-edge/geocam-edge.env` with `GEOCAM_SAAS_URL` configured for the target environment.
 3. **First-Boot Lifecycle (`bootstrap.sh`)**:
    - `geocam-edge-bootstrap.service` is a `Type=oneshot` systemd unit ordered `Before=geocam-edge.service`.
-   - On first boot, it executes `/opt/geocam-edge/current/scripts/bootstrap.sh`.
-   - If an enrollment token is discovered (see [Zero-Touch Enrollment](#zero-touch-enrollment-q6)), it completes enrollment, securely shreds the token file, and enables normal service execution.
+   - On first boot, systemd executes `/opt/geocam-edge/current/scripts/bootstrap.sh`.
+   - Under systemd service context (`INVOCATION_ID`), `bootstrap.sh` claims enrollment if a seed token is found, removes the seed file best-effort, and exits cleanly (exit 0) **without** attempting to synchronously start `geocam-edge.service` or block on readiness. Systemd then proceeds to start `geocam-edge.service` naturally, respecting the `Before=` dependency.
    - If no token is discovered, the appliance remains cleanly installed and awaits out-of-band or manual enrollment.
    - On subsequent boots, `bootstrap.sh` detects existing credentials and exits immediately without side effects.
 
@@ -226,17 +232,19 @@ or small office networks:
     dropped, or heavily delayed on residential Wi-Fi access points.
   - Wi-Fi is deliberately **not** the primary supported appliance path.
 - **Power Specifications**:
-  - **Single-Board Computers (SBCs)** (e.g., Raspberry Pi 4/5, Orange Pi 5):
-    - Input: 5V DC via USB-C.
-    - Current rating: 3.0A minimum (15W); 5.0A (27W) recommended for Raspberry Pi 5.
-  - **Mini-PCs** (e.g., Intel N100 / AMD Ryzen embedded):
-    - Input: 12V–19V DC via external DC barrel jack power adapter.
-    - Power draw: 6W–15W typical idle/processing.
+  - **Alimentación según especificación del hardware seleccionado**: utilizar siempre
+    una fuente de alimentación adecuada al fabricante y modelo implementado.
+  - *Ejemplo específico de modelo (no requisito universal GEO CAM)*:
+    - Una SBC tipo Raspberry Pi 5 típicamente requiere una fuente oficial USB-C de
+      5V / 5.0A (27W) para evitar throttling bajo carga de decodificación o inferencia local.
+    - Un mini-PC x86_64 (e.g. Intel N100 / AMD Ryzen embedded) típicamente utiliza una
+      fuente externa de 12V–19V DC según especificación del fabricante de la placa.
 - **Power over Ethernet (PoE)**:
-  - **No integrated PoE hardware is assumed or required.**
-  - PoE is supported **strictly via external adapters**: a standard IEEE 802.3af/at
-    Gigabit PoE splitter that drops Ethernet data to RJ45 and power to USB-C or DC barrel.
-  - Do not assume or design proprietary PoE circuitry into the software stack.
+  - **No se asume ni requiere hardware PoE integrado en placa.**
+  - PoE soportado **estrictamente mediante solución o adaptador externo compatible si corresponde**
+    (e.g. un splitter Gigabit externo IEEE 802.3af/at que derive datos a RJ45 y alimentación
+    al puerto USB-C o jack barril correspondiente).
+  - No asumir circuitos PoE propietarios integrados en el software.
 
 ## Zero-Touch Enrollment (Q6)
 
@@ -261,7 +269,7 @@ tenant without manual SSH access or shell commands on the physical unit:
      │
     Yes
      ▼
-[Pipe token to: `geocam-edge enroll`]
+[Pipe token to: `geocam-edge enroll` via stdin]
   (Existing CLI: hashes token with SHA-256, claims device credential from SaaS)
      │
      ▼
@@ -269,21 +277,22 @@ tenant without manual SSH access or shell commands on the physical unit:
   (Mode 0600, owned by geocam-edge service user)
      │
      ▼
-[Securely wipe/shred ephemeral token file] ◄── Never persist token in plaintext!
+[Delete ephemeral seed file (best-effort)] ◄── Never persist token in plaintext!
      │
      ▼
-[Start geocam-edge.service normally]
-     │
-     ▼
-[Verify readiness via wait-ready.sh / readyz]
+[Exit 0 ──► systemd starts geocam-edge.service respecting Before=]
 ```
 
 Key guarantees:
 - **No new enrollment protocol**: Reuses the exact existing `geocam-edge enroll`
   command and `POST /api/v1/edge/enroll` SaaS endpoint (SHA-256 token exchange).
-- **Ephemeral token safety**: If read from `/boot/geocam-enroll.token` or disk,
-  the file is immediately wiped using `shred -u` (or `rm -P`/`rm -f`). The token
-  value is never written to log files, systemd units, or persistent environment files.
+  The token is supplied via stdin, never in command line arguments (`--token` was removed from bootstrap).
+- **Ephemeral token handling**: If read from `/boot/geocam-enroll.token` or disk,
+  the seed file must be treated as a secret while present, and is deleted
+  best-effort (`shred -u` or `rm -f`) immediately after enrollment. In flash
+  storage (eMMC, SD card) wear-leveling prevents cryptographically guaranteed
+  physical erasure, so the seed file must be treated with appropriate confidentiality
+  while it exists. The token is never written to logs, systemd units, or persistent configuration.
 - **FAT32 Boot Partition Friendly**: Placing `geocam-enroll.token` on `/boot` or
   `/boot/firmware` allows a field technician or distributor to drop an enrollment
   token onto an SD card/USB drive from Windows, macOS, or Linux without ext4 tools.

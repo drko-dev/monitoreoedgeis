@@ -41,7 +41,7 @@ func TestBootstrapUnenrolledWithoutTokenRemainsUnenrolled(t *testing.T) {
 	}
 }
 
-func TestBootstrapWithTokenFileEnrollsAndWipesToken(t *testing.T) {
+func TestBootstrapWithTokenFileEnrollsAndRemovesTokenFile(t *testing.T) {
 	requireBash(t)
 	root := t.TempDir()
 
@@ -111,7 +111,7 @@ esac
 	}
 
 	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
-		t.Fatalf("token file was not deleted after zero-touch bootstrap: %s still exists", tokenPath)
+		t.Fatalf("token file was not removed after zero-touch bootstrap: %s still exists", tokenPath)
 	}
 
 	credFile := filepath.Join(root, "var/lib/geocam-edge/credentials.json")
@@ -254,6 +254,75 @@ esac
 	}
 	if !strings.Contains(out, "running local ONVIF discovery scan") {
 		t.Errorf("expected discovery scan log in output, got:\n%s", out)
+	}
+}
+
+func TestBootstrapUnderSystemdDoesNotSynchronouslyStartService(t *testing.T) {
+	requireBash(t)
+	root := t.TempDir()
+
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "geocam-edge")
+	fakeScript := `#!/bin/sh
+cmd="$1"
+shift
+case "$cmd" in
+  version) echo "geocam-edge 1.0.0" ;;
+  config) echo "enrolled: yes" ;;
+  *) exit 0 ;;
+esac
+`
+	if err := os.WriteFile(binPath, []byte(fakeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runScript(t, root, "install.sh", []string{"GEOCAM_VERSION=1.0.0"}, binPath)
+	if err != nil {
+		t.Fatalf("install.sh failed: %v\n%s", err, out)
+	}
+
+	dataDir := filepath.Join(root, "var/lib/geocam-edge")
+	if err := os.WriteFile(filepath.Join(dataDir, "identity.json"), []byte(`{"edge_id":"edge-1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "credentials.json"), []byte(`{"credential":"cred-1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake systemctl that flags if start is invoked
+	fakeBinDir := t.TempDir()
+	systemctlMarker := filepath.Join(root, "systemctl_start_called")
+	fakeSystemctl := `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "start" ]; then
+    touch "` + systemctlMarker + `"
+    echo "FAIL: systemctl start should NOT be called under systemd service context!" >&2
+    exit 1
+  fi
+done
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "systemctl"), []byte(fakeSystemctl), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := []string{
+		"PATH=" + fakeBinDir + ":" + os.Getenv("PATH"),
+		"INVOCATION_ID=systemd-bootstrap-test-run-42",
+		"GEOCAM_SAAS_URL=https://saas.example.com",
+	}
+
+	out, err = runScript(t, root, "bootstrap.sh", env)
+	if err != nil {
+		t.Fatalf("bootstrap.sh failed under systemd context: %v\n%s", err, out)
+	}
+
+	if _, err := os.Stat(systemctlMarker); !os.IsNotExist(err) {
+		t.Fatalf("systemctl start was invoked synchronously under systemd context, risking deadlock")
+	}
+
+	if !strings.Contains(out, "deferring geocam-edge.service startup to systemd (Before=geocam-edge.service)") {
+		t.Errorf("expected bootstrap output to log deferred startup under systemd, got:\n%s", out)
 	}
 }
 

@@ -13,31 +13,28 @@
 # 3. If a token is found:
 #    - Claims it against GEOCAM_SAAS_URL using existing `geocam-edge enroll`
 #      (token piped via stdin, never printed or saved to plaintext logs/config)
-#    - Immediately and securely wipes/deletes the token file (shred/rm -P)
+#    - Deletes the ephemeral seed file best-effort (flash/wear-leveling media prevents
+#      cryptographically guaranteed physical erasure; treat seed file as secret while present)
 #    - Ensures $DATA_DIR ownership by GEOCAM_SERVICE_USER on real Linux
-# 4. If enrolled and running under systemd, starts geocam-edge.service and
-#    verifies readiness.
+# 4. Service lifecycle:
+#    - When running under systemd service context (INVOCATION_ID set), finishes cleanly
+#      and defers geocam-edge.service startup to systemd (Before=geocam-edge.service).
+#    - When executed manually outside systemd, starts geocam-edge.service and verifies readiness.
 # 5. Optionally executes a local ONVIF discovery scan (--scan) via existing CLI.
 #
 # Usage:
-#   bootstrap.sh [--token <token>] [--saas-url <url>] [--scan]
+#   bootstrap.sh [--saas-url <url>] [--scan]
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 . "$SCRIPT_DIR/lib.sh"
 
-TOKEN_ARG=""
 SAAS_URL_ARG=""
 DO_SCAN=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --token)
-            [ $# -gt 1 ] || die "--token requires an argument"
-            TOKEN_ARG="$2"
-            shift 2
-            ;;
         --saas-url)
             [ $# -gt 1 ] || die "--saas-url requires an argument"
             SAAS_URL_ARG="$2"
@@ -52,7 +49,6 @@ while [ $# -gt 0 ]; do
 Usage: bootstrap.sh [options]
 
 Options:
-  --token <token>      Explicit enrollment token (dev/testing; preferred: /boot/geocam-enroll.token)
   --saas-url <url>     SaaS base URL override (default: from /etc/geocam-edge/geocam-edge.env)
   --scan               Run immediate ONVIF discovery scan after bootstrap
   --help, -h           Show this help message
@@ -85,6 +81,12 @@ BINARY="$PREFIX/current/geocam-edge"
 if [ ! -f "$BINARY" ] && [ -f "$SCRIPT_DIR/../geocam-edge" ]; then
     BINARY="$SCRIPT_DIR/../geocam-edge"
 fi
+
+# is_systemd_service_context detects when bootstrap.sh is invoked as a systemd unit
+# (systemd sets INVOCATION_ID for every service execution).
+is_systemd_service_context() {
+    [ -n "${INVOCATION_ID:-}" ]
+}
 
 # --- 1. Load non-secret config defaults from env file if available ---------
 if [ -f "$ENV_FILE" ]; then
@@ -128,9 +130,7 @@ else
     TOKEN=""
     TOKEN_FILE=""
 
-    if [ -n "$TOKEN_ARG" ]; then
-        TOKEN="$TOKEN_ARG"
-    elif [ -n "${GEOCAM_ENROLLMENT_TOKEN:-}" ]; then
+    if [ -n "${GEOCAM_ENROLLMENT_TOKEN:-}" ]; then
         TOKEN="$GEOCAM_ENROLLMENT_TOKEN"
     else
         # Search candidate seed locations
@@ -183,14 +183,16 @@ else
             chmod 0600 "$DATA_DIR/identity.json" "$DATA_DIR/credentials.json" 2>/dev/null || true
         fi
 
-        # SECURE DISPOSAL: wipe token file immediately if read from disk
+        # Best-effort deletion of ephemeral token seed file (never persist in plaintext).
+        # Note: flash storage wear-leveling prevents cryptographically guaranteed physical
+        # erasure, so the seed file must be treated as secret while it exists.
         if [ -n "$TOKEN_FILE" ] && [ -f "$TOKEN_FILE" ]; then
             if have_cmd shred; then
                 shred -u "$TOKEN_FILE" 2>/dev/null || rm -f "$TOKEN_FILE"
             else
-                rm -P "$TOKEN_FILE" 2>/dev/null || rm -f "$TOKEN_FILE"
+                rm -f "$TOKEN_FILE"
             fi
-            log "ephemeral enrollment token file securely wiped"
+            log "removed ephemeral enrollment token seed file"
         fi
 
         # Clear token variable from memory
@@ -201,8 +203,10 @@ else
     fi
 fi
 
-# --- 5. Start service & verify readiness (real Linux with systemd) --------
-if is_real_linux_target && have_cmd systemctl; then
+# --- 5. Service startup (manual execution only; deferred under systemd) ----
+if is_systemd_service_context; then
+    log "running under systemd service context ($INVOCATION_ID): deferring geocam-edge.service startup to systemd (Before=geocam-edge.service)"
+elif is_real_linux_target && have_cmd systemctl; then
     if is_enrolled; then
         if ! systemctl is-active --quiet geocam-edge.service; then
             systemctl start geocam-edge.service
