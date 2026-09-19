@@ -20,7 +20,7 @@
 | P     | CODE DONE / INTEGRATED TESTED / MERGED |
 | Q1–Q10| CODE DONE / INTEGRATED TESTED / MERGED / SAAS PROD DEPLOYED (Edge prod: N/A) |
 | R1–R9 | CODE/ARCHITECTURE DONE / INTEGRATED TESTED / MERGED (Edge prod: N/A / no real target) |
-| S1–S11| CODE / SECURITY BASELINE DONE / INTEGRATED TESTED (gaps: at-rest device credential encryption, artifact signature, automatic rotation, tamper-evident audit) |
+| S1–S11| CODE / SECURITY BASELINE DONE / INTEGRATED TESTED / MERGED / SAAS PROD DEPLOYED (Edge prod: N/A; gaps: at-rest device credential encryption, artifact signature, automatic rotation, tamper-evident audit) |
 | I–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
@@ -524,9 +524,24 @@ por punto abajo. Perfiles, preflight operativo, matrices y gaps:
 
 ## S — Seguridad
 
-**HITO S (S1–S11) — DOCUMENTED / IMPLEMENTED / PARTIAL WHERE EXPLICITLY
-MARKED** (branch `integration/hito-s-final`, integra #55/#56/#57). Ver
-`docs/security/threat-model.md`, `docs/security/edge-security-baseline.md`,
+**HITO S (S1–S11) — CODE / SECURITY BASELINE DONE / INTEGRATED TESTED /
+MERGED / SAAS PROD DEPLOYED** (PR #58 mergeado a `monitoreoedgeis` main @
+`9b4f2b2b2dda764cbaba5c1d83cc70733dc5c3e6`, integra #55/#56/#57;
+`monitoreoia` PR #123 mergeado a su main @
+`4678a867051698d02675151df657521e88ebf3da`, integra #122). **SAAS PROD**:
+`monitoreoia` main `4678a86` desplegado en `vps-6387636-x.dattaweb.com`
+(Buildah `geocam-cloud:4678a86`/`geocam-cloud-worker:4678a86`, Helm
+revisión 32). Verificado post-deploy: pods `1/1 Running`,
+`/api/health` `200`, `/api/ready` `200`, `/login` `200`,
+`/dispositivos-edge` `303` (no 500), `/api/v1/edge/me` sin auth `401`
+(no 500), sin errores de arranque/DB en logs. **EDGE PROD: N/A** — no
+existe target Edge/appliance/VM productivo real documentado distinto
+del VPS SaaS; no se desplegó nada. Gaps reales preservados (no
+resueltos por este cierre): device credential at-rest encryption, sin
+firma de artifacts (checksum únicamente), sin política de rotación
+automática, sin audit trail tamper-evident, sin key management
+hardware-backed. Ver `docs/security/threat-model.md`,
+`docs/security/edge-security-baseline.md`,
 `docs/security/device-lifecycle.md`, `docs/security/update-trust.md`,
 `docs/security/least-privilege.md`, `docs/security/audit.md`.
 
