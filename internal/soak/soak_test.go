@@ -52,7 +52,9 @@ func TestSoak(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	samplerDone := make(chan struct{})
 	go func() {
+		defer close(samplerDone)
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
 		for {
@@ -140,7 +142,7 @@ func TestSoak(t *testing.T) {
 		t.Fatalf("heartbeat.Stop: %v", err)
 	}
 	cancel()
-	time.Sleep(20 * time.Millisecond)
+	<-samplerDone
 
 	final := sampleProcess()
 	stats := buffer.Stats()
