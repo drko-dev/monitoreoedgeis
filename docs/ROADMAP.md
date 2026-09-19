@@ -438,8 +438,26 @@ hardware real.
 
 ## R — Instalación corporativa
 
-- R1–R9: VM, server Linux, appliance industrial, VPN site-to-site, subnet
-  routing, VLANs, múltiples segmentos CCTV, firewall/proxy, HA futura.
+- R1–R3: VM, server Linux, appliance industrial (pendientes de cierre formal).
+- R4. VPN site-to-site. **DONE (DOCUMENTED / EXTERNAL INFRASTRUCTURE ARCHITECTURE)** —
+  VPN tunnel termination is strictly external (router/firewall/gateway/subnet router),
+  never on the Edge appliance or cameras. Edge daemon requires no VPN keys, certs,
+  tunnels, or cryptographic agents; it consumes standard routed IP connectivity.
+  Documented with architecture and port flows in `docs/deployment/corporate-networking.md`.
+- R5. Subnet routing. **DONE (ROUTED ACCESS SUPPORTED / DISCOVERY LIMITATION DOCUMENTED)** —
+  RTSP unicast streaming (TCP 554) and ONVIF device management (HTTP/SOAP unicast)
+  natively cross routed L3 boundaries and private subnets (RFC 1918). Unicast
+  camera targets (manual or Remote Config candidates) work across subnets.
+  **Limitation explicitly documented**: ONVIF WS-Discovery uses UDP multicast
+  (239.255.255.250:3702, TTL=1) and is structurally restricted to the local L2
+  broadcast domain; it does not cross IP routers without specialized network
+  proxies.
+- R6. VLANs. **DONE (DOCUMENTED / OS-MANAGED 802.1Q ARCHITECTURE)** — Edge
+  daemon does not manage 802.1Q tags or virtual network interfaces. Supports
+  either dedicated access ports (switch untagged) or OS-managed trunk subinterfaces
+  (e.g., `eth0.20`, `enp3s0.100`). Automatic discovery scans UP/MULTICAST
+  private interfaces, or can be pinned via `GEOCAM_DISCOVERY_INTERFACES`.
+- R7–R9: múltiples segmentos CCTV, firewall/proxy, HA futura (pendientes de cierre formal).
 
 ## S — Seguridad
 
