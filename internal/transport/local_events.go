@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 )
@@ -56,6 +57,7 @@ func (c *Client) PutLocalEventEvidence(ctx context.Context, deviceID, credential
 	req.Header.Set("X-Candidate-Key", candidateKey)
 	req.Header.Set("X-Evidence-SHA256", checksum)
 	req.Header.Set("X-Evidence-Size", strconv.FormatInt(size, 10))
+	c.traffic.Record(TrafficEvidence, int64(len(body)), 0, 1)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -64,6 +66,8 @@ func (c *Client) PutLocalEventEvidence(ctx context.Context, deviceID, credential
 		return fmt.Errorf("%w: PUT %s: %w", ErrSaaSUnavailable, path, err)
 	}
 	defer resp.Body.Close()
+	n, _ := io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	c.traffic.Record(TrafficEvidence, 0, n, 0)
 	return classifyLocalEventStatus(resp.StatusCode, resp.Header)
 }
 
