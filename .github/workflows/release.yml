@@ -1,10 +1,16 @@
 name: Release
 
-# Hito P: pushing a tag vX.Y.Z produces linux/amd64 + linux/arm64 binaries,
-# a tar.gz per architecture, a SHA256SUMS manifest, and a GitHub Release.
-# Reuses the existing `make build-linux` recipe (reproducible build: version,
-# commit, build date, -trimpath, identical flags for both architectures) --
-# no new build system. No signing (Hito S/T), no SBOM, no registry push.
+# Hito T: pushing a tag vX.Y.Z produces the FULL appliance artifact per
+# architecture -- binary, VERSION, ARCH, scripts, systemd unit, example
+# config -- via deploy/appliance/scripts/package.sh (reused as-is, not a
+# second/reduced tarball format), a SHA256SUMS manifest, an Ed25519
+# detached signature over that manifest (SHA256SUMS.sig), and a GitHub
+# Release. Distribution stays on the existing GitHub Releases
+# infrastructure -- no registry, no object storage, no CDN.
+#
+# Signing is FAIL CLOSED: if the OTA_SIGNING_KEY secret is not configured,
+# the job fails before anything is published. There is no unsigned or
+# checksum-only release path.
 on:
   push:
     tags:
@@ -23,34 +29,41 @@ jobs:
         with:
           go-version: '1.26.2'
 
-      - name: Build linux/amd64 and linux/arm64
+      - name: Require OTA signing key
         run: |
-          make build-linux \
-            VERSION="${GITHUB_REF_NAME}" \
-            COMMIT="$(git rev-parse --short HEAD)" \
-            BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if [ -z "${{ secrets.OTA_SIGNING_KEY }}" ]; then
+            echo "::error::OTA_SIGNING_KEY secret is not configured -- refusing to publish an unsigned release."
+            exit 1
+          fi
 
-      - name: Package per-architecture tarballs
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          for arch in amd64 arm64; do
-            stage="geocam-edge-${GITHUB_REF_NAME}-linux-${arch}"
-            mkdir -p "dist/${stage}"
-            cp "bin/geocam-edge-linux-${arch}" "dist/${stage}/geocam-edge"
-            tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
-            rm -rf "dist/${stage}"
-          done
+      - name: Package full appliance artifacts (amd64 + arm64)
+        run: ./deploy/appliance/scripts/package.sh "${GITHUB_REF_NAME}" dist
 
       - name: Generate SHA256SUMS
         run: |
           cd dist
           sha256sum *.tar.gz > SHA256SUMS
 
+      - name: Sign SHA256SUMS (Ed25519, fail closed)
+        env:
+          OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key_file="$(mktemp)"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s' "$OTA_SIGNING_KEY" > "$key_file"
+          go run ./cmd/geocam-edge ota sign \
+            -sha256sums dist/SHA256SUMS \
+            -private-key "$key_file" \
+            -out dist/SHA256SUMS.sig
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.tar.gz
+            dist/*.sha256
             dist/SHA256SUMS
+            dist/SHA256SUMS.sig
           generate_release_notes: true

@@ -85,11 +85,16 @@ func New(cfg *config.Config) *Agent {
 		newHealthServerModule(cfg.HealthAddr, reporter, logging.Component(log, "health-http")),
 	}
 
+	// otaModule (Hito T) is built before heartbeat so heartbeat can wire it
+	// into OnSuccess; it is nil for an unenrolled Edge or a missing SaaS
+	// URL, same gate as heartbeat itself, and its absence is never fatal.
+	otaModule := newOTAModule(cfg, creds, logging.Component(log, "ota"))
+
 	// The heartbeat module is skipped for an unenrolled Edge and its
 	// construction errors are non-fatal: a misconfigured SaaS URL must not
 	// take down the local health surface that would let an operator diagnose
 	// it. Either way the agent does not reach READY (see Run).
-	hb, hbErr := newHeartbeatModule(cfg, ident, creds, reporter, logging.Component(log, "heartbeat"))
+	hb, hbErr := newHeartbeatModule(cfg, ident, creds, reporter, otaModule, logging.Component(log, "heartbeat"))
 	if hb != nil {
 		mods = append(mods, hb)
 	}

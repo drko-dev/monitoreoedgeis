@@ -25,6 +25,11 @@ type Config struct {
 	// It never weakens TLS verification for an https:// URL — see
 	// internal/transport. Development only; defaults to false.
 	AllowInsecureHTTP bool
+	// OTAPublicKeyFile is a root-managed file path holding the Ed25519
+	// public key used to verify OTA release signatures (Hito T4). Empty
+	// means OTA verification fails closed — there is no checksum-only
+	// fallback. Provisioned separately from the artifact channel itself.
+	OTAPublicKeyFile string
 	// SaaSTimeout bounds every SaaS HTTP request (enroll, rotate, me).
 	SaaSTimeout time.Duration
 	// Discovery settings (Milestone E).
@@ -394,6 +399,10 @@ func Load() (*Config, error) {
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_ALLOW_INSECURE_HTTP")); raw == "true" {
 		cfg.AllowInsecureHTTP = true
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_OTA_PUBLIC_KEY_FILE")); raw != "" {
+		cfg.OTAPublicKeyFile = raw
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_SAAS_TIMEOUT")); raw != "" {
