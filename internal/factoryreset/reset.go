@@ -18,6 +18,7 @@ var StatePaths = []string{
 	"identity.json",
 	"credentials.json",
 	"camera_credentials.json",
+	"camera_master.key",
 	"remote_config_state.json",
 	"control_ledger.json",
 	"local-event-backlog",

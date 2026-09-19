@@ -45,6 +45,11 @@ func TestResetRemovesOnlyDeviceState(t *testing.T) {
 			t.Errorf("state path %q still exists: %v", rel, err)
 		}
 	}
+	for _, rel := range []string{"camera_credentials.json", "camera_master.key"} {
+		if _, err := os.Stat(filepath.Join(dir, rel)); !os.IsNotExist(err) {
+			t.Errorf("camera state %q still exists: %v", rel, err)
+		}
+	}
 	if got, err := os.ReadFile(software); err != nil || string(got) != "binary" {
 		t.Fatalf("software artifact changed or removed: %q, %v", got, err)
 	}
