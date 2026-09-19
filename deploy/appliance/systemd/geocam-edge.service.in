@@ -9,6 +9,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+WorkingDirectory=@GEOCAM_DATA_DIR_PLACEHOLDER@
 ExecStart=@GEOCAM_EXEC_PATH@ run
 @GEOCAM_FFMPEG_ENV_LINE@
 EnvironmentFile=@GEOCAM_ENV_FILE@
