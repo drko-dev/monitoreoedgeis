@@ -38,9 +38,21 @@ import (
 
 var (
 	applianceBinaryOnce sync.Once
+	applianceBinaryDir  string
 	applianceBinaryPath string
 	applianceBinaryErr  error
 )
+
+// TestMain removes the shared appliance binary this file compiles once. Without
+// it every `go test` run would leave a ~20MB directory behind in the system
+// temp dir.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if applianceBinaryDir != "" {
+		_ = os.RemoveAll(applianceBinaryDir)
+	}
+	os.Exit(code)
+}
 
 // buildApplianceBinary compiles the real agent once per test binary. The
 // privileged updater executes the current release's own `geocam-edge ota
@@ -58,6 +70,7 @@ func buildApplianceBinary(t *testing.T) string {
 			applianceBinaryErr = fmt.Errorf("mkdir temp: %w", err)
 			return
 		}
+		applianceBinaryDir = dir
 		bin := filepath.Join(dir, "geocam-edge")
 		out, err := exec.Command("go", "build", "-o", bin, "../../cmd/geocam-edge").CombinedOutput()
 		if err != nil {
