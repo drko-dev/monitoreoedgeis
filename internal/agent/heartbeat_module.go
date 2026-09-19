@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/heartbeat"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
+	"github.com/drko-dev/monitoreoedgeis/internal/ota"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
@@ -29,6 +31,7 @@ func newHeartbeatModule(
 	ident identity.Identity,
 	creds credentials.Credentials,
 	reporter *health.Reporter,
+	otaModule *ota.Module,
 	log *slog.Logger,
 ) (*heartbeat.Module, error) {
 	if cfg.SaaSURL == "" {
@@ -133,5 +136,25 @@ func newHeartbeatModule(
 			// untouched; clearing it is an operator decision.
 			reporter.Set(health.StateDegraded)
 		},
+		OnSuccess: otaCheckOnSuccess(otaModule, log),
 	})
+}
+
+// otaCheckOnSuccess returns the heartbeat OnSuccess hook that drives Hito
+// T's OTA check off the existing heartbeat cadence (T2: "no second poll
+// loop"). It runs CheckOnce in its own goroutine so a slow download never
+// delays the next scheduled heartbeat, and its error is only logged — an
+// OTA failure must never be mistaken for a heartbeat failure. nil
+// otaModule (unenrolled edge, no SaaS URL) yields a no-op hook.
+func otaCheckOnSuccess(otaModule *ota.Module, log *slog.Logger) func() {
+	if otaModule == nil {
+		return nil
+	}
+	return func() {
+		go func() {
+			if err := otaModule.CheckOnce(context.Background()); err != nil {
+				log.Warn("ota check failed", slog.Any("error", err))
+			}
+		}()
+	}
 }

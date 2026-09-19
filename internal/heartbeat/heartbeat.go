@@ -102,6 +102,16 @@ type Options struct {
 	// OnUnauthorized, when set, is called once each time a 401/403 is newly
 	// observed, so the agent can mark itself DEGRADED.
 	OnUnauthorized func()
+	// OnSuccess, when set, is called after each successful heartbeat send
+	// (Hito T: this is the "after a successful SaaS heartbeat, Edge may run
+	// an OTA CheckOnce" cadence). It runs synchronously in the heartbeat
+	// loop's own goroutine, so a slow or blocking OnSuccess would delay the
+	// next heartbeat -- callers that do real I/O here (like the OTA
+	// module's download) must return promptly or hand off to their own
+	// goroutine. Any error OnSuccess produces is the caller's concern to
+	// log; it can never turn this already-successful heartbeat into a
+	// failure.
+	OnSuccess func()
 
 	// Now, Rand and NewTimer are seams for deterministic tests. Zero values
 	// select the real clock, a locally seeded RNG and time.NewTimer.
@@ -250,6 +260,9 @@ func (m *Module) loop(ctx context.Context) {
 				s.ConsecutiveFailures = 0
 				s.LastError = ""
 			})
+			if m.opts.OnSuccess != nil {
+				m.opts.OnSuccess()
+			}
 			delay = m.jittered(m.opts.Interval)
 
 		case errors.Is(err, transport.ErrUnauthorized):
