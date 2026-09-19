@@ -634,9 +634,17 @@ hardware-backed. Ver `docs/security/threat-model.md`,
 
 ## W — Testing
 
+**HITO W — TESTED / INTEGRATED / MERGED** — PR #67 merged to `main` at
+`e624bbbe0b300d8a4204fbcdec81d9705134f23f`, integrating accepted source
+PRs #64 (W1–W4), #65 (W5–W9) and #66 (W10–W12).
+
 - W1–W12: unit, integration, RTSP simulator, ONVIF simulator, pérdida
-  Internet/cámara, credenciales incorrectas, reboot, upgrade, ARM64, AMD64,
-  soak tests.
+  Internet/cámara, credenciales incorrectas, reboot/process restart, upgrade,
+  ARM64, AMD64 y soak tests — **DONE / CI GREEN**.
+- ARM64 physical hardware: **NOT VALIDATED**; Hito W validates cross-build,
+  packaging and Docker/QEMU build paths, not a real ARM64 appliance.
+- Edge PROD: **N/A** — no real production Edge target exists.
+- SaaS PROD: **NOT TOUCHED** by Hito W.
 
 ## X — Performance/capacidad
 
