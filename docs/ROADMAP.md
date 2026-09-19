@@ -19,6 +19,7 @@
 | O     | CODE DONE / INTEGRATED TESTED / MERGED |
 | P     | CODE DONE / INTEGRATED TESTED / MERGED |
 | Q1–Q10| CODE DONE / INTEGRATED TESTED / MERGED / SAAS PROD DEPLOYED (Edge prod: N/A) |
+| R1–R9 | CODE/ARCHITECTURE DONE / INTEGRATED TESTED (real corporate/Edge deploy validation pending) |
 | I–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
@@ -446,10 +447,16 @@ hardware real.
 
 ## R — Instalación corporativa
 
+**HITO R (R1–R9) — CODE/ARCHITECTURE DONE / INTEGRATED TESTED** (branch
+`integration/hito-r-final`, integra #49/#51/#52). Real
+corporate/Edge deploy validation pending — ver detalle por punto abajo.
+Perfiles, preflight operativo, matrices y gaps: `docs/deployment/corporate.md`,
+`docs/deployment/corporate-networking.md`,
+`docs/deployment/corporate-enterprise.md`.
+
 - R1 VM. **CODE/INSTALL PATH READY / DOCUMENTED / NOT VALIDATED ON REAL CORPORATE TARGET** — se reutiliza el paquete nativo Hito P/Q, systemd, `GEOCAM_DATA_DIR`, health/ready y update/rollback. No se declara compatibilidad específica con VMware, Hyper-V, Proxmox ni ningún cloud provider.
 - R2 Server Linux. **CODE/INSTALL PATH READY / DOCUMENTED / NOT VALIDATED ON REAL CORPORATE TARGET** — instalación directa con `package.sh`/`install.sh` y la unidad systemd existente. No modifica firewall, networking, discos ni servicios ajenos.
 - R3 Appliance industrial. **CODE/INSTALL PATH READY / DOCUMENTED / HARDWARE NOT VALIDATED** — se trata como hardware Linux dedicado con el mismo software y lifecycle. No se certifican marcas, modelos, temperatura, IP rating, voltajes, MTBF ni aceleradores.
-- Perfiles, preflight operativo, paths, dependencias y gaps: `docs/deployment/corporate.md`.
 - R4. VPN site-to-site. **DONE (DOCUMENTED / EXTERNAL INFRASTRUCTURE ARCHITECTURE)** —
   VPN tunnel termination is strictly external (router/firewall/gateway/subnet router),
   never on the Edge appliance or cameras. Edge daemon requires no VPN keys, certs,
@@ -472,8 +479,43 @@ hardware real.
   either dedicated access ports (switch untagged) or OS-managed trunk subinterfaces
   (e.g., `eth0.20`, `enp3s0.100`). Automatic discovery scans UP/MULTICAST
   private interfaces, or can be pinned via `GEOCAM_DISCOVERY_INTERFACES`.
-- VPN/subnet/VLAN architecture, port flows y gaps: `docs/deployment/corporate-networking.md`.
-- R7–R9: ver más abajo (integrados en el mismo cierre).
+- R7. Múltiples segmentos CCTV. **PARTIAL / DOCUMENTED** — distinción
+  explícita transporte vs. provisioning:
+  **ROUTED UNICAST TRANSPORT: SUPPORTED FOR ALREADY-CONFIGURED TARGETS**
+  (`internal/rtsp.Dial`/ONVIF SOAP no fijan interfaz, compatibles con
+  routing L3/VPN para un target ya configurado en runtime);
+  **CROSS-SUBNET CAMERA TARGET PROVISIONING: NO CLAIM / CURRENT GAP**
+  (no se verificó ni existe camino de provisioning para introducir una
+  cámara de otra subnet — no implementado en este hito);
+  **AUTOMATIC CROSS-SUBNET WS-DISCOVERY: NOT SUPPORTED**
+  (`239.255.255.250:3702/UDP` corre por interfaz local,
+  `internal/discovery.SelectInterfaces`, soporta multi-homed, pero no
+  cruza routers/VLANs sin multicast routing/IGMP relay a nivel de red —
+  gap documentado explícitamente, no resuelto con scanner/broadcast
+  forwarding, deliberadamente no agregados). Alternativa documentada (no
+  obligatoria): un Edge por segmento.
+- R8. Firewall. **DOCUMENTED** — matriz exacta de tráfico outbound
+  (Edge→SaaS, Edge→cámaras, WS-Discovery multicast) y local/inbound
+  (health en `127.0.0.1:8091` por defecto, no expuesto en red) en
+  `docs/deployment/corporate-enterprise.md`. Sin automatización de
+  firewall (no iptables/nftables).
+- R8. Proxy corporativo. **CODE DONE / TESTED** — auditoría confirmó que
+  `internal/transport.Client` (compartido por enrollment/heartbeat/
+  cloudsink) ya respeta `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` estándar de
+  Go (Transport nil → `http.DefaultTransport` → `ProxyFromEnvironment`);
+  no fue necesario ningún cambio de código. Cobertura antes ausente,
+  agregada en `internal/transport/proxy_test.go`
+  (`TestClientRespectsStandardProxyEnv`). ONVIF SOAP correctamente
+  excluido del proxy (tráfico LAN directo a cámaras, sin cambios). RTSP
+  es un dial TCP crudo, no aplica proxy HTTP.
+- R9. HA futura. **FUTURE ARCHITECTURE DOCUMENTED / NOT IMPLEMENTED** —
+  boundary documentado en `docs/deployment/corporate-enterprise.md`: hoy
+  un solo Edge activo por conjunto de cámaras; clonar identity/credentials
+  NO es HA; dos Edges sobre la misma cámara pueden duplicar trabajo/
+  eventos; estado local (buffer offline, backlog) requiere estrategia
+  antes de active/passive; HA real futura debe resolver ownership/lease/
+  fencing/failover. Sin cluster, sin consensus, sin etcd, sin leader
+  election en este hito.
 
 ## S — Seguridad
 
