@@ -46,6 +46,24 @@ jobs:
           GEOCAM_SOAK_DURATION: 3s
         run: go test -race ./internal/soak -run '^TestSoak$' -count=1 -v
 
+      # Hito X: cheap, opt-in-but-exercised smoke of the camera-scale/CPU-RAM
+      # benchmark harness. A small profile only — the 25/50-camera profiles
+      # are manual (see docs/performance/CAMERA_SCALE_CPU_RAM.md), never run
+      # automatically on every PR.
+      - name: Short camera-scale perf smoke
+        env:
+          GEOCAM_PERF: '1'
+          GEOCAM_PERF_CAMERAS: '5'
+          GEOCAM_PERF_DURATION: 3s
+        run: go test ./internal/perf -run '^TestScaleFull$' -count=1 -v
+
+      - name: Short camera-scale perf smoke with race detector
+        env:
+          GEOCAM_PERF: '1'
+          GEOCAM_PERF_CAMERAS: '5'
+          GEOCAM_PERF_DURATION: 3s
+        run: go test -race ./internal/perf -run '^TestScaleFull$' -count=1 -v
+
   # Hito W10/W11: validate release artifacts for both deployment
   # architectures. This is cross-build/package evidence; it is not a claim
   # that physical ARM64 hardware was exercised.
