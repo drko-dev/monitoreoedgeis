@@ -186,10 +186,14 @@ module exists yet — out of scope for B, per the task.
 
 ## Scope cuts (deliberate)
 
-- `identity reset` CLI subcommand: not implemented. No automatic factory
-  reset exists either, per the task's hard requirement. Adding a gated manual
-  reset command was judged non-trivial enough (needs to be unambiguous and
-  safely gated) to leave out of this milestone rather than rush it in.
+- `identity reset` CLI subcommand: not implemented. The explicit `factory-reset`
+  command now covers the appliance reset operation without removing releases,
+  systemd, or installed software. It requires `--confirm` and removes only the
+  allowlisted device-state paths below `GEOCAM_DATA_DIR`.
+- The factory reset allowlist purges identity, SaaS credentials, camera
+  credentials, remote-config state, control ledger, cloud/local event buffers,
+  and evidence. This intentionally returns the appliance to an unenrolled
+  state; release artifacts and software remain intact.
 - No real module beyond the health HTTP server: discovery/transport/
   heartbeat/camera modules are explicitly future work (Hito C onward).
 
