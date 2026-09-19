@@ -74,7 +74,7 @@ jobs:
           grep -q 'GOARCH=arm64' /tmp/go-arm64
 
       - name: Package appliance artifacts
-        run: bash deploy/appliance/scripts/package.sh ci dist
+        run: bash deploy/appliance/scripts/package.sh ci "$PWD/dist"
 
       - name: Validate package layout and checksums
         run: |
