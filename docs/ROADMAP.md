@@ -648,8 +648,21 @@ PRs #64 (W1–W4), #65 (W5–W9) and #66 (W10–W12).
 
 ## X — Performance/capacidad
 
+**HITO X — TESTED / INTEGRATED / MERGED** — PR #74 merged to `main` at
+`70aba8c0d0d176068d361cdfc330ae7193597ced`, integrating the accepted Hito X
+work from PRs #69 (camera scale + CPU/RAM), #70 (decode + inference) and #72
+(network instrumentation + capacity evidence matrix).
+
 - X1–X10: benchmarks 1/5/10/25/50 cámaras, CPU/RAM, network, decode FPS,
-  inference FPS, matriz hardware/cámaras.
+  inference FPS y matriz hardware/cámaras — **DONE as benchmark/evidence tooling**.
+- Synthetic scale validation includes 1/5/10/25/50 profiles; the 25-camera
+  integration run completed with 25/25 online and zero errors.
+- Decode/inference results are environment-specific evidence, not commercial
+  sizing: real YOLO CPU inference was measured on an Apple M4 development host.
+- CUDA/GPU, physical ARM64 appliance, real-camera/network capacity and certified
+  hardware limits remain **NOT VALIDATED**.
+- Edge PROD: **N/A** — no real production Edge target exists.
+- SaaS PROD: **NOT TOUCHED** by Hito X.
 
 ## Y — Resiliencia
 
