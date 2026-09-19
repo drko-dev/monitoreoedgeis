@@ -1130,6 +1130,64 @@ Slice M7–M11 consolida y robustece la persistencia, retry, deduplicación y co
 - `go vet` y `gofmt -l` limpios.
 - `go build ./...` exitoso.
 
+## Hito W — Testing (W5–W9) — THIS BRANCH, Draft PR
+
+Branch `test/hito-w-failure-lifecycle`, base `main @ cd7378e8`. **Not merged.**
+Full detail: `docs/testing/failure-lifecycle-w.md`.
+
+Scope validated: **W5** Internet/SaaS loss, **W6** camera loss, **W7** wrong
+credentials, **W8** reboot/process restart, **W9** upgrade. This milestone
+validates behaviour that already exists; it introduces no offline policy, no new
+RTSP state, no credential-retry strategy and no OTA mechanism.
+
+New tests (all hermetic — `httptest` SaaS, test-local RTSP server on port 0,
+`t.TempDir()` data dir and install root, no root, no systemd, no Internet):
+
+| File | Covers |
+| --- | --- |
+| `internal/heartbeat/saas_outage_test.go` | W5: real transport + real scheduler over unreachable / timeout / 5xx / 401, backoff, recovery, secret hygiene |
+| `internal/agent/failure_lifecycle_test.go` | W5: agent survives an outage with `/healthz` up and identity+credential byte-identical, no re-enrollment; W8: two-phase restart |
+| `internal/edgebacklog/saas_outage_test.go` | W5/W8: durable queue retains through the outage, delivers each stage once, survives a restart without duplication |
+| `internal/rtsp/failure_lifecycle_test.go` | W6/W7: peer close, EOF, silence, refused dial, recovery, single supervisor, bounded stop; wrong RTSP password |
+| `internal/cameratest/credentials_failure_test.go` | W7: ONVIF 401 and SOAP auth fault are INVALID, unreachable is not, one attempt, sanitized |
+| `internal/cameracreds/credentials_failure_test.go` | W7: SaaS 401 leaves the cached camera credentials byte-identical on disk |
+| `deploy/appliance/ota_upgrade_lifecycle_test.go` | W9: real Ed25519-signed candidate verified by the current release's real binary, activation, wrong-key/broken-layout/missing-key rejection, rollback refusal, no shipped key material |
+
+Defects found and fixed (each reproduced by a test first, then fixed minimally,
+with the test kept as the regression guard):
+
+1. `internal/rtsp/supervisor.go` — the retry delay was reset to the raw
+   `cfg.InitialBackoff` after a successful session; with that field unset it
+   became 0, producing an unthrottled reconnect storm for a flapping camera.
+2. `internal/rtsp/supervisor.go` — a non-positive `Config.PacketTimeout`
+   disabled the read deadline entirely instead of falling back to the
+   documented 5s default, so a silent camera looked healthy forever.
+3. `internal/rtsp/supervisor.go` — `Supervisor.Start` was not idempotent (a
+   second call panicked with `close of closed channel`); `Stop` before `Start`
+   blocked forever.
+4. `internal/rtsp/manager.go` — `SetTargets` before `Start` left supervisors
+   unstarted and made `Manager.Stop` deadlock; a second `Manager.Start` spawned
+   a second coordination goroutine.
+5. `deploy/appliance/systemd/geocam-edge-ota-updater.service.in` +
+   `install.sh` + `geocam-edge.env.example` — the privileged OTA updater unit
+   had no `EnvironmentFile=`, so the root verifier ran with
+   `GEOCAM_OTA_PUBLIC_KEY_FILE` unset and **every real upgrade would fail
+   closed**, including correctly signed ones. Wired the env file through and
+   documented the variable. Invisible to the existing tests because they inject
+   shell stubs as the verifier.
+
+Recorded gaps (belong to Hito Y / a later milestone, deliberately not
+implemented here): no auth-specific RTSP state or terminal stop for rejected
+camera credentials; `rollback.sh` re-verifies nothing (weaker than
+`docs/security/update-trust.md` requirement 7, and its safety rests on the
+root-owned release tree); the readiness gate does not run on a staged target;
+most durable files use tmp+rename without `fsync` (process-crash safe,
+power-loss unsafe); no boot-id guard on durable sequences; `rtsp.Config.Enabled`
+is never read inside `internal/rtsp`.
+
+Verification: `go test ./...` PASS, `go test -race` PASS on all touched
+packages, `go vet ./...` clean, `gofmt -l .` clean, focal `-count=10` stable.
+
 ## HOW ANOTHER AI SHOULD CONTINUE
 
 1. Read `AGENTS.md`.
