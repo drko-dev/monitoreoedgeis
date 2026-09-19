@@ -233,7 +233,7 @@ jobs:
 
       - name: Hito X integration 25-camera synthetic profile
         # One-off validation for Hito X integration; removed before final merge.
-        if: github.event_name == 'pull_request' && github.head_ref == 'integration/hito-x-performance'
+        if: github.event_name == 'pull_request' && github.base_ref == 'integration/hito-x-final'
         env:
           GEOCAM_PERF: '1'
           GEOCAM_PERF_CAMERAS: '25'
