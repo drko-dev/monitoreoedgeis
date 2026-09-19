@@ -1130,10 +1130,18 @@ Slice M7–M11 consolida y robustece la persistencia, retry, deduplicación y co
 - `go vet` y `gofmt -l` limpios.
 - `go build ./...` exitoso.
 
-## Hito W — Testing (W5–W9) — THIS BRANCH, Draft PR
+## Hito W — Testing (W1–W12) — MERGED
 
-Branch `test/hito-w-failure-lifecycle`, base `main @ cd7378e8`. **Not merged.**
-Full detail: `docs/testing/failure-lifecycle-w.md`.
+Integrated via PR #67 to `main @ e624bbbe0b300d8a4204fbcdec81d9705134f23f`,
+from accepted source PRs #64 (W1–W4), #65 (W5–W9) and #66 (W10–W12).
+GitHub CI on the integration HEAD completed successfully, including the full
+Go build/test/vet/format gate, short soak + race soak, package/checksum
+validation, Docker amd64 smoke, and Docker Go-stage validation for amd64 and
+arm64. Physical ARM64 hardware remains **NOT VALIDATED**. Edge PROD is N/A;
+SaaS PROD was not touched.
+
+Full W5–W9 detail: `docs/testing/failure-lifecycle-w.md`.
+W10–W12 evidence: `docs/TESTING_MULTIARCH_SOAK.md`.
 
 Scope validated: **W5** Internet/SaaS loss, **W6** camera loss, **W7** wrong
 credentials, **W8** reboot/process restart, **W9** upgrade. This milestone
