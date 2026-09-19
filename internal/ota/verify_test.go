@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func writeTempFile(t *testing.T, dir, name string, data []byte) string {
@@ -94,7 +95,7 @@ func TestVerifyArtifactChecksum_ArtifactModified(t *testing.T) {
 	}
 }
 
-func TestVerifyArchiveLayout_WrongArchitecture(t *testing.T) {
+func TestVerifyArchiveBinding_WrongArchitecture(t *testing.T) {
 	dir := t.TempDir()
 	artifactPath := filepath.Join(dir, "artifact.tar.gz")
 	buildApplianceTarball(t, artifactPath, map[string]string{
@@ -103,15 +104,15 @@ func TestVerifyArchiveLayout_WrongArchitecture(t *testing.T) {
 		"ARCH":        "arm64",
 	})
 
-	if err := VerifyArchiveLayout(artifactPath, "amd64"); err == nil {
+	if err := VerifyArchiveBinding(artifactPath, "v1.0.0", "amd64"); err == nil {
 		t.Fatal("expected architecture mismatch to be rejected")
 	}
-	if err := VerifyArchiveLayout(artifactPath, "arm64"); err != nil {
-		t.Fatalf("expected matching architecture to pass, got: %v", err)
+	if err := VerifyArchiveBinding(artifactPath, "v1.0.0", "arm64"); err != nil {
+		t.Fatalf("expected matching version+architecture to pass, got: %v", err)
 	}
 }
 
-func TestVerifyArchiveLayout_MissingEntries(t *testing.T) {
+func TestVerifyArchiveBinding_MissingEntries(t *testing.T) {
 	dir := t.TempDir()
 	artifactPath := filepath.Join(dir, "reduced.tar.gz")
 	// The pre-Hito-T release.yml shape: binary only, no VERSION/ARCH/scripts.
@@ -119,8 +120,102 @@ func TestVerifyArchiveLayout_MissingEntries(t *testing.T) {
 		"geocam-edge": "binary",
 	})
 
-	if err := VerifyArchiveLayout(artifactPath, "amd64"); err == nil {
+	if err := VerifyArchiveBinding(artifactPath, "v1.0.0", "amd64"); err == nil {
 		t.Fatal("expected a reduced (binary-only) tarball to be rejected as not a full appliance package")
+	}
+}
+
+// TestVerifyArchiveBinding_RejectsDivergedVersion is BLOCKER 4's core
+// regression: the artifact's OWN embedded VERSION marker must exactly
+// match the authenticated release descriptor's version -- a descriptor
+// claiming v2.0.0 must not accept an artifact internally built as v0.9.0,
+// even though nothing about the checksum/signature alone would catch that.
+func TestVerifyArchiveBinding_RejectsDivergedVersion(t *testing.T) {
+	dir := t.TempDir()
+	artifactPath := filepath.Join(dir, "artifact.tar.gz")
+	buildApplianceTarball(t, artifactPath, map[string]string{
+		"geocam-edge": "binary", "VERSION": "v0.9.0", "ARCH": "amd64",
+	})
+
+	if err := VerifyArchiveBinding(artifactPath, "v2.0.0", "amd64"); err == nil {
+		t.Fatal("expected a diverged artifact VERSION to be rejected")
+	}
+}
+
+// TestVerifyReleaseFiles_RejectsDivergedVersionRegression is BLOCKER 4's
+// exact scenario end to end: current v1.0.0, descriptor v2.0.0 (a valid
+// forward update on its own), but the artifact was signed/built with
+// VERSION v0.9.0 -> must still REJECT.
+func TestVerifyReleaseFiles_RejectsDivergedVersionRegression(t *testing.T) {
+	dir := t.TempDir()
+	name := "geocam-edge-v2.0.0-linux-amd64.tar.gz"
+	artifactPath := filepath.Join(dir, name)
+	buildApplianceTarball(t, artifactPath, map[string]string{
+		"geocam-edge": "binary", "VERSION": "v0.9.0", "ARCH": "amd64",
+	})
+	artifactBytes, err := os.ReadFile(artifactPath)
+	if err != nil {
+		t.Fatalf("read artifact: %v", err)
+	}
+	sum := sha256.Sum256(artifactBytes)
+	manifest := []byte(hex.EncodeToString(sum[:]) + "  " + name + "\n")
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	sig := SignManifest(priv, manifest)
+
+	err = VerifyReleaseFiles(artifactPath, manifest, sig, pub, name, "v1.0.0", "v2.0.0", "amd64")
+	if err == nil {
+		t.Fatal("expected the descriptor/artifact VERSION divergence to be rejected end to end")
+	}
+}
+
+// TestVerifyReleaseDir_MultiArchManifestSingleStagedArtifact is BLOCKER
+// 3's regression: a real SHA256SUMS signs BOTH architectures' artifacts,
+// but this Edge only ever downloads and stages its own. VerifyReleaseDir
+// must succeed by looking up ONLY the staged artifact's entry (via
+// metadata.json's artifact_name) -- it must never require every
+// architecture in the manifest to be present locally.
+func TestVerifyReleaseDir_MultiArchManifestSingleStagedArtifact(t *testing.T) {
+	dir := t.TempDir()
+	amd64Name := "geocam-edge-v2.0.0-linux-amd64.tar.gz"
+	arm64Name := "geocam-edge-v2.0.0-linux-arm64.tar.gz"
+
+	amd64Path := filepath.Join(dir, amd64Name)
+	buildApplianceTarball(t, amd64Path, map[string]string{
+		"geocam-edge": "b", "VERSION": "v2.0.0", "ARCH": "amd64",
+	})
+	amd64Bytes, err := os.ReadFile(amd64Path)
+	if err != nil {
+		t.Fatalf("read amd64 artifact: %v", err)
+	}
+	amd64Sum := sha256.Sum256(amd64Bytes)
+	// arm64's bytes are never staged locally -- only its manifest line
+	// exists, exactly like a real multi-arch release this Edge only
+	// partially downloads.
+	arm64Sum := sha256.Sum256([]byte("would-be arm64 artifact bytes, never downloaded by this edge"))
+
+	manifest := []byte(
+		hex.EncodeToString(amd64Sum[:]) + "  " + amd64Name + "\n" +
+			hex.EncodeToString(arm64Sum[:]) + "  " + arm64Name + "\n",
+	)
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	sig := SignManifest(priv, manifest)
+
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS"), manifest, 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS.sig"), sig, 0o644); err != nil {
+		t.Fatalf("write signature: %v", err)
+	}
+	meta := ReleaseMetadata{
+		ReleaseID: "rel-multiarch", Version: "v2.0.0", Architecture: "amd64",
+		ArtifactName: amd64Name, StagedAt: time.Now().UTC(),
+	}
+	if err := writeJSONAtomic(filepath.Join(dir, "metadata.json"), meta); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	if err := VerifyReleaseDir(dir, pub, "v1.0.0"); err != nil {
+		t.Fatalf("VerifyReleaseDir: %v", err)
 	}
 }
 

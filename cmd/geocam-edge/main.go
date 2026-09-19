@@ -943,18 +943,15 @@ func runOTAVerifyCmd(args []string) {
 		return
 	}
 	fs := flag.NewFlagSet("ota verify", flag.ExitOnError)
-	artifact := fs.String("artifact", "", "path to the downloaded artifact tar.gz")
-	sums := fs.String("sha256sums", "", "path to the downloaded SHA256SUMS manifest")
-	sig := fs.String("signature", "", "path to the downloaded SHA256SUMS.sig")
+	artifactDir := fs.String("artifact-dir", "", "path to a staged release dir (metadata.json, SHA256SUMS, SHA256SUMS.sig, artifact) -- preferred; the exact contract IA2's privileged updater reuses")
+	artifact := fs.String("artifact", "", "flag mode: path to the artifact tar.gz (used only when -artifact-dir is not given)")
+	sums := fs.String("sha256sums", "", "flag mode: path to the SHA256SUMS manifest")
+	sig := fs.String("signature", "", "flag mode: path to SHA256SUMS.sig")
 	pubKeyFile := fs.String("public-key", "", "path to the Ed25519 public key (defaults to GEOCAM_OTA_PUBLIC_KEY_FILE)")
-	version := fs.String("version", "", "expected release version (vX.Y.Z), checked against the running agent version")
-	arch := fs.String("arch", "", "expected architecture (amd64|arm64)")
+	version := fs.String("version", "", "flag mode: expected release version (vX.Y.Z) -- required together with -arch to check the VERSION/ARCH binding")
+	arch := fs.String("arch", "", "flag mode: expected architecture (amd64|arm64) -- required together with -version")
+	currentVersion := fs.String("current-version", "", "version treated as 'current' for forward-eligibility (default: running agent version)")
 	_ = fs.Parse(args)
-
-	if *artifact == "" || *sums == "" || *sig == "" {
-		fmt.Fprintln(os.Stderr, "geocam-edge ota verify: -artifact, -sha256sums and -signature are required")
-		os.Exit(1)
-	}
 
 	keyPath := *pubKeyFile
 	if keyPath == "" {
@@ -967,7 +964,24 @@ func runOTAVerifyCmd(args []string) {
 		fmt.Fprintf(os.Stderr, "geocam-edge ota verify: %v\n", err)
 		os.Exit(1)
 	}
+	curVer := *currentVersion
+	if curVer == "" {
+		curVer = agent.Version
+	}
 
+	if *artifactDir != "" {
+		if err := ota.VerifyReleaseDir(*artifactDir, pubKey, curVer); err != nil {
+			fmt.Fprintf(os.Stderr, "geocam-edge ota verify: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("OK: signature valid, checksum matches, VERSION/ARCH bound to the release descriptor.")
+		return
+	}
+
+	if *artifact == "" || *sums == "" || *sig == "" {
+		fmt.Fprintln(os.Stderr, "geocam-edge ota verify: either -artifact-dir, or -artifact/-sha256sums/-signature, are required")
+		os.Exit(1)
+	}
 	manifest, err := os.ReadFile(*sums)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "geocam-edge ota verify: read sha256sums: %v\n", err)
@@ -978,29 +992,27 @@ func runOTAVerifyCmd(args []string) {
 		fmt.Fprintf(os.Stderr, "geocam-edge ota verify: read signature: %v\n", err)
 		os.Exit(1)
 	}
+	artifactName := filepath.Base(*artifact)
+
+	if *version != "" && *arch != "" {
+		if err := ota.VerifyReleaseFiles(*artifact, manifest, sigBytes, pubKey, artifactName, curVer, *version, *arch); err != nil {
+			fmt.Fprintf(os.Stderr, "geocam-edge ota verify: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("OK: signature valid, checksum matches, VERSION/ARCH bound to the release descriptor.")
+		return
+	}
 
 	if err := ota.VerifyManifestSignature(manifest, sigBytes, pubKey); err != nil {
 		fmt.Fprintf(os.Stderr, "geocam-edge ota verify: %v\n", err)
 		os.Exit(1)
 	}
-	if err := ota.VerifyArtifactChecksum(*artifact, manifest, filepath.Base(*artifact)); err != nil {
+	if err := ota.VerifyArtifactChecksum(*artifact, manifest, artifactName); err != nil {
 		fmt.Fprintf(os.Stderr, "geocam-edge ota verify: %v\n", err)
 		os.Exit(1)
 	}
-	if *arch != "" {
-		if err := ota.VerifyArchiveLayout(*artifact, *arch); err != nil {
-			fmt.Fprintf(os.Stderr, "geocam-edge ota verify: %v\n", err)
-			os.Exit(1)
-		}
-	}
-	if *version != "" {
-		if err := ota.VerifyEligible(agent.Version, *version); err != nil {
-			fmt.Fprintf(os.Stderr, "geocam-edge ota verify: %v\n", err)
-			os.Exit(1)
-		}
-	}
-
-	fmt.Println("OK: signature valid, checksum matches, layout verified.")
+	fmt.Fprintln(os.Stderr, "geocam-edge ota verify: warning: -version and -arch were not both given -- VERSION/ARCH binding was NOT checked")
+	fmt.Println("OK: signature valid, checksum matches.")
 }
 
 // runOTASignCmd implements `geocam-edge ota sign`, used only by the
@@ -1277,21 +1289,29 @@ Run 'geocam-edge ota verify --help' or 'geocam-edge ota sign --help' for details
 
 func printOTAUsage(w io.Writer) { fmt.Fprint(w, otaUsage) }
 
-const otaVerifyUsage = `Usage: geocam-edge ota verify -artifact <path> -sha256sums <path> -signature <path> [-public-key <path>] [-version <vX.Y.Z>] [-arch <amd64|arm64>]
+const otaVerifyUsage = `Usage: geocam-edge ota verify -artifact-dir <staged-release-dir> [-public-key <path>] [-current-version <vX.Y.Z>]
+   or: geocam-edge ota verify -artifact <path> -sha256sums <path> -signature <path> [-public-key <path>] [-version <vX.Y.Z> -arch <amd64|arm64>] [-current-version <vX.Y.Z>]
 
 Verify a downloaded OTA release (Hito T4), fail-closed, in order:
 
   1. SHA256SUMS.sig is a valid Ed25519 signature of SHA256SUMS under the
      configured public key. No signature or no key -> reject; no
      checksum-only fallback exists.
-  2. The artifact's real SHA-256 matches the (now-trusted) SHA256SUMS entry.
-  3. If -arch is given: the artifact's ARCH marker matches.
-  4. If -version is given: it is a valid, strictly newer version than the
-     running agent's (see 'geocam-edge version').
+  2. The artifact's real SHA-256 matches the (now-trusted) SHA256SUMS entry
+     for its recorded artifact name.
+  3. The candidate version is a valid, strictly newer version than
+     -current-version (default: the running agent's, see 'geocam-edge
+     version').
+  4. The artifact's own embedded VERSION/ARCH exactly match the release
+     descriptor's version/architecture -- a descriptor and its artifact
+     are never allowed to diverge silently.
 
-This is the exact logic the appliance runs internally before staging
-DataDir/ota/apply.request, exposed here so it can be re-run independently
-by an operator or by the privileged updater before applying.
+-artifact-dir is preferred: it points at a directory produced by this
+appliance's own OTA download (metadata.json + SHA256SUMS + SHA256SUMS.sig +
+the named artifact), and is the exact contract IA2's privileged updater
+reuses unmodified against a root-owned snapshot of that directory. Flag
+mode (-artifact/-sha256sums/-signature) is for ad-hoc verification; step 4
+only runs there when both -version and -arch are given.
 `
 
 func printOTAVerifyUsage(w io.Writer) { fmt.Fprint(w, otaVerifyUsage) }

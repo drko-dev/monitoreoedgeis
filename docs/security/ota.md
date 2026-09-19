@@ -19,12 +19,15 @@ an OTA failure into a heartbeat failure).
 ```
 heartbeat success -> ota.Module.CheckOnce
                         -> transport.Client.GetNextOTARelease   (Edge-authenticated)
-                        -> ota.IsUpdateEligible                 (T1)
-                        -> ota.FileDownloader.FetchAndStage      (T3, no Edge creds)
-                             -> VerifyManifestSignature           (T4, Ed25519)
-                             -> VerifyArtifactChecksum             (T4, SHA-256)
-                             -> VerifyEligible                     (T1, re-checked)
-                             -> VerifyArchiveLayout                (full appliance layout)
+                        -> ota.IsUpdateEligible                 (T1, cheap pre-filter)
+                        -> ota.FileDownloader.FetchAndStage      (T3, no Edge creds, validated release_id)
+                             -> download SHA256SUMS/.sig/artifact under their REAL names
+                             -> write metadata.json (release_id, version, arch, artifact_name)
+                             -> VerifyReleaseDir == VerifyReleaseFiles  (T4, single reusable pipeline)
+                                  -> VerifyManifestSignature   (Ed25519)
+                                  -> VerifyArtifactChecksum    (SHA-256, by artifact_name)
+                                  -> VerifyEligible            (T1, re-checked)
+                                  -> VerifyArchiveBinding      (artifact's own VERSION/ARCH == descriptor's)
                              -> atomic rename into ota/pending/<release-id>/
                              -> atomic write of ota/apply.request  (LAST step)
 ```
@@ -58,16 +61,29 @@ queued.
 
 `FileDownloader` uses a completely separate `http.Client` from the
 Edge↔SaaS `transport.Client` — it never sets `Authorization` or
-`X-Device-Id`. HTTPS is required on every request; the initial (SaaS-
-issued) URL is trusted for scheme only, while `CheckRedirect` applies the
-full guard (HTTPS + reject private/loopback/link-local resolved
-addresses) to every redirect target, since a redirect is attacker/CDN-
-controlled in a way the initial URL is not. This is not a general
-arbitrary-URL downloader: it fetches exactly the three URLs a release
-descriptor names, from GitHub Releases.
+`X-Device-Id`. `validateArtifactURL` applies the SAME full guard to the
+**initial** SaaS-issued URL and to every redirect target: HTTPS only, host
+must be on a fixed GitHub Releases allowlist (`github.com`,
+`objects.githubusercontent.com` and the other GitHub release-asset CDN
+hostnames), and the resolved address must not be
+private/loopback/link-local/unspecified. This is not a general
+arbitrary-HTTPS downloader — a host outside that allowlist is rejected
+before a single byte is requested, on the initial request just as much as
+on a redirect.
 
-Staging is atomic: everything is downloaded and verified into a scratch
-temp dir first; only on full success is that dir renamed into
+`release_id` (from the SaaS-authenticated release descriptor) is validated
+against a closed character class (`[A-Za-z0-9._-]`, ≤64 chars, must
+start/end alphanumeric, no `..`) *before* it is used to build any
+filesystem path, and the resolved `ota/pending/<release-id>` path is
+additionally confirmed to stay strictly inside `ota/pending` — no
+`MkdirAll`/`Stat`/`RemoveAll`/`Rename`/write ever touches a path derived
+from an unvalidated ID. The artifact's own filename (the SaaS-issued
+URL's basename) goes through the same discipline (`validateArtifactName`)
+before being used as the local staged filename.
+
+Staging is atomic: everything is downloaded (under its REAL name — the
+same name `SHA256SUMS` lists, not a generic placeholder) and verified into
+a scratch temp dir first; only on full success is that dir renamed into
 `ota/pending/<release-id>/` and `ota/apply.request` written (temp file +
 rename), in that order. A crash at any point before both of those succeed
 leaves no `apply.request` and no misleading partial pending dir.
@@ -84,18 +100,34 @@ Satisfies every requirement in
 - **Appliance holds only the public key**, provisioned out-of-band via
   `GEOCAM_OTA_PUBLIC_KEY_FILE` (root-managed file), never fetched from the
   artifact channel itself.
-- **Verification order, fail closed, no checksum-only fallback**:
+- **Verification order, fail closed, no checksum-only fallback**
+  (`ota.VerifyReleaseFiles`, the single implementation behind
+  `FetchAndStage`, `ota verify --artifact-dir` and flag mode):
   1. Ed25519 signature of `SHA256SUMS` under the configured public key.
-  2. Artifact's real SHA-256 against that now-trusted `SHA256SUMS`.
-  3. Forward-update eligibility (T1), re-checked at verification time.
-  4. Full appliance archive layout (`geocam-edge`, `VERSION`, `ARCH`) and
-     architecture match.
+  2. Artifact's real SHA-256, looked up in `SHA256SUMS` by its **actual
+     signed name** (`metadata.json`'s `artifact_name`) — not by whatever
+     the locally staged file happens to be called.
+  3. Forward-update eligibility (T1) between the running version and the
+     release descriptor's version.
+  4. `VerifyArchiveBinding`: the artifact's own embedded `VERSION`/`ARCH`
+     markers must exactly match the release descriptor's version/
+     architecture. A descriptor claiming `v2.0.0` whose artifact was
+     internally built as `v0.9.0` is rejected here, even though its
+     signature and checksum are both valid — descriptor and artifact are
+     never allowed to diverge silently.
   A missing/unreadable public key or missing/empty signature is rejected
   outright — never silently treated as "signature not required."
 
-`geocam-edge ota verify` exposes this exact logic as a CLI subcommand so it
-can be re-run independently by an operator or reused unmodified by IA2's
-privileged updater before it ever activates a staged release.
+`geocam-edge ota verify --artifact-dir <pending-release-dir>` is the
+preferred, canonical contract: it reads `metadata.json` (`release_id`,
+`version`, `architecture`, `artifact_name`) plus `SHA256SUMS`,
+`SHA256SUMS.sig` and the named artifact from that one directory, and runs
+`ota.VerifyReleaseDir` — the exact function `FetchAndStage` itself calls.
+IA2's privileged updater copies a pending-release directory to a
+root-owned snapshot and re-runs this unmodified before activating
+anything. A `-artifact`/`-sha256sums`/`-signature` flag mode also exists
+for ad-hoc verification of individual files; the VERSION/ARCH binding step
+only runs there when both `-version` and `-arch` are given.
 
 ## Release pipeline
 

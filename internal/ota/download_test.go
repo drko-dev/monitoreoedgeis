@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
@@ -75,12 +76,19 @@ func newTestApplianceRelease(t *testing.T, arch, version string, capturedHeaders
 
 // newDownloaderForTest builds a FileDownloader whose httpClient trusts the
 // given test server's TLS certificate, so it can talk to httptest.NewTLSServer
-// without disabling the download path's own security checks.
+// without disabling the download path's own security-of-CONTENT checks
+// (signature/checksum/binding). It DOES relax the host-safety check
+// (allowlist + private-IP rejection) to accept the test server's own
+// 127.0.0.1 address -- production wiring (internal/agent) never does this;
+// see TestValidateArtifactURL_* for the host-safety checks exercised
+// against the real, unrelaxed defaults.
 func newDownloaderForTest(t *testing.T, srv *httptest.Server, dataDir string, pub ed25519.PublicKey, currentVersion, arch string) *FileDownloader {
 	t.Helper()
 	d := NewFileDownloader(dataDir, pub, currentVersion, arch, nil)
+	d.allowedHosts = map[string]bool{"127.0.0.1": true}
+	d.skipHostSafetyForTest = true
 	d.httpClient = srv.Client()
-	d.httpClient.CheckRedirect = rejectUnsafeRedirect
+	d.httpClient.CheckRedirect = d.checkRedirect
 	return d
 }
 
@@ -203,5 +211,166 @@ func TestFetchAndStage_AtomicStaging(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, "ota", "pending", release.ReleaseID)); err == nil {
 		t.Fatal("no pending release dir should be staged when verification failed")
+	}
+}
+
+// --- BLOCKER 1: release_id path traversal -------------------------------
+
+func TestValidateReleaseID_RejectsTraversalAndInvalidForms(t *testing.T) {
+	bad := []string{
+		"",
+		"../../credentials.json",
+		"..",
+		"a/b",
+		`a\b`,
+		"a/../../etc/passwd",
+		"-leadingdash",
+		"trailingdash-",
+		".leadingdot",
+		"trailingdot.",
+		"a..b",
+		strings.Repeat("a", 65),
+	}
+	for _, id := range bad {
+		if err := validateReleaseID(id); err == nil {
+			t.Errorf("validateReleaseID(%q) = nil, want error", id)
+		}
+	}
+
+	good := []string{"rel-1", "a", strings.Repeat("a", 64), "rel_2024.01.02"}
+	for _, id := range good {
+		if err := validateReleaseID(id); err != nil {
+			t.Errorf("validateReleaseID(%q) unexpected error: %v", id, err)
+		}
+	}
+}
+
+// TestFetchAndStage_RejectsPathTraversalReleaseID is BLOCKER 1's exact
+// regression: a malicious release_id must be rejected before ANY
+// filesystem operation, and must never be able to escape
+// DataDir/ota/pending to reach a neighboring file.
+func TestFetchAndStage_RejectsPathTraversalReleaseID(t *testing.T) {
+	dataDir := t.TempDir()
+	sentinel := filepath.Join(dataDir, "credentials.json")
+	if err := os.WriteFile(sentinel, []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	for _, maliciousID := range []string{"../../credentials.json", "..", "a/../../credentials.json"} {
+		d := NewFileDownloader(dataDir, nil, "v1.0.0", "amd64", nil)
+		release := &transport.OTARelease{
+			ReleaseID: maliciousID, Version: "v2.0.0", Architecture: "amd64",
+			ArtifactURL:   "https://github.com/drko-dev/monitoreoedgeis/releases/download/v2.0.0/x.tar.gz",
+			SHA256SUMSURL: "https://github.com/drko-dev/monitoreoedgeis/releases/download/v2.0.0/SHA256SUMS",
+			SignatureURL:  "https://github.com/drko-dev/monitoreoedgeis/releases/download/v2.0.0/SHA256SUMS.sig",
+		}
+		if err := d.FetchAndStage(context.Background(), release); err == nil {
+			t.Errorf("release_id %q: expected rejection, got nil error", maliciousID)
+		}
+	}
+
+	got, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatalf("sentinel file was removed by a path-traversal release_id: %v", err)
+	}
+	if string(got) != "secret" {
+		t.Fatalf("sentinel file was modified by a path-traversal release_id: %q", got)
+	}
+	entries, _ := os.ReadDir(dataDir)
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name()
+	}
+	if len(entries) != 1 || names[0] != "credentials.json" {
+		t.Fatalf("unexpected files created directly under DataDir: %v", names)
+	}
+}
+
+// --- BLOCKER 2: SSRF / arbitrary host ------------------------------------
+
+func TestValidateArtifactURL_RejectsNonHTTPS(t *testing.T) {
+	d := NewFileDownloader(t.TempDir(), nil, "v1.0.0", "amd64", nil)
+	if err := d.validateArtifactURL("http://github.com/x"); err == nil {
+		t.Fatal("expected a non-https initial URL to be rejected")
+	}
+}
+
+func TestValidateArtifactURL_RejectsInitialLoopback(t *testing.T) {
+	d := NewFileDownloader(t.TempDir(), nil, "v1.0.0", "amd64", nil)
+	if err := d.validateArtifactURL("https://127.0.0.1/x"); err == nil {
+		t.Fatal("expected the INITIAL URL to reject a loopback host (not just redirects)")
+	}
+}
+
+func TestValidateArtifactURL_RejectsInitialPrivateRFC1918(t *testing.T) {
+	d := NewFileDownloader(t.TempDir(), nil, "v1.0.0", "amd64", nil)
+	if err := d.validateArtifactURL("https://10.1.2.3/x"); err == nil {
+		t.Fatal("expected the INITIAL URL to reject an RFC1918 private host")
+	}
+}
+
+func TestValidateArtifactURL_RejectsDisallowedPublicHost(t *testing.T) {
+	d := NewFileDownloader(t.TempDir(), nil, "v1.0.0", "amd64", nil)
+	if err := d.validateArtifactURL("https://evil.example.com/x"); err == nil {
+		t.Fatal("expected a public host outside the GitHub Releases allowlist to be rejected")
+	}
+}
+
+// TestValidateArtifactURL_AcceptsOfficialHosts isolates the allowlist
+// decision from a real DNS lookup (skipHostSafetyForTest) so this test
+// stays hermetic/offline -- the private/loopback rejection itself is
+// covered by the tests above using IP-literal hosts, which never reach DNS.
+func TestValidateArtifactURL_AcceptsOfficialHosts(t *testing.T) {
+	d := NewFileDownloader(t.TempDir(), nil, "v1.0.0", "amd64", nil)
+	d.skipHostSafetyForTest = true
+	for _, u := range []string{
+		"https://github.com/drko-dev/monitoreoedgeis/releases/download/v1.0.0/x.tar.gz",
+		"https://objects.githubusercontent.com/x",
+		"https://github-releases.githubusercontent.com/x",
+	} {
+		if err := d.validateArtifactURL(u); err != nil {
+			t.Errorf("expected official host in %q to be accepted, got: %v", u, err)
+		}
+	}
+}
+
+// TestFetchAndStage_RejectsDisallowedInitialHost is BLOCKER 2's exact
+// regression: a release descriptor pointing at a host outside the GitHub
+// Releases allowlist must be rejected on the INITIAL request, not only on
+// a redirect.
+func TestFetchAndStage_RejectsDisallowedInitialHost(t *testing.T) {
+	d := NewFileDownloader(t.TempDir(), nil, "v1.0.0", "amd64", nil)
+	release := &transport.OTARelease{
+		ReleaseID: "rel-1", Version: "v2.0.0", Architecture: "amd64",
+		ArtifactURL:   "https://evil.example.com/artifact.tar.gz",
+		SHA256SUMSURL: "https://evil.example.com/SHA256SUMS",
+		SignatureURL:  "https://evil.example.com/SHA256SUMS.sig",
+	}
+	if err := d.FetchAndStage(context.Background(), release); err == nil {
+		t.Fatal("expected a non-allowlisted initial artifact host to be rejected")
+	}
+}
+
+func TestCheckRedirect_RejectsPrivateTarget(t *testing.T) {
+	d := NewFileDownloader(t.TempDir(), nil, "v1.0.0", "amd64", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://10.0.0.5/evil", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	if err := d.checkRedirect(req, nil); err == nil {
+		t.Fatal("expected a redirect to a private address to be rejected")
+	}
+}
+
+func TestCheckRedirect_RejectsTooManyHops(t *testing.T) {
+	d := NewFileDownloader(t.TempDir(), nil, "v1.0.0", "amd64", nil)
+	d.skipHostSafetyForTest = true
+	req, err := http.NewRequest(http.MethodGet, "https://github.com/x", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	via := make([]*http.Request, 5)
+	if err := d.checkRedirect(req, via); err == nil {
+		t.Fatal("expected too many redirect hops to be rejected")
 	}
 }
