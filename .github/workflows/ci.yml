@@ -62,7 +62,349 @@ jobs:
           GEOCAM_PERF: '1'
           GEOCAM_PERF_CAMERAS: '5'
           GEOCAM_PERF_DURATION: 3s
-        run: go test -race ./internal/perf -run '^TestScaleFull$' -count=1 -v
+        run: go test -race ./internal/perf -run '^TestScaleFull
+  # Hito W10/W11: validate release artifacts for both deployment
+  # architectures. This is cross-build/package evidence; it is not a claim
+  # that physical ARM64 hardware was exercised.
+  multiarch-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.2'
+
+      - name: Build linux deployment binaries
+        run: make build-linux VERSION=ci
+
+      - name: Validate ELF and Go build metadata
+        run: |
+          file bin/geocam-edge-linux-amd64 | tee /tmp/file-amd64
+          grep -Eq 'x86-64|x86_64' /tmp/file-amd64
+          go version -m bin/geocam-edge-linux-amd64 | tee /tmp/go-amd64
+          grep -q 'GOARCH=amd64' /tmp/go-amd64
+
+          file bin/geocam-edge-linux-arm64 | tee /tmp/file-arm64
+          grep -Eq 'ARM aarch64|aarch64' /tmp/file-arm64
+          go version -m bin/geocam-edge-linux-arm64 | tee /tmp/go-arm64
+          grep -q 'GOARCH=arm64' /tmp/go-arm64
+
+      - name: Package appliance artifacts
+        run: bash deploy/appliance/scripts/package.sh ci "$PWD/dist"
+
+      - name: Validate package layout and checksums
+        run: |
+          for arch in amd64 arm64; do
+            artifact="geocam-edge-ci-linux-$arch.tar.gz"
+            checksum="$artifact.sha256"
+
+            test -f "dist/$artifact"
+            test -f "dist/$checksum"
+            (cd dist && sha256sum -c "$checksum")
+
+            stage="$(mktemp -d)"
+            tar xzf "dist/$artifact" -C "$stage"
+
+            test -f "$stage/geocam-edge"
+            test -x "$stage/geocam-edge"
+            test -f "$stage/VERSION"
+            test -f "$stage/ARCH"
+            test -d "$stage/scripts"
+            test -d "$stage/systemd"
+            test -d "$stage/config"
+
+            test "$(cat "$stage/VERSION")" = "ci"
+            test "$(cat "$stage/ARCH")" = "$arch"
+            go version -m "$stage/geocam-edge" | grep -q "GOARCH=$arch"
+
+            rm -rf "$stage"
+          done
+
+  # Exercise the Dockerfile's Go build stage for both deployment
+  # architectures. arm64 runs through QEMU/Buildx and is explicitly not
+  # treated as physical ARM64 runtime validation.
+  docker-go-stage-multiarch:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Go stage
+        run: |
+          docker buildx build \
+            --platform "linux/${{ matrix.arch }}" \
+            --target build \
+            --output "type=local,dest=build-${{ matrix.arch }}" \
+            .
+
+      - name: Validate Docker-stage artifact architecture
+        run: |
+          binary="build-${{ matrix.arch }}/out/geocam-edge"
+          test -f "$binary"
+          file "$binary"
+          go version -m "$binary" | tee /tmp/go-image-stage
+          grep -q "GOARCH=${{ matrix.arch }}" /tmp/go-image-stage
+
+  # Hito H: validates the Docker image's LGPL-only ffmpeg build on a real
+  # linux/amd64 machine (GitHub-hosted ubuntu-latest runners are amd64 —
+  # no QEMU emulation, unlike local verification on an Apple Silicon dev
+  # machine, which was cut short for exactly this reason). Docker-image-only,
+  # does not touch Go build/test/vet/fmt (covered by the `build` job above)
+  # or the real TC70 hardware test (which uses a separate local machine).
+  docker-amd64-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image (linux/amd64, real hardware, no emulation)
+        run: |
+          docker build \
+            --build-arg VERSION=ci \
+            --build-arg COMMIT=${{ github.sha }} \
+            --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            -t geocam-edge:amd64-smoke .
+
+      - name: Confirm image architecture is amd64
+        run: |
+          arch=$(docker image inspect geocam-edge:amd64-smoke --format '{{.Architecture}}')
+          echo "architecture: $arch"
+          [ "$arch" = "amd64" ] || { echo "FAIL: expected amd64, got $arch"; exit 1; }
+
+      - name: Confirm nonroot user is configured
+        run: |
+          user=$(docker image inspect geocam-edge:amd64-smoke --format '{{.Config.User}}')
+          echo "configured user: $user"
+          [ "$user" = "nonroot:nonroot" ] || { echo "FAIL: expected nonroot:nonroot, got $user"; exit 1; }
+
+      - name: ffmpeg -version has no GPL/nonfree/libx264/libx265
+        run: |
+          out=$(docker run --rm --entrypoint /usr/local/bin/ffmpeg geocam-edge:amd64-smoke -version)
+          echo "$out"
+          if echo "$out" | grep -Eq -- '--enable-gpl|--enable-nonfree|--enable-libx264|--enable-libx265'; then
+            echo "FAIL: a GPL/nonfree/libx264/libx265 flag is present in ffmpeg -version"
+            exit 1
+          fi
+          echo "OK: no GPL/nonfree/libx264/libx265 flags"
+
+      - name: H264 -> rawvideo decode smoke (exact production pipeline command)
+        run: |
+          # Generate a tiny test clip with a throwaway full ffmpeg (CI
+          # tooling only — never part of the shipped image, which has no
+          # encoder at all).
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc=size=64x64:rate=5 \
+            -frames:v 5 -c:v libx264 -profile:v baseline -pix_fmt yuv420p -f h264 clip.h264
+
+          docker run -i --rm --entrypoint /usr/local/bin/ffmpeg geocam-edge:amd64-smoke \
+            -hide_banner -loglevel error -f h264 -i pipe:0 -f rawvideo -pix_fmt yuv420p -an -sn pipe:1 \
+            < clip.h264 > out.raw
+
+          size=$(stat -c%s out.raw)
+          expected=$((64 * 64 * 3 / 2 * 5))
+          echo "decoded output: ${size} bytes, expected: ${expected} bytes (5 frames of 64x64 yuv420p)"
+          [ "$size" -eq "$expected" ] || { echo "FAIL: unexpected decoded output size"; exit 1; }
+          echo "OK: decode smoke passed"
+
+      - name: geocam-edge starts and container stays up as nonroot
+        run: |
+          docker run --rm --entrypoint /usr/local/bin/geocam-edge geocam-edge:amd64-smoke version
+
+          docker run -d --name smoke geocam-edge:amd64-smoke
+          sleep 3
+          status=$(docker inspect -f '{{.State.Status}}' smoke)
+          echo "container status: $status"
+          docker logs smoke
+          if [ "$status" != "running" ]; then
+            echo "FAIL: container is not running"
+            exit 1
+          fi
+          docker rm -f smoke
+          echo "OK: container started and stayed up as nonroot"
+ -count=1 -v
+
+      - name: Hito X integration 25-camera synthetic profile
+        if: github.event_name == 'pull_request' && github.head_ref == 'integration/hito-x-performance'
+        env:
+          GEOCAM_PERF: '1'
+          GEOCAM_PERF_CAMERAS: '25'
+          GEOCAM_PERF_DURATION: 3s
+        run: go test ./internal/perf -run '^TestScaleFull
+  # Hito W10/W11: validate release artifacts for both deployment
+  # architectures. This is cross-build/package evidence; it is not a claim
+  # that physical ARM64 hardware was exercised.
+  multiarch-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.2'
+
+      - name: Build linux deployment binaries
+        run: make build-linux VERSION=ci
+
+      - name: Validate ELF and Go build metadata
+        run: |
+          file bin/geocam-edge-linux-amd64 | tee /tmp/file-amd64
+          grep -Eq 'x86-64|x86_64' /tmp/file-amd64
+          go version -m bin/geocam-edge-linux-amd64 | tee /tmp/go-amd64
+          grep -q 'GOARCH=amd64' /tmp/go-amd64
+
+          file bin/geocam-edge-linux-arm64 | tee /tmp/file-arm64
+          grep -Eq 'ARM aarch64|aarch64' /tmp/file-arm64
+          go version -m bin/geocam-edge-linux-arm64 | tee /tmp/go-arm64
+          grep -q 'GOARCH=arm64' /tmp/go-arm64
+
+      - name: Package appliance artifacts
+        run: bash deploy/appliance/scripts/package.sh ci "$PWD/dist"
+
+      - name: Validate package layout and checksums
+        run: |
+          for arch in amd64 arm64; do
+            artifact="geocam-edge-ci-linux-$arch.tar.gz"
+            checksum="$artifact.sha256"
+
+            test -f "dist/$artifact"
+            test -f "dist/$checksum"
+            (cd dist && sha256sum -c "$checksum")
+
+            stage="$(mktemp -d)"
+            tar xzf "dist/$artifact" -C "$stage"
+
+            test -f "$stage/geocam-edge"
+            test -x "$stage/geocam-edge"
+            test -f "$stage/VERSION"
+            test -f "$stage/ARCH"
+            test -d "$stage/scripts"
+            test -d "$stage/systemd"
+            test -d "$stage/config"
+
+            test "$(cat "$stage/VERSION")" = "ci"
+            test "$(cat "$stage/ARCH")" = "$arch"
+            go version -m "$stage/geocam-edge" | grep -q "GOARCH=$arch"
+
+            rm -rf "$stage"
+          done
+
+  # Exercise the Dockerfile's Go build stage for both deployment
+  # architectures. arm64 runs through QEMU/Buildx and is explicitly not
+  # treated as physical ARM64 runtime validation.
+  docker-go-stage-multiarch:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Go stage
+        run: |
+          docker buildx build \
+            --platform "linux/${{ matrix.arch }}" \
+            --target build \
+            --output "type=local,dest=build-${{ matrix.arch }}" \
+            .
+
+      - name: Validate Docker-stage artifact architecture
+        run: |
+          binary="build-${{ matrix.arch }}/out/geocam-edge"
+          test -f "$binary"
+          file "$binary"
+          go version -m "$binary" | tee /tmp/go-image-stage
+          grep -q "GOARCH=${{ matrix.arch }}" /tmp/go-image-stage
+
+  # Hito H: validates the Docker image's LGPL-only ffmpeg build on a real
+  # linux/amd64 machine (GitHub-hosted ubuntu-latest runners are amd64 —
+  # no QEMU emulation, unlike local verification on an Apple Silicon dev
+  # machine, which was cut short for exactly this reason). Docker-image-only,
+  # does not touch Go build/test/vet/fmt (covered by the `build` job above)
+  # or the real TC70 hardware test (which uses a separate local machine).
+  docker-amd64-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image (linux/amd64, real hardware, no emulation)
+        run: |
+          docker build \
+            --build-arg VERSION=ci \
+            --build-arg COMMIT=${{ github.sha }} \
+            --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            -t geocam-edge:amd64-smoke .
+
+      - name: Confirm image architecture is amd64
+        run: |
+          arch=$(docker image inspect geocam-edge:amd64-smoke --format '{{.Architecture}}')
+          echo "architecture: $arch"
+          [ "$arch" = "amd64" ] || { echo "FAIL: expected amd64, got $arch"; exit 1; }
+
+      - name: Confirm nonroot user is configured
+        run: |
+          user=$(docker image inspect geocam-edge:amd64-smoke --format '{{.Config.User}}')
+          echo "configured user: $user"
+          [ "$user" = "nonroot:nonroot" ] || { echo "FAIL: expected nonroot:nonroot, got $user"; exit 1; }
+
+      - name: ffmpeg -version has no GPL/nonfree/libx264/libx265
+        run: |
+          out=$(docker run --rm --entrypoint /usr/local/bin/ffmpeg geocam-edge:amd64-smoke -version)
+          echo "$out"
+          if echo "$out" | grep -Eq -- '--enable-gpl|--enable-nonfree|--enable-libx264|--enable-libx265'; then
+            echo "FAIL: a GPL/nonfree/libx264/libx265 flag is present in ffmpeg -version"
+            exit 1
+          fi
+          echo "OK: no GPL/nonfree/libx264/libx265 flags"
+
+      - name: H264 -> rawvideo decode smoke (exact production pipeline command)
+        run: |
+          # Generate a tiny test clip with a throwaway full ffmpeg (CI
+          # tooling only — never part of the shipped image, which has no
+          # encoder at all).
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc=size=64x64:rate=5 \
+            -frames:v 5 -c:v libx264 -profile:v baseline -pix_fmt yuv420p -f h264 clip.h264
+
+          docker run -i --rm --entrypoint /usr/local/bin/ffmpeg geocam-edge:amd64-smoke \
+            -hide_banner -loglevel error -f h264 -i pipe:0 -f rawvideo -pix_fmt yuv420p -an -sn pipe:1 \
+            < clip.h264 > out.raw
+
+          size=$(stat -c%s out.raw)
+          expected=$((64 * 64 * 3 / 2 * 5))
+          echo "decoded output: ${size} bytes, expected: ${expected} bytes (5 frames of 64x64 yuv420p)"
+          [ "$size" -eq "$expected" ] || { echo "FAIL: unexpected decoded output size"; exit 1; }
+          echo "OK: decode smoke passed"
+
+      - name: geocam-edge starts and container stays up as nonroot
+        run: |
+          docker run --rm --entrypoint /usr/local/bin/geocam-edge geocam-edge:amd64-smoke version
+
+          docker run -d --name smoke geocam-edge:amd64-smoke
+          sleep 3
+          status=$(docker inspect -f '{{.State.Status}}' smoke)
+          echo "container status: $status"
+          docker logs smoke
+          if [ "$status" != "running" ]; then
+            echo "FAIL: container is not running"
+            exit 1
+          fi
+          docker rm -f smoke
+          echo "OK: container started and stayed up as nonroot"
+ -count=1 -v
 
   # Hito W10/W11: validate release artifacts for both deployment
   # architectures. This is cross-build/package evidence; it is not a claim
