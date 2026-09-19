@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch GEO CAM Edge OTA apply request
+
+[Path]
+PathChanged=@GEOCAM_DATA_DIR_PLACEHOLDER@/ota/apply.request
+Unit=geocam-edge-ota-updater.service
+
+[Install]
+WantedBy=multi-user.target

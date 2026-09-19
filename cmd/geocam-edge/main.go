@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/factoryreset"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
+	"github.com/drko-dev/monitoreoedgeis/internal/ota"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
@@ -62,6 +64,8 @@ func main() {
 		runDiscoveryCmd(args)
 	case "saas":
 		runSaasCmd(args)
+	case "ota":
+		runOTACmd(args)
 	default:
 		fmt.Fprintf(os.Stderr, "geocam-edge: unknown command %q\n", cmd)
 		fmt.Fprintln(os.Stderr, "Run 'geocam-edge --help' for usage.")
@@ -908,6 +912,159 @@ func saasCheckReport(saasURL, edgeID string, me transport.MeResponse, err error)
 	), false
 }
 
+// runOTACmd dispatches `geocam-edge ota <subcommand>`.
+func runOTACmd(args []string) {
+	if len(args) == 0 || isHelpRequest(args) {
+		printOTAUsage(os.Stdout)
+		if len(args) == 0 {
+			os.Exit(1)
+		}
+		return
+	}
+	switch args[0] {
+	case "verify":
+		runOTAVerifyCmd(args[1:])
+	case "sign":
+		runOTASignCmd(args[1:])
+	default:
+		fmt.Fprintln(os.Stderr, "geocam-edge ota: usage: geocam-edge ota <verify|sign>")
+		os.Exit(1)
+	}
+}
+
+// runOTAVerifyCmd implements `geocam-edge ota verify` (Hito T4): the same
+// signature/checksum/layout verification the appliance runs internally
+// before staging apply.request, reused here so a human or IA2's privileged
+// updater can independently re-run it against an already-downloaded set of
+// files.
+func runOTAVerifyCmd(args []string) {
+	if isHelpRequest(args) {
+		printOTAVerifyUsage(os.Stdout)
+		return
+	}
+	fs := flag.NewFlagSet("ota verify", flag.ExitOnError)
+	artifactDir := fs.String("artifact-dir", "", "path to a staged release dir (metadata.json, SHA256SUMS, SHA256SUMS.sig, artifact) -- preferred; the exact contract IA2's privileged updater reuses")
+	artifact := fs.String("artifact", "", "flag mode: path to the artifact tar.gz (used only when -artifact-dir is not given)")
+	sums := fs.String("sha256sums", "", "flag mode: path to the SHA256SUMS manifest")
+	sig := fs.String("signature", "", "flag mode: path to SHA256SUMS.sig")
+	pubKeyFile := fs.String("public-key", "", "path to the Ed25519 public key (defaults to GEOCAM_OTA_PUBLIC_KEY_FILE)")
+	version := fs.String("version", "", "flag mode: expected release version (vX.Y.Z) -- required together with -arch to check the VERSION/ARCH binding")
+	arch := fs.String("arch", "", "flag mode: expected architecture (amd64|arm64) -- required together with -version")
+	currentVersion := fs.String("current-version", "", "version treated as 'current' for forward-eligibility (default: running agent version)")
+	_ = fs.Parse(args)
+
+	keyPath := *pubKeyFile
+	if keyPath == "" {
+		if cfg, err := config.Load(); err == nil {
+			keyPath = cfg.OTAPublicKeyFile
+		}
+	}
+	pubKey, err := ota.LoadPublicKey(keyPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge ota verify: %v\n", err)
+		os.Exit(1)
+	}
+	curVer := *currentVersion
+	if curVer == "" {
+		curVer = agent.Version
+	}
+
+	if *artifactDir != "" {
+		meta, err := ota.VerifyReleaseDir(*artifactDir, pubKey, curVer)
+		if err != nil {
+			// Deliberately no "artifact=" line on any failure path: a
+			// caller (IA2's privileged updater) must never see that
+			// token unless every check -- signature, checksum, forward
+			// version, VERSION/ARCH binding -- has fully passed.
+			fmt.Fprintf(os.Stderr, "geocam-edge ota verify: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("OK: signature valid, checksum matches, VERSION/ARCH bound to the release descriptor.")
+		// Exactly one line with this "artifact=" prefix, printed only
+		// after full success -- the parseable contract PR #60's
+		// privileged updater consumes.
+		fmt.Printf("artifact=%s\n", meta.ArtifactName)
+		return
+	}
+
+	if *artifact == "" || *sums == "" || *sig == "" {
+		fmt.Fprintln(os.Stderr, "geocam-edge ota verify: either -artifact-dir, or -artifact/-sha256sums/-signature, are required")
+		os.Exit(1)
+	}
+	manifest, err := os.ReadFile(*sums)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge ota verify: read sha256sums: %v\n", err)
+		os.Exit(1)
+	}
+	sigBytes, err := os.ReadFile(*sig)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge ota verify: read signature: %v\n", err)
+		os.Exit(1)
+	}
+	artifactName := filepath.Base(*artifact)
+
+	if *version != "" && *arch != "" {
+		if err := ota.VerifyReleaseFiles(*artifact, manifest, sigBytes, pubKey, artifactName, curVer, *version, *arch); err != nil {
+			fmt.Fprintf(os.Stderr, "geocam-edge ota verify: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("OK: signature valid, checksum matches, VERSION/ARCH bound to the release descriptor.")
+		return
+	}
+
+	if err := ota.VerifyManifestSignature(manifest, sigBytes, pubKey); err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge ota verify: %v\n", err)
+		os.Exit(1)
+	}
+	if err := ota.VerifyArtifactChecksum(*artifact, manifest, artifactName); err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge ota verify: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintln(os.Stderr, "geocam-edge ota verify: warning: -version and -arch were not both given -- VERSION/ARCH binding was NOT checked")
+	fmt.Println("OK: signature valid, checksum matches.")
+}
+
+// runOTASignCmd implements `geocam-edge ota sign`, used only by the
+// release pipeline (see .github/workflows/release.yml) to produce
+// SHA256SUMS.sig from an externally provisioned private key. Never run on
+// an appliance; never ships a private key anywhere near one.
+func runOTASignCmd(args []string) {
+	if isHelpRequest(args) {
+		printOTASignUsage(os.Stdout)
+		return
+	}
+	fs := flag.NewFlagSet("ota sign", flag.ExitOnError)
+	sums := fs.String("sha256sums", "", "path to the SHA256SUMS manifest to sign")
+	privKeyFile := fs.String("private-key", "", "path to the Ed25519 private key")
+	out := fs.String("out", "", "output path for the detached signature (default: <sha256sums>.sig)")
+	_ = fs.Parse(args)
+
+	if *sums == "" || *privKeyFile == "" {
+		fmt.Fprintln(os.Stderr, "geocam-edge ota sign: -sha256sums and -private-key are required")
+		os.Exit(1)
+	}
+	priv, err := ota.LoadPrivateKey(*privKeyFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge ota sign: %v\n", err)
+		os.Exit(1)
+	}
+	manifest, err := os.ReadFile(*sums)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge ota sign: read sha256sums: %v\n", err)
+		os.Exit(1)
+	}
+	sig := ota.SignManifest(priv, manifest)
+	dest := *out
+	if dest == "" {
+		dest = *sums + ".sig"
+	}
+	if err := os.WriteFile(dest, sig, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge ota sign: write signature: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("signed %s -> %s\n", *sums, dest)
+}
+
 // --- Usage text --------------------------------------------------------
 //
 // Every printXUsage function is a thin fmt.Fprint wrapper around a constant
@@ -930,6 +1087,8 @@ Commands:
   credential rotate    Rotate the locally stored SaaS credential
   discovery scan       Scan the LAN for ONVIF/RTSP camera devices
   saas check           Verify SaaS connectivity and authentication
+  ota verify           Verify a downloaded OTA release's signature/checksum/layout
+  ota sign             Sign a SHA256SUMS manifest (release pipeline only)
 
 Flags:
   -h, --help           Show this help
@@ -956,6 +1115,7 @@ Environment variables (all optional unless noted):
   GEOCAM_HEALTH_ADDR            local health HTTP bind address (default: 127.0.0.1:8091)
   GEOCAM_HEARTBEAT_INTERVAL     heartbeat interval, 5s-5m (default: 30s)
   GEOCAM_ALLOW_INSECURE_HTTP    allow http:// (not https://) for GEOCAM_SAAS_URL (default: false)
+  GEOCAM_OTA_PUBLIC_KEY_FILE    path to the Ed25519 public key for OTA signature verification
   GEOCAM_DISCOVERY_ENABLED      enable background discovery (default: true)
   GEOCAM_DISCOVERY_INTERVAL     background discovery interval, 1m-24h (default: 5m)
   GEOCAM_DISCOVERY_TIMEOUT      background discovery scan timeout, 1s-30s (default: 4s)
@@ -1126,3 +1286,65 @@ Never prints the stored credential.
 `
 
 func printSaasCheckUsage(w io.Writer) { fmt.Fprint(w, saasCheckUsage) }
+
+const otaUsage = `Usage: geocam-edge ota <subcommand>
+
+Subcommands:
+  verify    Verify a downloaded OTA release's signature/checksum/layout
+  sign      Sign a SHA256SUMS manifest (release pipeline only)
+
+Run 'geocam-edge ota verify --help' or 'geocam-edge ota sign --help' for details.
+`
+
+func printOTAUsage(w io.Writer) { fmt.Fprint(w, otaUsage) }
+
+const otaVerifyUsage = `Usage: geocam-edge ota verify -artifact-dir <staged-release-dir> [-public-key <path>] [-current-version <vX.Y.Z>]
+   or: geocam-edge ota verify -artifact <path> -sha256sums <path> -signature <path> [-public-key <path>] [-version <vX.Y.Z> -arch <amd64|arm64>] [-current-version <vX.Y.Z>]
+
+Verify a downloaded OTA release (Hito T4), fail-closed, in order:
+
+  1. SHA256SUMS.sig is a valid Ed25519 signature of SHA256SUMS under the
+     configured public key. No signature or no key -> reject; no
+     checksum-only fallback exists.
+  2. The artifact's real SHA-256 matches the (now-trusted) SHA256SUMS entry
+     for its recorded artifact name.
+  3. The candidate version is a valid, strictly newer version than
+     -current-version (default: the running agent's, see 'geocam-edge
+     version').
+  4. The artifact's own embedded VERSION/ARCH exactly match the release
+     descriptor's version/architecture -- a descriptor and its artifact
+     are never allowed to diverge silently.
+
+-artifact-dir is preferred: it points at a directory produced by this
+appliance's own OTA download (metadata.json + SHA256SUMS + SHA256SUMS.sig +
+the named artifact), and is the exact contract IA2's privileged updater
+reuses unmodified against a root-owned snapshot of that directory. It
+independently revalidates metadata.json's artifact_name as a safe local
+filename (no path separators, no "..", not a symlink) rather than trusting
+that the original download already did.
+
+On full success in -artifact-dir mode, stdout contains EXACTLY ONE line
+with the prefix "artifact=", naming the verified artifact:
+
+  artifact=geocam-edge-v2.0.0-linux-amd64.tar.gz
+
+That line is the parseable, machine-readable success signal -- it is never
+printed on any failure path, regardless of which check failed.
+
+Flag mode (-artifact/-sha256sums/-signature) is for ad-hoc verification;
+step 4 only runs there when both -version and -arch are given, and it
+never prints an "artifact=" line.
+`
+
+func printOTAVerifyUsage(w io.Writer) { fmt.Fprint(w, otaVerifyUsage) }
+
+const otaSignUsage = `Usage: geocam-edge ota sign -sha256sums <path> -private-key <path> [-out <path>]
+
+Sign a SHA256SUMS manifest with an Ed25519 private key, producing a
+detached signature (default: <sha256sums>.sig). Used only by the release
+pipeline (see .github/workflows/release.yml), driven from an externally
+provisioned key (e.g. a GitHub Actions secret) -- never run on an
+appliance, never bundles or prints the key.
+`
+
+func printOTASignUsage(w io.Writer) { fmt.Fprint(w, otaSignUsage) }

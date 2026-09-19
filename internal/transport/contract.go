@@ -56,4 +56,11 @@ const (
 	RemoteConfigNextPath = "/api/v1/edge/remote-config/next"
 	// RemoteConfigAckPath reports the outcome of applying one version.
 	RemoteConfigAckPath = "/api/v1/edge/remote-config/ack"
+	// OTANextPath returns the current eligible OTA release descriptor
+	// (Hito T). 204 No Content means no update is currently eligible; 200
+	// OK returns a release with release id, version, architecture, and
+	// GitHub Releases URLs for the artifact, SHA256SUMS and its detached
+	// signature. Polled the same way as RemoteConfigNextPath -- driven by
+	// the existing heartbeat cadence, not a second poll loop.
+	OTANextPath = "/api/v1/edge/ota/next"
 )
