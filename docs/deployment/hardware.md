@@ -23,9 +23,9 @@ requirements differ sharply between them:
 | CPU cost | Low — `ffmpeg` decode/sample only | High — CPU-bound ML inference (`--device cpu` by default in `worker.py`; no GPU/NPU backend implemented) |
 | Disk cost | Small (Go binary, few MB; no models) | Larger — PyTorch + `ultralytics` package install (hundreds of MB) plus the two YOLO model files themselves |
 
-**Q1 requirement**: pick the profile before sizing hardware. A
-Raspberry-class board is a realistic **Cloud/Hybrid gateway**; it is
-marginal-to-unrealistic for **Full Edge**, per the evidence below.
+**Q1 requirement**: pick the profile before sizing hardware. No board class
+below is hardware-validated — see the matrix and the explicit "not
+established" markers throughout this document.
 
 ## What is verified by code vs. real measurement
 
@@ -46,12 +46,16 @@ marginal-to-unrealistic for **Full Edge**, per the evidence below.
   (`PlatformDiskChecker`, `PlatformMemoryChecker`). **No new detection
   code was needed or added** — this satisfies Q4's "basic identification"
   requirement already.
-- **Network cost, Cloud/Hybrid gateway**: real, measured (not invented) —
-  `docs/performance/i10-edge-cloud-cost-metrics.md`: **~9.12 Mbps
-  worst-case** per camera stream at JPEG quality 85, 5 FPS, 640×360
-  (uplink to SaaS). This is the number to size a home/small-site uplink
-  against for one camera in Cloud/Hybrid mode; per-camera cost drops with
-  scene compressibility (documented in the same file).
+- **Network cost, Cloud/Hybrid gateway**: `docs/performance/i10-edge-cloud-cost-metrics.md`
+  reports **~9.12 Mbps** for one camera at JPEG quality 85, 5 FPS, 640×360.
+  This is a **synthetic local benchmark**
+  (`TestLocalBandwidthBenchmark`, `internal/cameratest/`), against
+  pseudo-random noise frames, one camera, no real network path and no real
+  SaaS endpoint involved — an upper-bound-like figure for that specific
+  synthetic input, not a real-network/real-SaaS measurement. It does not
+  extrapolate to multiple cameras (no multi-camera benchmark exists) and
+  should be read as a rough sizing hint for a single-camera uplink, not a
+  validated bandwidth requirement.
 - **Network cost, Full Edge**: no real measurement exists. Uploads are
   detections/metadata, not continuous frames, so the qualitative
   direction is "much lower than Cloud/Hybrid" — but no number is reported
@@ -74,17 +78,24 @@ marginal-to-unrealistic for **Full Edge**, per the evidence below.
 
 ### RAM
 
-| | Minimum | Recommended | Basis |
-|---|---|---|---|
-| Cloud/Hybrid gateway | 512 MB | 1 GB | Go binary + `ffmpeg` subprocess only; no measured ceiling exists, this is a conservative floor for OS + systemd + the process, not a benchmarked number |
-| Full Edge | **Not established** | **Not established** | `ultralytics`/PyTorch's own RAM footprint on ARM64 has not been measured in this repo. Do not deploy Full Edge to a fixed-RAM board without measuring first. |
+**NOT ESTABLISHED — pending real measurement.** No benchmark or profiling
+run in this repo measures actual RAM usage of either profile on real
+hardware.
+
+| | Status | Basis |
+|---|---|---|
+| Cloud/Hybrid gateway | NOT ESTABLISHED | Go binary + `ffmpeg` subprocess only. 512 MB / 1 GB is a **provisional provisioning assumption, not validated** — a plausible floor for OS + systemd + the process, not a measured requirement. Do not present it as a supported minimum. |
+| Full Edge | NOT ESTABLISHED | `ultralytics`/PyTorch's own RAM footprint on ARM64/amd64 has not been measured in this repo at all. No provisional number is offered for this profile. |
 
 ### Storage
 
-| | Minimum | Recommended | Basis |
-|---|---|---|---|
-| Cloud/Hybrid gateway | 2 GB free | 4 GB free | OS + appliance binary/releases (`releases/<version>/`, keeps prior version for rollback) + logs; no local frame/video retention by default |
-| Full Edge | Cloud/Hybrid + **Python/PyTorch install + model files** | Same + headroom for retention | `ultralytics` pulls PyTorch (hundreds of MB installed); exact model file sizes are not pinned in this repo (`deploy/vision-worker/requirements.txt` deliberately leaves exact pins to provisioning, not Git) |
+**NOT ESTABLISHED — pending real measurement.** Same caveat as RAM: no
+disk-usage benchmark exists in this repo for either profile.
+
+| | Status | Basis |
+|---|---|---|
+| Cloud/Hybrid gateway | NOT ESTABLISHED | OS + appliance binary/releases (`releases/<version>/`, keeps prior version for rollback) + logs; no local frame/video retention by default. 2 GB / 4 GB is a **provisional provisioning assumption, not validated**, not a supported minimum. |
+| Full Edge | NOT ESTABLISHED | Cloud/Hybrid footprint plus Python/PyTorch install + model files. `ultralytics` pulls PyTorch (hundreds of MB installed); exact model file sizes are not pinned in this repo (`deploy/vision-worker/requirements.txt` deliberately leaves exact pins to provisioning, not Git) — no total was measured, so none is provided even provisionally. |
 
 The offline/evidence buffer (`GEOCAM_DATA_DIR`) has **no built-in size
 default** (`CloudBufferMaxBytes`/`CloudBufferMaxFrames`, Milestone I6) —
@@ -96,8 +107,9 @@ a fixed requirement.
 - Ethernet (or equivalent wired-class link) to reach the RTSP camera
   source and the SaaS endpoint — camera ingestion is RTSP-only, there is
   no offline/local-only mode.
-- Cloud/Hybrid gateway: size the uplink against the measured **~9.12 Mbps
-  worst-case per camera** above.
+- Cloud/Hybrid gateway: the synthetic local benchmark noted earlier in this
+  document (~9.12 Mbps, one camera) is a rough sizing hint, not a
+  validated bandwidth requirement.
 - Wi-Fi is not excluded by the code (it is a plain TCP/HTTP client) but
   was not part of any test in this repo — treat as untested, not
   unsupported.
@@ -121,10 +133,10 @@ repo depends on it.
 Not a commercial catalog — architecture classes only, no brand/model
 certified without real evidence (none exists in this repo).
 
-| Class | Examples | Realistic for |
+| Class | Examples | Status |
 |---|---|---|
-| **ARM64** | Raspberry Pi (4/5-class), Orange Pi or generic ARM64 SBC | Cloud/Hybrid gateway. Full Edge: **unverified** — CPU-only ML inference on this class of board has not been measured here; treat as a research spike, not a supported target, until someone measures it. |
-| **AMD64** | Generic x86_64 mini-PC | Cloud/Hybrid gateway: comfortable. Full Edge: more headroom than ARM64 SBCs for the PyTorch/`ultralytics` footprint, but still **not measured** in this repo — no FPS/latency number exists for either architecture. |
+| **ARM64** | Raspberry Pi (4/5-class), Orange Pi or generic ARM64 SBC | Candidate target for Cloud/Hybrid gateway; **NOT HARDWARE VALIDATED**. Full Edge: **NOT PERFORMANCE VALIDATED** — CPU-only ML inference on this class of board has not been measured here at all; treat as a research spike, not a supported target, until someone measures it. |
+| **AMD64** | Generic x86_64 mini-PC | Candidate target for Cloud/Hybrid gateway and Full Edge; **NOT HARDWARE VALIDATED**. Full Edge: **NOT PERFORMANCE VALIDATED** on this architecture either — no FPS/latency/RAM number exists for it, so no comparative claim vs. ARM64 is made. |
 
 ## Summary: what is code vs. documentation in this closure
 
