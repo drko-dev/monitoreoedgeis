@@ -19,6 +19,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
+	"github.com/drko-dev/monitoreoedgeis/internal/factoryreset"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
@@ -52,6 +53,8 @@ func main() {
 		runCheckCmd(args)
 	case "enroll":
 		runEnrollCmd(args)
+	case "factory-reset":
+		runFactoryResetCmd(args)
 	case "credential":
 		runCredentialCmd(args)
 	case "discovery":
@@ -416,6 +419,39 @@ func enrollSummary(edgeID, deviceID, organizationID, siteID string) string {
 			"site_id:          %s\n",
 		edgeID, deviceID, organizationID, siteID,
 	)
+}
+
+// runCredentialCmd dispatches `geocam-edge credential <subcommand>`.
+// runFactoryResetCmd removes only local device state. It never touches the
+// installed binary, releases, systemd, or any path outside GEOCAM_DATA_DIR.
+func runFactoryResetCmd(args []string) {
+	if isHelpRequest(args) {
+		printFactoryResetUsage(os.Stdout)
+		return
+	}
+	fs := flag.NewFlagSet("factory-reset", flag.ExitOnError)
+	confirmed := fs.Bool("confirm", false, "explicitly confirm removal of local device state")
+	_ = fs.Parse(args)
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge factory-reset: configuration error: %v\n", err)
+		os.Exit(1)
+	}
+	if err := factoryreset.Reset(cfg.DataDir, *confirmed); err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge factory-reset: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Factory reset complete. Local device state removed from %s.\n", cfg.DataDir)
+}
+
+func printFactoryResetUsage(w io.Writer) {
+	fmt.Fprint(w, `Usage: geocam-edge factory-reset --confirm
+
+Remove only local device state below GEOCAM_DATA_DIR and return this Edge to
+an unenrolled state. Releases, installed software, and systemd are preserved.
+The --confirm flag is required; this command never resets automatically.
+`)
 }
 
 // runCredentialCmd dispatches `geocam-edge credential <subcommand>`.
@@ -875,6 +911,7 @@ Commands:
   config               Print effective, non-secret configuration
   check                Check a running agent's health over its local HTTP surface
   enroll               Enroll this Edge against the SaaS using a one-time token
+  factory-reset        Remove local device state after explicit confirmation
   credential rotate    Rotate the locally stored SaaS credential
   discovery scan       Scan the LAN for ONVIF/RTSP camera devices
   saas check           Verify SaaS connectivity and authentication

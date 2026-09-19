@@ -352,9 +352,16 @@ mechanism is ready but untested end-to-end against a real tag push).
 
 ## Q — Appliance residencial
 
-- Q1–Q10: hardware mínimo, Raspberry/Orange Pi, mini-PC, imagen preparada,
-  Ethernet+power, zero-touch enrollment, discovery, QR/código, factory reset,
-  UX no técnica.
+- Q1–Q7: hardware mínimo, Raspberry/Orange Pi, mini-PC, imagen preparada,
+  Ethernet+power y descubrimiento: estado histórico; no se revalidan aquí.
+- Q8 QR/código: el Edge ya consume el token de enrollment existente; la
+  representación QR/UI pertenece al SaaS y no se inventa en este repo.
+- Q9 factory reset: **IMPLEMENTED / TESTED LOCALLY** — `geocam-edge
+  factory-reset --confirm` purga únicamente el allowlist de estado dentro de
+  `GEOCAM_DATA_DIR`, exige confirmación explícita y preserva releases,
+  systemd/software. No merged, no deployed.
+- Q10 UX no técnica: pendiente de implementación/validación en el SaaS; no se
+  declara validación con usuario no técnico.
 
 ## R — Instalación corporativa
 
