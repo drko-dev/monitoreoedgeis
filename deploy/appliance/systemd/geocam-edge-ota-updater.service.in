@@ -8,6 +8,15 @@ Type=oneshot
 User=root
 Group=root
 ExecStart=@GEOCAM_OTA_UPDATER_EXEC@
+# The updater verifies the staged release by running the *current* release's
+# own `geocam-edge ota verify`, which resolves the OTA public key from
+# GEOCAM_OTA_PUBLIC_KEY_FILE. Without this EnvironmentFile the variable is
+# unset in the privileged service's environment, verification fails closed
+# with "no valid signature/public key available", and every real upgrade
+# ends as failed:verification. The leading "-" keeps the unit loadable when
+# the env file has not been installed yet; a missing *key* still fails
+# closed, which is the intended asymmetry.
+EnvironmentFile=-@GEOCAM_ENV_FILE@
 # The updater is a narrow root boundary. It receives no request arguments;
 # all request data is revalidated from the fixed OTA directory.
 ProtectHome=true

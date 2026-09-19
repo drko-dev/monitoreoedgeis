@@ -45,22 +45,55 @@ func (m *Manager) Name() string {
 	return "rtsp-manager"
 }
 
-// Start launches the manager's coordination loop.
+// Start launches the manager's coordination loop and starts every supervisor
+// that SetTargets registered before Start was called.
+//
+// The agent builds its camera targets during construction and calls Start
+// afterwards, so targets can legitimately exist first. Starting them here (as
+// well as in SetTargets) keeps that order working: without it the supervisors
+// would never run, and Stop would wait on goroutines that were never
+// launched.
+//
+// Start is idempotent. A second call is a no-op rather than a second
+// coordination goroutine; two would both close stopped on exit.
 func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Lock()
+	if m.cancel != nil {
+		m.mu.Unlock()
+		return nil
+	}
 	m.ctx, m.cancel = context.WithCancel(ctx)
+	started := 0
+	for key, sup := range m.supervisors {
+		sup.Start(m.ctx)
+		started++
+		m.logger.Info("started camera stream supervisor", "candidate_key", key)
+	}
 	m.mu.Unlock()
 
+	if started > 0 {
+		m.logger.Info("rtsp manager started with existing camera targets", "count", started)
+	}
 	go m.run()
 	return nil
 }
 
 // Stop terminates all supervisors and halts the manager.
+//
+// Stop on a manager that was never started returns immediately instead of
+// waiting on a coordination goroutine that does not exist. Calling Stop twice
+// is safe.
 func (m *Manager) Stop(ctx context.Context) error {
 	m.mu.Lock()
-	if m.cancel != nil {
-		m.cancel()
+	if m.cancel == nil {
+		for key, sup := range m.supervisors {
+			sup.Stop()
+			delete(m.supervisors, key)
+		}
+		m.mu.Unlock()
+		return nil
 	}
+	m.cancel()
 	// Stop all supervisors
 	for key, sup := range m.supervisors {
 		sup.Stop()
