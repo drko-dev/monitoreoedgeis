@@ -454,16 +454,21 @@ quedan sin tocar, fuera de alcance de este cierre.
 
 - R1–R6: VM, server Linux, appliance industrial, VPN site-to-site, subnet
   routing, VLANs. **NOT DONE** — fuera de alcance de este cierre.
-- R7. Múltiples segmentos CCTV. **PARTIAL / DOCUMENTED** — acceso unicast
-  a cámaras ya conocidas por IP/URL ya funciona hoy sin cambios de código
-  (`internal/rtsp.Dial`/ONVIF SOAP no fijan interfaz), siempre que exista
-  ruteo real entre segmentos. WS-Discovery (`239.255.255.250:3702/UDP`)
-  ya corre por interfaz local (`internal/discovery.SelectInterfaces`,
-  soporta multi-homed), pero **no cruza routers/VLANs sin multicast
-  routing/IGMP relay a nivel de red** — gap documentado explícitamente,
-  no resuelto con scanner/broadcast forwarding (deliberadamente no
-  agregados). Alternativa documentada (no obligatoria): un Edge por
-  segmento.
+- R7. Múltiples segmentos CCTV. **PARTIAL / DOCUMENTED** — distinción
+  explícita transporte vs. provisioning:
+  **ROUTED UNICAST TRANSPORT: SUPPORTED FOR ALREADY-CONFIGURED TARGETS**
+  (`internal/rtsp.Dial`/ONVIF SOAP no fijan interfaz, compatibles con
+  routing L3/VPN para un target ya configurado en runtime);
+  **CROSS-SUBNET CAMERA TARGET PROVISIONING: NO CLAIM / CURRENT GAP**
+  (no se verificó ni existe camino de provisioning para introducir una
+  cámara de otra subnet — no implementado en este hito);
+  **AUTOMATIC CROSS-SUBNET WS-DISCOVERY: NOT SUPPORTED**
+  (`239.255.255.250:3702/UDP` corre por interfaz local,
+  `internal/discovery.SelectInterfaces`, soporta multi-homed, pero no
+  cruza routers/VLANs sin multicast routing/IGMP relay a nivel de red —
+  gap documentado explícitamente, no resuelto con scanner/broadcast
+  forwarding, deliberadamente no agregados). Alternativa documentada (no
+  obligatoria): un Edge por segmento.
 - R8. Firewall. **DOCUMENTED** — matriz exacta de tráfico outbound
   (Edge→SaaS, Edge→cámaras, WS-Discovery multicast) y local/inbound
   (health en `127.0.0.1:8091` por defecto, no expuesto en red) en

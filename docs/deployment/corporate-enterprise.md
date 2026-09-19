@@ -15,15 +15,32 @@ behave differently on a segmented network:
 
 ### A. Access to a camera already known by IP/URL
 
-`internal/rtsp.Dial` (and the ONVIF SOAP client in
-`internal/discovery/onvif/soap.go`) use a plain `net.Dialer`/`http.Client`
-against whatever host/URL they are given — there is no interface pinning,
-no subnet check, no source-IP binding. **This already works across
-segments today**, exactly as far as the host's own routing table reaches:
-if the Edge's OS can route to a camera's VLAN (a router/L3 switch has a
-route between the segments), unicast RTSP and ONVIF SOAP calls to that
-camera's known IP work with zero code changes. This is a routing/network
-configuration question, not a code limitation.
+Two separate claims here, kept deliberately apart:
+
+**ROUTED UNICAST TRANSPORT: SUPPORTED FOR ALREADY-CONFIGURED TARGETS.**
+`internal/rtsp.Dial` uses a plain `net.Dialer` (TCP unicast), and the
+ONVIF SOAP client in `internal/discovery/onvif/soap.go` uses a plain
+`http.Client` (HTTP unicast) — neither pins an interface, checks a
+subnet, or binds a source IP. So for a camera target the runtime already
+has configured (a known RTSP URL or ONVIF address), the transport layer
+itself is compatible with L3/VPN routing: if the OS routing table has a
+path to that target's segment, the TCP/HTTP unicast call goes through
+with zero code changes. This is a statement about the transport, not
+about how that target got configured in the first place.
+
+**CROSS-SUBNET CAMERA TARGET PROVISIONING: NO CLAIM / CURRENT GAP.** This
+repo does not claim, and no path was verified, for how an operator
+introduces/configures a camera that lives on a different subnet than the
+Edge in the first place — that is a provisioning question (an admin UI,
+CLI, config file, or SaaS-driven flow adding the camera's URL to the
+Edge's runtime config), and it is a separate concern from the transport
+above. No provisioning path for cross-subnet targets was implemented or
+verified in this hito.
+
+**AUTOMATIC CROSS-SUBNET WS-DISCOVERY: NOT SUPPORTED.** See B below —
+WS-Discovery cannot itself discover a camera across a router/VLAN
+boundary, so it can never be the provisioning path for a cross-subnet
+target.
 
 ### B. Automatic discovery (WS-Discovery)
 
@@ -151,8 +168,15 @@ Explicitly, for any future HA design:
   Edge identity to the SaaS, not a coordinated pair.
 - **Two Edge processes pointed at the same camera set can duplicate
   work and events** — both would independently pull RTSP, run detection,
-  and upload events/frames, with no de-duplication anywhere in the
-  pipeline. This is a correctness problem, not just a resource-waste one.
+  and upload events/frames. There is no cross-Edge ownership/coordination
+  or semantic deduplication mechanism that prevents two active Edge
+  instances from independently processing the same camera and generating
+  duplicate real-world detections/events. (This is distinct from the
+  idempotency keys already present for a single Edge's own request
+  retries — e.g. credential rotation in `internal/transport` — which
+  guard against one Edge retrying itself, not against two independent
+  Edges both being active.) This is a correctness problem, not just a
+  resource-waste one.
 - **Local state — the offline/evidence buffer, the local event backlog —
   needs an explicit strategy before any active/passive split is possible.**
   Today this state lives on one node's local disk
