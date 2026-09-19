@@ -542,17 +542,29 @@ alcance de este cierre. Ver `docs/security/update-trust.md`,
   signature, fail closed, rollback sujeto a los mismos requisitos)
   documentados en `docs/security/update-trust.md`. Sin PKI ni signing key
   creados en este hito.
-- S10. Least privilege. **CODE DONE / AUDITED** — confirmado: usuario de
-  servicio no-root, `NoNewPrivileges`/`ProtectSystem=strict`/
-  `ProtectHome`/`ReadWritePaths=$GEOCAM_DATA_DIR`/`PrivateTmp` ya
-  existentes (Hito P); agregado `CapabilityBoundingSet=` vacío y
-  `PrivateDevices=true`, verificado seguro por ausencia real de
-  hwaccel/VAAPI/V4L2/acceso a `/dev` en todo el repo (no adivinado). Hallazgo
-  clave: aunque el usuario de servicio es dueño de `$PREFIX`
-  (releases/binario), `ProtectSystem=strict` lo hace de solo lectura para
-  el proceso en ejecución — sin path de auto-modificación del binario.
-  Control plane confirmado allowlisted (`internal/control`, switch fijo
-  de 4 tipos, sin `os/exec`, sin shell). Detalle completo en
+- S10. Least privilege. **LEAST PRIVILEGE HARDENING: CODE DONE /
+  AUDITED** — confirmado: usuario de servicio no-root,
+  `NoNewPrivileges`/`ProtectSystem=strict`/`ProtectHome`/
+  `ReadWritePaths=$GEOCAM_DATA_DIR`/`PrivateTmp` ya existentes (Hito P);
+  agregado `CapabilityBoundingSet=` vacío, verificado seguro (ningún
+  código, incluido el path CUDA, necesita una capability Linux — el
+  driver NVIDIA se gatea por permisos de device node, no por
+  capabilities). **`PrivateDevices`: NOT ENABLED GLOBALLY** — se evaluó
+  y se descartó tras confirmar que Full Edge soporta
+  `GEOCAM_EDGE_YOLO_DEVICE=cuda` (Hito K/K5,
+  `deploy/vision-worker/backend.py` pasa `device=self.device` a
+  Ultralytics/PyTorch), y ese runtime accede a device nodes reales del
+  host (`/dev/nvidia*`) aunque ningún literal aparezca en este repo;
+  `PrivateDevices=true` los habría bloqueado sin que ningún test lo
+  detectara (sin hardware acelerador real en este sandbox). Requiere
+  validación hardware/profile-specific futura antes de habilitarse. Sin
+  unidad systemd separada CPU/GPU, sin `DeviceAllow`, sin lista
+  NVIDIA/Intel/NPU inventada en este hito. Hallazgo clave: aunque el
+  usuario de servicio es dueño de `$PREFIX` (releases/binario),
+  `ProtectSystem=strict` lo hace de solo lectura para el proceso en
+  ejecución — sin path de auto-modificación del binario. Control plane
+  confirmado allowlisted (`internal/control`, switch fijo de 4 tipos, sin
+  `os/exec`, sin shell). Detalle completo en
   `docs/security/least-privilege.md`.
 - S11. Security audit. **EDGE SECURITY EVENT LOGGING: PARTIAL /
   DURABLE-TAMPER-EVIDENT AUDIT: NOT IMPLEMENTED** — se reutilizó `slog`

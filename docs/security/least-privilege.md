@@ -39,31 +39,64 @@ the Unix permission bits alone would not.
 
 ## Hardening added in this hito
 
-Audited for actual, verified compatibility (not guessed) before adding:
-
 | Directive | Why it is safe |
 |---|---|
-| `CapabilityBoundingSet=` (empty) | Confirmed: the Go agent does plain TCP/HTTP networking (`net.Dial`, `http.Client`) and the ffmpeg subprocess does software-only decode — no `hwaccel`/`vaapi`/`v4l2`/`/dev/dri`/`/dev/video*` reference anywhere in this repo (`internal/processing`, `deploy/appliance/scripts/build-ffmpeg-static.sh`). Neither needs any Linux capability (no raw sockets, no low-port bind — `GEOCAM_HEALTH_ADDR` defaults to `127.0.0.1:8091`, above 1024). |
-| `PrivateDevices=true` | Same finding: no code path opens a physical device node. `PrivateDevices` still allows the always-present pseudo-devices (`/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`), which is all any Go process needs. **Thermal reads are unaffected**: `internal/platform`'s temperature reading is a plain file read under `/sys/class/thermal/`, a different filesystem tree from `/dev` — `PrivateDevices` does not touch `/sys`. |
+| `CapabilityBoundingSet=` (empty) | Confirmed: the Go agent does plain TCP/HTTP networking (`net.Dial`, `http.Client`) and the ffmpeg subprocess does software-only decode — no `hwaccel`/`vaapi`/`v4l2`/`/dev/dri`/`/dev/video*` reference anywhere in this repo (`internal/processing`, `deploy/appliance/scripts/build-ffmpeg-static.sh`). Neither needs any Linux capability (no raw sockets, no low-port bind — `GEOCAM_HEALTH_ADDR` defaults to `127.0.0.1:8091`, above 1024). This holds for the CUDA vision-worker profile too: the NVIDIA driver's userspace ioctl interface on `/dev/nvidia*` is gated by device-node permissions, not by a Linux capability — dropping the capability set does not affect it. |
 
-Both changes are covered by
-`deploy/appliance/appliance_test.go`'s `TestSystemdUnitTemplateStructure`.
+Covered by `deploy/appliance/appliance_test.go`'s
+`TestSystemdUnitTemplateStructure`.
 
-### What was deliberately NOT added
+### `PrivateDevices` — evaluated, deliberately NOT enabled globally
+
+An earlier draft of this hito added `PrivateDevices=true`, reasoning that
+"nothing in this repo references `/dev`." That reasoning was **wrong**
+for the architecture this repo already implements, and the directive was
+removed before this PR closed:
+
+- Full Edge's vision worker (`deploy/vision-worker/backend.py`,
+  `internal/vision/worker.go`) supports `GEOCAM_EDGE_YOLO_DEVICE=cpu` /
+  `cuda` / `auto` (`internal/config.Config.EdgeYOLODevice`, Hito K/K5).
+  `backend.py`'s `YOLOBackend` passes `device=self.device` straight into
+  Ultralytics/PyTorch.
+- **The CUDA/PyTorch runtime accesses host accelerator device nodes**
+  (`/dev/nvidia0`, `/dev/nvidiactl`, `/dev/nvidia-uvm`, …) to talk to the
+  GPU — this happens inside PyTorch's own native/CUDA driver layer, not
+  in any Go or Python source this repo controls, which is exactly why
+  grepping this repo for `/dev/nvidia` or `hwaccel` finds nothing even
+  though the runtime dependency is real. Absence of a literal path string
+  in this codebase is not evidence of absence of a device dependency.
+- `PrivateDevices=true` masks `/dev` down to a handful of always-present
+  pseudo-devices (`null`/`zero`/`random`/`urandom`) — it would have
+  **broken GPU access for the `cuda` profile** while going completely
+  unnoticed by every test in this repo, since none of them run against
+  real accelerator hardware.
+- **This unit is shared across every processing mode** (`cloud`,
+  `hybrid`, `edge`) — there is one `geocam-edge.service.in`, not a
+  separate CPU/GPU variant — so a global `PrivateDevices=true` cannot
+  assume CPU-only just because that happens to be the default.
+
+CPU-only deployments probably could run under `PrivateDevices=true`
+without issue, but validating that split (and building the profile-aware
+unit selection it would require) is real design work this hito does not
+do. **No `DeviceAllow=` allowlist and no NVIDIA/Intel/NPU device list was
+invented here either** — that would need real accelerator hardware to
+verify against, which this dev sandbox does not have.
+`deploy/appliance/appliance_test.go` now asserts the *absence* of
+`PrivateDevices=true` from the template, specifically to prevent this
+from being silently reintroduced.
+
+### What else was deliberately NOT added
 
 Full systemd hardening has more knobs
 (`ProtectKernelTunables`, `ProtectKernelModules`, `ProtectControlGroups`,
 `RestrictNamespaces`, `MemoryDenyWriteExecute`, `SystemCallFilter`, …).
 None of those were added in this hito: this dev sandbox cannot exercise
-them against real Raspberry Pi/industrial-appliance hardware (thermal
-sysfs paths, USB/serial peripherals a future hardware profile might need,
-etc.), and the task's own instruction is explicit — **do not guess
-hardware compatibility**. `CapabilityBoundingSet=`/`PrivateDevices=true`
-were added because this audit could concretely verify, by reading every
-call site, that nothing in this repo needs a capability or a device node.
-The remaining directives would need the same level of verification
-against real hardware before being added, which is future work, not
-guesswork done here.
+them against real Raspberry Pi/industrial-appliance/GPU hardware, and the
+task's own instruction is explicit — **do not guess hardware
+compatibility**. Any future device-access or namespace-restriction policy
+must be profile-aware (distinguish the CPU-only and CUDA processing
+modes) and validated against real accelerator hardware before being
+enabled — not designed or built in this hito.
 
 ## Control plane: allowlisted, no free-form exec
 
