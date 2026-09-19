@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -227,6 +228,17 @@ func (m *Module) execute(ctx context.Context, cmd *transport.ControlCommand) (st
 	default:
 		state, code = StatusFailed, "UNKNOWN_COMMAND"
 	}
+
+	// S11 security event log: every dispatched command, allowlisted-type-only
+	// (see the switch above -- there is no free-form/shell exec path), with
+	// its outcome. Never logs the result payload itself, only that one was
+	// produced, since a future command type could carry sensitive fields.
+	slog.Default().Info("control command executed",
+		"command_id", cmd.ID,
+		"command_type", cmd.CommandType,
+		"status", state,
+		"error_code", code,
+	)
 
 	// 4. Persist terminal outcome atomically in ledger BEFORE reporting to SaaS
 	if m.ledger != nil {

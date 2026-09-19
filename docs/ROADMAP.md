@@ -20,6 +20,7 @@
 | P     | CODE DONE / INTEGRATED TESTED / MERGED |
 | Q1–Q10| CODE DONE / INTEGRATED TESTED / MERGED / SAAS PROD DEPLOYED (Edge prod: N/A) |
 | R1–R9 | CODE/ARCHITECTURE DONE / INTEGRATED TESTED / MERGED (Edge prod: N/A / no real target) |
+| S1–S11| CODE / SECURITY BASELINE DONE / INTEGRATED TESTED (gaps: at-rest device credential encryption, artifact signature, automatic rotation, tamper-evident audit) |
 | I–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
@@ -523,8 +524,11 @@ por punto abajo. Perfiles, preflight operativo, matrices y gaps:
 
 ## S — Seguridad
 
-**HITO S1–S8 — DOCUMENTED / IMPLEMENTED / PARTIAL WHERE EXPLICITLY
-MARKED** (integra #55, #57; S9-S11 de #56 se agregan en el mismo cierre)
+**HITO S (S1–S11) — DOCUMENTED / IMPLEMENTED / PARTIAL WHERE EXPLICITLY
+MARKED** (branch `integration/hito-s-final`, integra #55/#56/#57). Ver
+`docs/security/threat-model.md`, `docs/security/edge-security-baseline.md`,
+`docs/security/device-lifecycle.md`, `docs/security/update-trust.md`,
+`docs/security/least-privilege.md`, `docs/security/audit.md`.
 
 - S1 Threat model. **DOCUMENTED** — assets, trust boundaries, concrete threats, mitigations, owners and remaining gaps: `docs/security/threat-model.md`.
 - S2 Unique secrets. **IMPLEMENTED** — per-device credential uses 32 bytes from `crypto/rand`; only its SHA-256 hash crosses enrollment; camera master key is a distinct local 32-byte random key; enrollment token is distinct from both. No shared/default/hardcoded production credential found in the audited paths.
@@ -534,8 +538,52 @@ MARKED** (integra #55, #57; S9-S11 de #56 se agregan en el mismo cierre)
 - **S6 Rotation:** Edge self-rotation generates the new credential locally, submits only its hash, saves credentials atomically, and uses the existing `rotation_id` plus bounded grace window. Reuse of a `rotation_id` with another hash is rejected. **Automatic rotation schedule: NOT DEFINED.**
 - **S7 Secure enrollment:** device credential is generated locally; SaaS receives only the hash. Enrollment is bounded, strict, one-time/concurrency-safe and does not expose the raw token in logs or argv. Bootstrap uses the existing flow; no new QR/protocol added.
 - **S8 Replay protection:** enrollment claim, credential rotation, control commands, event UUID/idempotency and remote-config version handling use their existing stateful mechanisms. These prevent duplicate state-changing effects where covered; they are not bearer-secret anti-theft protection. Detailed lifecycle audit: `docs/security/device-lifecycle.md`.
-- S9–S11: ver más abajo (integrados en el mismo cierre).
-- No merge or deploy is claimed for this closure; no hardware-backed security or signed-release guarantee is claimed.
+- S9. Signed updates. **SECURITY REQUIREMENT DEFINED / CURRENT
+  CHECKSUM-ONLY GAP EXPLICIT / IMPLEMENTATION DEFERRED TO T4** —
+  auditado `package.sh`/`update.sh`/`release.yml`: sólo existe
+  `ARTIFACT CHECKSUM` (SHA-256, detecta corrupción/tampering accidental,
+  no autentica al productor). `ARTIFACT AUTHENTICITY SIGNATURE: NOT
+  IMPLEMENTED`. Requisitos mínimos para T4 (firma asimétrica, private key
+  nunca en appliance/repo, verify antes de activar, checksum no reemplaza
+  signature, fail closed, rollback sujeto a los mismos requisitos)
+  documentados en `docs/security/update-trust.md`. Sin PKI ni signing key
+  creados en este hito.
+- S10. Least privilege. **LEAST PRIVILEGE HARDENING: CODE DONE /
+  AUDITED** — confirmado: usuario de servicio no-root,
+  `NoNewPrivileges`/`ProtectSystem=strict`/`ProtectHome`/
+  `ReadWritePaths=$GEOCAM_DATA_DIR`/`PrivateTmp` ya existentes (Hito P);
+  agregado `CapabilityBoundingSet=` vacío, verificado seguro (ningún
+  código, incluido el path CUDA, necesita una capability Linux — el
+  driver NVIDIA se gatea por permisos de device node, no por
+  capabilities). **`PrivateDevices`: NOT ENABLED GLOBALLY** — se evaluó
+  y se descartó tras confirmar que Full Edge soporta
+  `GEOCAM_EDGE_YOLO_DEVICE=cuda` (Hito K/K5,
+  `deploy/vision-worker/backend.py` pasa `device=self.device` a
+  Ultralytics/PyTorch), y ese runtime accede a device nodes reales del
+  host (`/dev/nvidia*`) aunque ningún literal aparezca en este repo;
+  `PrivateDevices=true` los habría bloqueado sin que ningún test lo
+  detectara (sin hardware acelerador real en este sandbox). Requiere
+  validación hardware/profile-specific futura antes de habilitarse. Sin
+  unidad systemd separada CPU/GPU, sin `DeviceAllow`, sin lista
+  NVIDIA/Intel/NPU inventada en este hito. Hallazgo clave: aunque el
+  usuario de servicio es dueño de `$PREFIX` (releases/binario),
+  `ProtectSystem=strict` lo hace de solo lectura para el proceso en
+  ejecución — sin path de auto-modificación del binario. Control plane
+  confirmado allowlisted (`internal/control`, switch fijo de 4 tipos, sin
+  `os/exec`, sin shell). Detalle completo en
+  `docs/security/least-privilege.md`.
+- S11. Security audit. **EDGE SECURITY EVENT LOGGING: PARTIAL /
+  DURABLE-TAMPER-EVIDENT AUDIT: NOT IMPLEMENTED** — se reutilizó `slog`
+  existente (Hito N/D), sin stack de logging nuevo. Agregado logging
+  estructurado para enrollment success/failure, credential rotation,
+  factory reset y control command execution (antes sin `slog`, sólo
+  texto CLI); config apply/rollback y revocation/auth-failure ya estaban
+  logueados desde Hito N/D. Nunca se loguea token/credential/password de
+  cámara/`Authorization`. El ledger de comandos de control
+  (`internal/control.Ledger`) es idempotencia/retry-safety, explícitamente
+  NO un audit log (sin tamper-evidence, sin retención garantizada). SaaS
+  ya posee `log_audit` propio, no duplicado desde aquí. Detalle en
+  `docs/security/audit.md`.
 
 ## T — OTA
 
