@@ -747,4 +747,3 @@ printf '%s\n' "$n" > "$state"
 		}
 	}
 }
-
