@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -69,6 +70,26 @@ func fakeBinary(t *testing.T, dir, name string) string {
 	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte("#!/bin/sh\necho fake\n"), 0o755); err != nil {
 		t.Fatalf("writing fake binary: %v", err)
+	}
+	return path
+}
+
+func otaVerifierBinary(t *testing.T, dir, name string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	script := "#!/bin/sh\nif [ \"$1\" = ota ] && [ \"$2\" = verify ]; then exit 0; fi\necho fake\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing OTA verifier binary: %v", err)
+	}
+	return path
+}
+
+func rejectingOTAVerifierBinary(t *testing.T, dir, name string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	script := "#!/bin/sh\nif [ \"$1\" = ota ] && [ \"$2\" = verify ]; then exit 1; fi\necho fake\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing rejecting OTA verifier binary: %v", err)
 	}
 	return path
 }
@@ -762,8 +783,197 @@ func TestSystemdUnitTemplateStructure(t *testing.T) {
 	}
 }
 
-// TestUpdateReadinessFailureRollsBackAndPreservesData exercises the real
-// update.sh readiness-failure path without touching the host. It points every
+func TestPrivilegedOTAUnitTemplateStructure(t *testing.T) {
+	service, err := os.ReadFile(filepath.Join(scriptsDir(t), "..", "systemd", "geocam-edge-ota-updater.service.in"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pathUnit, err := os.ReadFile(filepath.Join(scriptsDir(t), "..", "systemd", "geocam-edge-ota-updater.path.in"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceText := string(service)
+	pathText := string(pathUnit)
+	for _, want := range []string{
+		"User=root",
+		"Group=root",
+		"ExecStart=@GEOCAM_OTA_UPDATER_EXEC@",
+		"ProtectSystem=strict",
+		"ReadWritePaths=@GEOCAM_DATA_DIR_PLACEHOLDER@ @GEOCAM_PREFIX_PLACEHOLDER@",
+	} {
+		if !strings.Contains(serviceText, want) {
+			t.Errorf("privileged updater unit missing %q", want)
+		}
+	}
+	if strings.Contains(serviceText, "NoNewPrivileges=true") {
+		t.Error("privileged updater must not drop privileges before applying an update")
+	}
+	for _, want := range []string{
+		"PathChanged=@GEOCAM_DATA_DIR_PLACEHOLDER@/ota/apply.request",
+		"Unit=geocam-edge-ota-updater.service",
+	} {
+		if !strings.Contains(pathText, want) {
+			t.Errorf("OTA path unit missing %q", want)
+		}
+	}
+
+	install, err := os.ReadFile(filepath.Join(scriptsDir(t), "install.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	installText := string(install)
+	if !strings.Contains(installText, `chown -R root:root "$PREFIX"`) {
+		t.Error("install.sh does not root-own the release tree")
+	}
+	if !strings.Contains(installText, `chown -R "$GEOCAM_SERVICE_USER:$GEOCAM_SERVICE_GROUP" "$DATA_DIR"`) {
+		t.Error("install.sh does not restrict service ownership to the data directory")
+	}
+}
+
+func TestPrivilegedOTAUpdaterStagesAndConsumesRequest(t *testing.T) {
+	requireBash(t)
+	root := t.TempDir()
+	verifier := otaVerifierBinary(t, t.TempDir(), "geocam-edge")
+	baseEnv := []string{
+		"GEOCAM_TEST_BINARY_ARCH=" + runtime.GOARCH,
+		"GEOCAM_WAIT_READY_ATTEMPTS=1",
+		"GEOCAM_WAIT_READY_INTERVAL=0",
+	}
+	if out, err := runScript(t, root, "install.sh", append(baseEnv, "GEOCAM_VERSION=1.0.0"), verifier); err != nil {
+		t.Fatalf("initial install failed: %v\n%s", err, out)
+	}
+
+	artifact := buildArtifact(t, t.TempDir(), "2.0.0", runtime.GOARCH)
+	pending := filepath.Join(root, "var/lib/geocam-edge/ota/pending/2.0.0")
+	if err := os.MkdirAll(pending, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	artifactBytes, err := os.ReadFile(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactPath := filepath.Join(pending, "artifact.tar.gz")
+	if err := os.WriteFile(artifactPath, artifactBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(artifactBytes)
+	checksum := fmt.Sprintf("%s  artifact.tar.gz\n", hex.EncodeToString(sum[:]))
+	for name, data := range map[string][]byte{
+		"SHA256SUMS":     []byte(checksum),
+		"SHA256SUMS.sig": []byte("signature-checked-by-current-binary"),
+		"metadata.json":  []byte(fmt.Sprintf(`{"version":"2.0.0","architecture":%q}`, runtime.GOARCH)),
+	} {
+		if err := os.WriteFile(filepath.Join(pending, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := filepath.Join(root, "var/lib/geocam-edge/ota/apply.request")
+	if err := os.WriteFile(request, []byte("2.0.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runScript(t, root, "ota-updater.sh", baseEnv)
+	if err != nil {
+		t.Fatalf("privileged updater failed: %v\n%s", err, out)
+	}
+	target, err := os.Readlink(filepath.Join(root, "opt/geocam-edge/current"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != "releases/2.0.0" {
+		t.Fatalf("current -> %q, want releases/2.0.0", target)
+	}
+	state, err := os.ReadFile(filepath.Join(root, "var/lib/geocam-edge/ota/state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(state)) != "succeeded:2.0.0" {
+		t.Fatalf("unexpected OTA state: %q", state)
+	}
+	if _, err := os.Stat(request); !os.IsNotExist(err) {
+		t.Fatalf("apply.request was not consumed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "var/lib/geocam-edge/ota/apply.request.processed")); err != nil {
+		t.Fatalf("processed request missing: %v", err)
+	}
+
+	// A second invocation has no request to replay and must not activate again.
+	if out, err := runScript(t, root, "ota-updater.sh", baseEnv); err != nil {
+		t.Fatalf("second updater invocation failed: %v\n%s", err, out)
+	}
+	target, err = os.Readlink(filepath.Join(root, "opt/geocam-edge/current"))
+	if err != nil || target != "releases/2.0.0" {
+		t.Fatalf("second invocation changed current: target=%q err=%v", target, err)
+	}
+}
+
+func TestPrivilegedOTAUpdaterRejectsPathTraversalRequest(t *testing.T) {
+	requireBash(t)
+	root := t.TempDir()
+	verifier := otaVerifierBinary(t, t.TempDir(), "geocam-edge")
+	if out, err := runScript(t, root, "install.sh", []string{"GEOCAM_VERSION=1.0.0"}, verifier); err != nil {
+		t.Fatalf("initial install failed: %v\n%s", err, out)
+	}
+	request := filepath.Join(root, "var/lib/geocam-edge/ota/apply.request")
+	if err := os.WriteFile(request, []byte("../escape\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runScript(t, root, "ota-updater.sh", nil); err == nil {
+		t.Fatalf("path traversal request unexpectedly succeeded: %s", out)
+	}
+	state, err := os.ReadFile(filepath.Join(root, "var/lib/geocam-edge/ota/state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(state)) != "failed:invalid-request" {
+		t.Fatalf("unexpected rejection state: %q", state)
+	}
+	if _, err := os.Stat(filepath.Join(root, "opt/geocam-edge/current")); err != nil {
+		t.Fatalf("current release disappeared after rejected request: %v", err)
+	}
+}
+
+func TestPrivilegedOTAUpdaterRejectsInvalidSignature(t *testing.T) {
+	requireBash(t)
+	root := t.TempDir()
+	verifier := rejectingOTAVerifierBinary(t, t.TempDir(), "geocam-edge")
+	if out, err := runScript(t, root, "install.sh", []string{"GEOCAM_VERSION=1.0.0"}, verifier); err != nil {
+		t.Fatalf("initial install failed: %v\n%s", err, out)
+	}
+	pending := filepath.Join(root, "var/lib/geocam-edge/ota/pending/2.0.0")
+	if err := os.MkdirAll(pending, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{
+		"artifact.tar.gz": []byte("not-a-valid-package"),
+		"SHA256SUMS":      []byte("invalid  artifact.tar.gz\n"),
+		"SHA256SUMS.sig":  []byte("invalid-signature"),
+		"metadata.json":   []byte(`{"version":"2.0.0"}`),
+	} {
+		if err := os.WriteFile(filepath.Join(pending, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := filepath.Join(root, "var/lib/geocam-edge/ota/apply.request")
+	if err := os.WriteFile(request, []byte("2.0.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runScript(t, root, "ota-updater.sh", nil); err == nil {
+		t.Fatalf("invalid signature unexpectedly succeeded: %s", out)
+	}
+	state, err := os.ReadFile(filepath.Join(root, "var/lib/geocam-edge/ota/state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(state)) != "failed:verification" {
+		t.Fatalf("unexpected signature rejection state: %q", state)
+	}
+	target, err := os.Readlink(filepath.Join(root, "opt/geocam-edge/current"))
+	if err != nil || target != "releases/1.0.0" {
+		t.Fatalf("invalid signature changed current: target=%q err=%v", target, err)
+	}
+}
+
 // appliance path at a temporary directory and injects fake privileged/system
 // commands through PATH. The first readiness probe fails, forcing update.sh to
 // invoke rollback.sh; the rollback readiness probe then succeeds.
@@ -812,6 +1022,7 @@ printf '%s\n' "$n" > "$state"
 		"GEOCAM_CONFIG_DIR=" + configDir,
 		"GEOCAM_DATA_DIR=" + dataDir,
 		"GEOCAM_SYSTEMD_DIR=" + systemdDir,
+		"GEOCAM_LIBEXEC_DIR=" + filepath.Join(root, "usr", "libexec", "geocam-edge"),
 		"GEOCAM_TEST_BINARY_ARCH=amd64",
 		"GEOCAM_WAIT_READY_ATTEMPTS=1",
 		"GEOCAM_WAIT_READY_INTERVAL=0",

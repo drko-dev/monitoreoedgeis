@@ -12,7 +12,8 @@
 #   /opt/geocam-edge/current -> releases/<version>   (symlink, what systemd runs)
 #   /etc/geocam-edge/geocam-edge.env                 (non-secret config; created ONLY if absent)
 #   /var/lib/geocam-edge                             (GEOCAM_DATA_DIR: identity/credentials/buffer)
-#   /etc/systemd/system/geocam-edge.service
+#   /usr/libexec/geocam-edge/ota-updater.sh           (root-only OTA boundary)
+#   /etc/systemd/system/geocam-edge-ota-updater.{service,path}
 #
 # Requires a dedicated, unprivileged system user (GEOCAM_SERVICE_USER,
 # default "geocam-edge") to own GEOCAM_DATA_DIR and run the service. Created
@@ -95,7 +96,7 @@ else
 fi
 
 # --- 2. Directories (idempotent; never recurse-delete anything) ------------
-mkdir -p "$RELEASE_DIR" "$CONFIG_DIR" "$DATA_DIR"
+mkdir -p "$RELEASE_DIR" "$CONFIG_DIR" "$DATA_DIR" "$DATA_DIR/ota/pending" "$DATA_DIR/ota" "$PREFIX" "$(root_path "$GEOCAM_LIBEXEC_DIR")"
 chmod 0750 "$CONFIG_DIR"
 chmod 0700 "$DATA_DIR"
 DATA_DIR_PRE_EXISTING=1
@@ -111,9 +112,13 @@ if [ -n "$FFMPEG_SRC" ]; then
     cp "$FFMPEG_SRC" "$RELEASE_DIR/ffmpeg"
     chmod 0755 "$RELEASE_DIR/ffmpeg"
 fi
-mkdir -p "$RELEASE_DIR/scripts"
-cp "$SCRIPT_DIR"/*.sh "$RELEASE_DIR/scripts/" 2>/dev/null || true
+mkdir -p "$RELEASE_DIR/scripts" "$RELEASE_DIR/systemd" "$RELEASE_DIR/config"
+cp "$SCRIPT_DIR"/*.sh "$RELEASE_DIR/scripts/"
+cp "$SCRIPT_DIR/../systemd"/*.in "$RELEASE_DIR/systemd/"
+cp "$SCRIPT_DIR/../config"/* "$RELEASE_DIR/config/"
 chmod 0755 "$RELEASE_DIR/scripts"/*.sh 2>/dev/null || true
+cp "$SCRIPT_DIR/ota-updater.sh" "$(root_path "$GEOCAM_LIBEXEC_DIR")/ota-updater.sh"
+chmod 0755 "$(root_path "$GEOCAM_LIBEXEC_DIR")/ota-updater.sh"
 
 # --- 4. Point `current` at this release. Record the prior target first so --
 #        rollback.sh has something deterministic to restore, but only if
@@ -169,10 +174,26 @@ if [ -f "$SCRIPT_DIR/../systemd/geocam-edge-bootstrap.service.in" ]; then
     log "wrote systemd unit to $SYSTEMD_DIR/geocam-edge-bootstrap.service"
 fi
 
-# --- 7. Ownership: service user owns its data dir and the release tree; --
-#        config dir stays root:service-group readable only (0640 file above).
+if [ -f "$SCRIPT_DIR/../systemd/geocam-edge-ota-updater.service.in" ]; then
+    sed \
+        -e "s|@GEOCAM_OTA_UPDATER_EXEC@|$GEOCAM_LIBEXEC_DIR/ota-updater.sh|g" \
+        -e "s|@GEOCAM_DATA_DIR_PLACEHOLDER@|$GEOCAM_DATA_DIR|g" \
+        -e "s|@GEOCAM_PREFIX_PLACEHOLDER@|$GEOCAM_PREFIX|g" \
+        -e "s|@GEOCAM_LIBEXEC_PLACEHOLDER@|$GEOCAM_LIBEXEC_DIR|g" \
+        "$SCRIPT_DIR/../systemd/geocam-edge-ota-updater.service.in" > "$SYSTEMD_DIR/geocam-edge-ota-updater.service"
+    sed \
+        -e "s|@GEOCAM_DATA_DIR_PLACEHOLDER@|$GEOCAM_DATA_DIR|g" \
+        "$SCRIPT_DIR/../systemd/geocam-edge-ota-updater.path.in" > "$SYSTEMD_DIR/geocam-edge-ota-updater.path"
+    log "wrote privileged OTA updater units to $SYSTEMD_DIR"
+fi
+
+# --- 7. Ownership: the daemon owns only its data. Release trees, updater
+#        scripts and binaries are root-owned on real Linux targets, so the
+#        unprivileged daemon cannot replace the code executed by root OTA. --
 if is_real_linux_target; then
-    chown -R "$GEOCAM_SERVICE_USER:$GEOCAM_SERVICE_GROUP" "$DATA_DIR" "$PREFIX"
+    chown -R "$GEOCAM_SERVICE_USER:$GEOCAM_SERVICE_GROUP" "$DATA_DIR"
+    chown -R root:root "$PREFIX" "$(root_path "$GEOCAM_LIBEXEC_DIR")"
+    chmod 0755 "$PREFIX" "$(root_path "$GEOCAM_LIBEXEC_DIR")"
     chown "root:$GEOCAM_SERVICE_GROUP" "$CONFIG_DIR" "$ENV_FILE"
 fi
 
@@ -183,6 +204,9 @@ if is_real_linux_target && have_cmd systemctl; then
     systemctl enable geocam-edge.service
     if [ -f "$SYSTEMD_DIR/geocam-edge-bootstrap.service" ]; then
         systemctl enable geocam-edge-bootstrap.service
+    fi
+    if [ -f "$SYSTEMD_DIR/geocam-edge-ota-updater.path" ]; then
+        systemctl enable geocam-edge-ota-updater.path
     fi
     log "enabled geocam-edge services (run bootstrap or manual enrollment before start)"
 else
