@@ -17,7 +17,7 @@
 | G     | DONE / VALIDATED LOCAL|
 | H     | NEXT                  |
 | O     | CODE DONE / INTEGRATED TESTED / MERGED |
-| P     | CODE DONE / INTEGRATED TESTED |
+| P     | CODE DONE / INTEGRATED TESTED / MERGED |
 | I–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
@@ -333,7 +333,7 @@ edge-mode-only gating, model cleanup) and what remains genuinely BLOCKED
 
 ## P — Packaging multi-plataforma
 
-**HITO P — CODE DONE / INTEGRATED TESTED** (branch `integration/hito-p-final`,
+**HITO P — CODE DONE / INTEGRATED TESTED / MERGED** (branch `integration/hito-p-final`,
 integrates #39/#40/#41). Pending, not blocking: real-hardware validation of
 P7/P8/P10 (no Linux/systemd target available in this sandbox) and a first
 cut release (no target version defined for this closure — the P5/P6 tag
