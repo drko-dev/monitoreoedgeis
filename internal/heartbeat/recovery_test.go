@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,7 +32,9 @@ func TestOnRecoveredFiresOncePerRecovery(t *testing.T) {
 	}
 	sender := newFakeSender(results...)
 
-	var unauthorized, recovered int
+	// Atomics: both hooks run on the heartbeat loop's own goroutine while this
+	// test reads them, so a plain int would be a data race.
+	var unauthorized, recovered atomic.Int64
 	m, err := New(Options{
 		Sender:         sender,
 		DeviceID:       "device-1",
@@ -39,8 +42,8 @@ func TestOnRecoveredFiresOncePerRecovery(t *testing.T) {
 		Build:          func() transport.HeartbeatRequest { return transport.HeartbeatRequest{} },
 		Interval:       time.Millisecond,
 		Log:            quietLogger(),
-		OnUnauthorized: func() { unauthorized++ },
-		OnRecovered:    func() { recovered++ },
+		OnUnauthorized: func() { unauthorized.Add(1) },
+		OnRecovered:    func() { recovered.Add(1) },
 		// Skip the real five-minute post-401 wait; the loop's scheduling is
 		// not what this test is about.
 		AuthFailureInterval: time.Millisecond,
@@ -56,25 +59,25 @@ func TestOnRecoveredFiresOncePerRecovery(t *testing.T) {
 
 	deadline := time.After(20 * time.Second)
 	for {
-		if len(sender.snapshot()) >= cycles*2 && recovered >= cycles {
+		if len(sender.snapshot()) >= cycles*2 && recovered.Load() >= cycles {
 			break
 		}
 		select {
 		case <-deadline:
 			t.Fatalf("timed out: %d heartbeats, unauthorized=%d recovered=%d (want >=%d each)",
-				len(sender.snapshot()), unauthorized, recovered, cycles)
+				len(sender.snapshot()), unauthorized.Load(), recovered.Load(), cycles)
 		case <-sender.fired:
 		}
 	}
 	// Allow any further (buggy) hook calls to surface before asserting.
 	time.Sleep(50 * time.Millisecond)
 
-	if unauthorized != cycles {
-		t.Errorf("OnUnauthorized fired %d times, want exactly %d (once per new 401)", unauthorized, cycles)
+	if got := unauthorized.Load(); got != cycles {
+		t.Errorf("OnUnauthorized fired %d times, want exactly %d (once per new 401)", got, cycles)
 	}
-	if recovered != cycles {
+	if got := recovered.Load(); got != cycles {
 		t.Errorf("OnRecovered fired %d times, want exactly %d (once per recovery, not once per successful heartbeat)",
-			recovered, cycles)
+			got, cycles)
 	}
 }
 
@@ -86,7 +89,7 @@ func TestOnRecoveredNotFiredOnConsecutiveSuccesses(t *testing.T) {
 		nil, nil, nil, nil, nil,
 	)
 
-	var recovered int
+	var recovered atomic.Int64
 	m, err := New(Options{
 		Sender:              sender,
 		DeviceID:            "device-1",
@@ -94,7 +97,7 @@ func TestOnRecoveredNotFiredOnConsecutiveSuccesses(t *testing.T) {
 		Build:               func() transport.HeartbeatRequest { return transport.HeartbeatRequest{} },
 		Interval:            time.Millisecond,
 		Log:                 quietLogger(),
-		OnRecovered:         func() { recovered++ },
+		OnRecovered:         func() { recovered.Add(1) },
 		AuthFailureInterval: time.Millisecond,
 	})
 	if err != nil {
@@ -116,8 +119,8 @@ func TestOnRecoveredNotFiredOnConsecutiveSuccesses(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond)
 
-	if recovered != 1 {
-		t.Errorf("OnRecovered fired %d times across 1 recovery and 5 successes, want exactly 1", recovered)
+	if got := recovered.Load(); got != 1 {
+		t.Errorf("OnRecovered fired %d times across 1 recovery and 5 successes, want exactly 1", got)
 	}
 }
 
@@ -131,7 +134,7 @@ func TestOnRecoveredFiresAfterATransientOutage(t *testing.T) {
 		nil,
 	)
 
-	var recovered int
+	var recovered atomic.Int64
 	m, err := New(Options{
 		Sender:      sender,
 		DeviceID:    "device-1",
@@ -139,7 +142,7 @@ func TestOnRecoveredFiresAfterATransientOutage(t *testing.T) {
 		Build:       func() transport.HeartbeatRequest { return transport.HeartbeatRequest{} },
 		Interval:    time.Millisecond,
 		Log:         quietLogger(),
-		OnRecovered: func() { recovered++ },
+		OnRecovered: func() { recovered.Add(1) },
 		// The backoff after a transient failure starts at BaseBackoff (1s);
 		// jitter keeps it near that, which is fast enough for the deadline.
 	})
@@ -162,8 +165,8 @@ func TestOnRecoveredFiresAfterATransientOutage(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond)
 
-	if recovered != 1 {
-		t.Errorf("OnRecovered fired %d times after a transient outage, want exactly 1", recovered)
+	if got := recovered.Load(); got != 1 {
+		t.Errorf("OnRecovered fired %d times after a transient outage, want exactly 1", got)
 	}
 	if got := m.Status().State; got != StateRunning {
 		t.Errorf("module state = %q, want %q", got, StateRunning)
