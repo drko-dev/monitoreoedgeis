@@ -42,9 +42,16 @@ class Detection:
 @dataclass
 class HealthResult:
     ready: bool
+    # device is the EFFECTIVE device Ultralytics will be driven with, never the
+    # raw configured string. device_requested is kept alongside it so an
+    # operator (and Hito X's benchmark) can tell a resolved value from an echo.
     device: str = ""
+    device_requested: str = ""
     models_loaded: list[str] = field(default_factory=list)
     error: str = ""
+    # warning is a non-fatal, operator-visible note (for example a controlled
+    # fallback from a requested accelerator that is not present on this host).
+    warning: str = ""
 
 
 @dataclass
@@ -59,6 +66,45 @@ class InferenceBackend:
 
     def infer(self, jpeg_bytes: bytes, width: int, height: int) -> InferResult:
         raise NotImplementedError
+
+
+def _cuda_available() -> bool:
+    """Report whether this host's PyTorch can really use CUDA.
+
+    Never raises: an unavailable, broken or absent torch means "no CUDA", which
+    is the safe answer for device selection.
+    """
+    try:
+        import torch  # lazy: torch arrives with ultralytics, not on its own
+        return bool(torch.cuda.is_available())
+    except Exception:  # noqa: BLE001 - absence of torch is not an error here
+        return False
+
+
+def resolve_device(requested: str) -> tuple[str, str]:
+    """Resolve a configured device to one Ultralytics will actually accept.
+
+    Returns (effective_device, warning). This exists because of a defect Hito X
+    reproduced: `--device auto` — a value internal/fulledge.ParseDeviceMode
+    documents and its own fallback path selects — was passed straight through to
+    Ultralytics, which then raised `ValueError: Invalid CUDA 'device=auto'
+    requested` on EVERY inference while the health handshake still reported
+    ready=true. The agent's readiness gate therefore passed and 100% of
+    inference failed at runtime. A requested `cuda` on a host without CUDA failed
+    the same way, even though fulledge.HardwareManager documents a controlled
+    fallback to CPU.
+
+    This mirrors fulledge.HardwareManager.resolve()'s cpu/cuda/auto contract and
+    adds nothing beyond it: no new backend, no new accelerator. Any other value
+    (an explicit `mps`, a CUDA device index such as `0`, ...) is passed through
+    untouched, because only the operator knows what this host has.
+    """
+    req = (requested or "").strip().lower()
+    if req in ("", "auto"):
+        return ("cuda" if _cuda_available() else "cpu"), ""
+    if req == "cuda" and not _cuda_available():
+        return "cpu", "cuda requested but this host's PyTorch reports no CUDA device; falling back to cpu"
+    return req, ""
 
 
 class YOLOBackend(InferenceBackend):
@@ -93,6 +139,12 @@ class YOLOBackend(InferenceBackend):
         except ImportError as exc:
             return HealthResult(ready=False, error=f"ultralytics not installed: {exc}")
 
+        requested = self.device
+        effective, warning = resolve_device(requested)
+        # Every later infer() call uses the resolved value, so the device the
+        # handshake reports is the one the model is actually driven with.
+        self.device = effective
+
         loaded: list[str] = []
         try:
             self._person_model = YOLO(self.person_model_path)
@@ -100,9 +152,15 @@ class YOLOBackend(InferenceBackend):
             self._vehicle_model = YOLO(self.vehicle_model_path)
             loaded.append(self.vehicle_model_path)
         except Exception as exc:  # noqa: BLE001 - report, never crash the worker
-            return HealthResult(ready=False, models_loaded=loaded, error=str(exc))
+            return HealthResult(
+                ready=False, device_requested=requested, models_loaded=loaded,
+                error=str(exc), warning=warning,
+            )
 
-        return HealthResult(ready=True, device=self.device, models_loaded=loaded)
+        return HealthResult(
+            ready=True, device=effective, device_requested=requested,
+            models_loaded=loaded, warning=warning,
+        )
 
     def infer(self, jpeg_bytes: bytes, width: int, height: int) -> InferResult:
         import io

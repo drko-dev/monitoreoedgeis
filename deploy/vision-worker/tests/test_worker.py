@@ -17,8 +17,67 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend import FakeBackend  # noqa: E402
+from backend import FakeBackend, resolve_device  # noqa: E402
 from worker import handle_request, serve  # noqa: E402
+
+
+class ResolveDeviceTests(unittest.TestCase):
+    """Hito X regression: `auto` (and `cuda` on a host without CUDA) used to be
+    passed straight to Ultralytics, which raised on every inference while the
+    health handshake still reported ready=true -- a readiness gate that passed
+    while 100% of inference failed.
+
+    The CUDA-availability detection is patched so these tests state the
+    contract without needing a GPU.
+    """
+
+    def setUp(self):
+        import backend
+
+        self._backend = backend
+        self._real = backend._cuda_available
+
+    def tearDown(self):
+        self._backend._cuda_available = self._real
+
+    def _set_cuda(self, available: bool) -> None:
+        self._backend._cuda_available = lambda: available
+
+    def test_auto_resolves_to_a_device_ultralytics_accepts(self):
+        for cuda in (False, True):
+            self._set_cuda(cuda)
+            effective, warning = resolve_device("auto")
+            self.assertIn(effective, ("cpu", "cuda"))
+            self.assertNotEqual(effective, "auto")
+            self.assertEqual(warning, "")
+
+    def test_empty_request_is_treated_as_auto(self):
+        self._set_cuda(False)
+        self.assertEqual(resolve_device("")[0], "cpu")
+        self._set_cuda(True)
+        self.assertEqual(resolve_device("")[0], "cuda")
+
+    def test_cuda_without_cuda_falls_back_to_cpu_and_says_so(self):
+        self._set_cuda(False)
+        effective, warning = resolve_device("cuda")
+        self.assertEqual(effective, "cpu")
+        self.assertIn("cuda", warning.lower())
+
+    def test_cuda_with_cuda_is_kept(self):
+        self._set_cuda(True)
+        self.assertEqual(resolve_device("cuda"), ("cuda", ""))
+
+    def test_cpu_is_never_rewritten(self):
+        for cuda in (False, True):
+            self._set_cuda(cuda)
+            self.assertEqual(resolve_device("cpu"), ("cpu", ""))
+
+    def test_explicit_devices_pass_through_untouched(self):
+        # Only auto/cuda-without-cuda are resolved: an operator's explicit choice
+        # (an MPS device, a CUDA index) is not silently second-guessed.
+        self._set_cuda(False)
+        for requested in ("mps", "0", "cuda:1"):
+            self.assertEqual(resolve_device(requested), (requested, ""))
 
 
 class HandleRequestTests(unittest.TestCase):
@@ -30,6 +89,9 @@ class HandleRequestTests(unittest.TestCase):
         self.assertTrue(resp["ready"])
         self.assertEqual(resp["device"], "cpu")
         self.assertEqual(len(resp["models_loaded"]), 2)
+        # The health response always carries both, so an echo can never be
+        # mistaken for a resolved effective device.
+        self.assertIn("device_requested", resp)
 
     def test_health_not_ready_reports_error_not_crash(self):
         backend = FakeBackend(ready=False, error="model load failed")

@@ -32,8 +32,13 @@ const (
 // includes an RTSP URI, credential, or frame bytes — only counters and
 // state, matching every other Sink/pipeline status block in this repo.
 type WorkerStatus struct {
-	State           string   `json:"state"`
+	State string `json:"state"`
+	// Device is the effective device the worker resolved and will drive
+	// Ultralytics with. DeviceRequested is the configured value it was given;
+	// reporting both is what makes a fallback (cuda -> cpu on a host without
+	// CUDA, or an auto that resolved) visible instead of silent.
 	Device          string   `json:"device"`
+	DeviceRequested string   `json:"device_requested,omitempty"`
 	ModelsLoaded    []string `json:"models_loaded,omitempty"`
 	Restarts        int64    `json:"restarts"`
 	InferenceCount  int64    `json:"inference_count"`
@@ -60,6 +65,7 @@ type Worker struct {
 	cmd   *exec.Cmd
 
 	device          string
+	deviceRequested string
 	modelsLoaded    []string
 	lastError       string
 	restarts        atomic.Int64
@@ -378,6 +384,7 @@ func (w *Worker) spawnAndHandshake(ctx context.Context) error {
 	}
 	w.mu.Lock()
 	w.device = resp.Device
+	w.deviceRequested = resp.DeviceRequested
 	w.modelsLoaded = resp.ModelsLoaded
 	w.mu.Unlock()
 	return nil
@@ -546,6 +553,7 @@ func (w *Worker) Status() WorkerStatus {
 	w.mu.Lock()
 	state := w.state
 	device := w.device
+	deviceRequested := w.deviceRequested
 	models := w.modelsLoaded
 	lastErr := w.lastError
 	w.mu.Unlock()
@@ -553,6 +561,7 @@ func (w *Worker) Status() WorkerStatus {
 	return WorkerStatus{
 		State:           state,
 		Device:          device,
+		DeviceRequested: deviceRequested,
 		ModelsLoaded:    models,
 		Restarts:        w.restarts.Load(),
 		InferenceCount:  w.inferenceCount.Load(),
