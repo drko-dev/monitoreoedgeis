@@ -39,6 +39,17 @@ ProtectHome=true
 ReadWritePaths=@GEOCAM_DATA_DIR_PLACEHOLDER@
 PrivateTmp=true
 
+# Hito S / S10: confirmed safe by audit, not guessed. The agent and its
+# ffmpeg subprocess do plain TCP/HTTP networking and software-only video
+# decode -- no VAAPI/V4L2/hardware device access anywhere in this repo
+# (see docs/security/least-privilege.md), and thermal reads are plain file
+# reads under /sys/class/thermal, unaffected by device-node restriction.
+# An empty capability set and no /dev access are therefore safe: neither
+# needs any Linux capability nor any physical device beyond the always-
+# allowed pseudo-devices (null/zero/random, which PrivateDevices keeps).
+CapabilityBoundingSet=
+PrivateDevices=true
+
 # ffmpeg subprocess + RTSP/ONVIF discovery sockets: raise the file
 # descriptor ceiling above the 1024 default rather than invent a number —
 # this is a ceiling, not a claim about how many the agent actually opens at

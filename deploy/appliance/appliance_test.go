@@ -722,6 +722,10 @@ func TestSystemdUnitTemplateStructure(t *testing.T) {
 		"Restart=on-failure",
 		"KillSignal=SIGTERM",
 		"WantedBy=multi-user.target",
+		// Hito S / S10: least-privilege hardening confirmed safe (no
+		// capability or /dev access needed by this agent/ffmpeg).
+		"CapabilityBoundingSet=",
+		"PrivateDevices=true",
 	}
 	for _, want := range required {
 		if !strings.Contains(content, want) {

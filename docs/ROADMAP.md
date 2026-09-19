@@ -20,6 +20,7 @@
 | P     | CODE DONE / INTEGRATED TESTED / MERGED |
 | Q1–Q10| CODE DONE / INTEGRATED TESTED / MERGED / SAAS PROD DEPLOYED (Edge prod: N/A) |
 | R1–R9 | CODE/ARCHITECTURE DONE / INTEGRATED TESTED / MERGED (Edge prod: N/A / no real target) |
+| S9–S11| CODE/DOCUMENTED (S1–S8 not done, out of scope) |
 | I–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
@@ -523,9 +524,48 @@ por punto abajo. Perfiles, preflight operativo, matrices y gaps:
 
 ## S — Seguridad
 
-- S1–S11: threat model, secrets únicos, TLS, cifrado local, revocación, rotación,
-  enrollment seguro, replay protection, signed updates, least privilege,
-  auditoría.
+**HITO S (S9–S11) — CODE/DOCUMENTED** (branch
+`feature/security-s-update-privilege-audit`). S1–S8 sin tocar, fuera de
+alcance de este cierre. Ver `docs/security/update-trust.md`,
+`docs/security/least-privilege.md`, `docs/security/audit.md`.
+
+- S1–S8: threat model, secrets únicos, TLS, cifrado local, revocación,
+  rotación, enrollment seguro, replay protection. **NOT DONE** — fuera de
+  alcance de este cierre.
+- S9. Signed updates. **SECURITY REQUIREMENT DEFINED / CURRENT
+  CHECKSUM-ONLY GAP EXPLICIT / IMPLEMENTATION DEFERRED TO T4** —
+  auditado `package.sh`/`update.sh`/`release.yml`: sólo existe
+  `ARTIFACT CHECKSUM` (SHA-256, detecta corrupción/tampering accidental,
+  no autentica al productor). `ARTIFACT AUTHENTICITY SIGNATURE: NOT
+  IMPLEMENTED`. Requisitos mínimos para T4 (firma asimétrica, private key
+  nunca en appliance/repo, verify antes de activar, checksum no reemplaza
+  signature, fail closed, rollback sujeto a los mismos requisitos)
+  documentados en `docs/security/update-trust.md`. Sin PKI ni signing key
+  creados en este hito.
+- S10. Least privilege. **CODE DONE / AUDITED** — confirmado: usuario de
+  servicio no-root, `NoNewPrivileges`/`ProtectSystem=strict`/
+  `ProtectHome`/`ReadWritePaths=$GEOCAM_DATA_DIR`/`PrivateTmp` ya
+  existentes (Hito P); agregado `CapabilityBoundingSet=` vacío y
+  `PrivateDevices=true`, verificado seguro por ausencia real de
+  hwaccel/VAAPI/V4L2/acceso a `/dev` en todo el repo (no adivinado). Hallazgo
+  clave: aunque el usuario de servicio es dueño de `$PREFIX`
+  (releases/binario), `ProtectSystem=strict` lo hace de solo lectura para
+  el proceso en ejecución — sin path de auto-modificación del binario.
+  Control plane confirmado allowlisted (`internal/control`, switch fijo
+  de 4 tipos, sin `os/exec`, sin shell). Detalle completo en
+  `docs/security/least-privilege.md`.
+- S11. Security audit. **EDGE SECURITY EVENT LOGGING: PARTIAL /
+  DURABLE-TAMPER-EVIDENT AUDIT: NOT IMPLEMENTED** — se reutilizó `slog`
+  existente (Hito N/D), sin stack de logging nuevo. Agregado logging
+  estructurado para enrollment success/failure, credential rotation,
+  factory reset y control command execution (antes sin `slog`, sólo
+  texto CLI); config apply/rollback y revocation/auth-failure ya estaban
+  logueados desde Hito N/D. Nunca se loguea token/credential/password de
+  cámara/`Authorization`. El ledger de comandos de control
+  (`internal/control.Ledger`) es idempotencia/retry-safety, explícitamente
+  NO un audit log (sin tamper-evidence, sin retención garantizada). SaaS
+  ya posee `log_audit` propio, no duplicado desde aquí. Detalle en
+  `docs/security/audit.md`.
 
 ## T — OTA
 
