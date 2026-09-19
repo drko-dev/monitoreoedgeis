@@ -19,7 +19,7 @@
 | O     | CODE DONE / INTEGRATED TESTED / MERGED |
 | P     | CODE DONE / INTEGRATED TESTED / MERGED |
 | Q1–Q10| CODE DONE / INTEGRATED TESTED / MERGED / SAAS PROD DEPLOYED (Edge prod: N/A) |
-| R1–R9 | CODE/ARCHITECTURE DONE / INTEGRATED TESTED (real corporate/Edge deploy validation pending) |
+| R1–R9 | CODE/ARCHITECTURE DONE / INTEGRATED TESTED / MERGED (Edge prod: N/A / no real target) |
 | I–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
@@ -447,11 +447,15 @@ hardware real.
 
 ## R — Instalación corporativa
 
-**HITO R (R1–R9) — CODE/ARCHITECTURE DONE / INTEGRATED TESTED** (branch
-`integration/hito-r-final`, integra #49/#51/#52). Real
-corporate/Edge deploy validation pending — ver detalle por punto abajo.
-Perfiles, preflight operativo, matrices y gaps: `docs/deployment/corporate.md`,
-`docs/deployment/corporate-networking.md`,
+**HITO R (R1–R9) — CODE/ARCHITECTURE DONE / INTEGRATED TESTED / MERGED**
+(PR #53 mergeado a `main` @ `37993e4a47425abf8075bc65034f11f30edb1872`,
+integra #49/#51/#52). **EDGE PROD: N/A / NO REAL TARGET** — no existe un
+Edge/appliance/VM productivo real distinto del VPS SaaS documentado en
+el repo; no se desplegó nada (no se creó infraestructura, no se usó el
+VPS SaaS como Edge). Esto no bloquea el cierre en Git. Real
+corporate/Edge deploy validation pending para R1/R2/R3/R7 — ver detalle
+por punto abajo. Perfiles, preflight operativo, matrices y gaps:
+`docs/deployment/corporate.md`, `docs/deployment/corporate-networking.md`,
 `docs/deployment/corporate-enterprise.md`.
 
 - R1 VM. **CODE/INSTALL PATH READY / DOCUMENTED / NOT VALIDATED ON REAL CORPORATE TARGET** — se reutiliza el paquete nativo Hito P/Q, systemd, `GEOCAM_DATA_DIR`, health/ready y update/rollback. No se declara compatibilidad específica con VMware, Hyper-V, Proxmox ni ningún cloud provider.
