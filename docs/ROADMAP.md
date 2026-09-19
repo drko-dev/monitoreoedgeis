@@ -523,9 +523,12 @@ por punto abajo. Perfiles, preflight operativo, matrices y gaps:
 
 ## S — Seguridad
 
-- S1–S11: threat model, secrets únicos, TLS, cifrado local, revocación, rotación,
-  enrollment seguro, replay protection, signed updates, least privilege,
-  auditoría.
+**HITO S5–S8 — IMPLEMENTED / TESTED / SCOPE DOCUMENTED**
+
+- **S5 Revocation:** Edge uses the shared authenticated transport path for heartbeat, control, events, frames, remote config and camera-credential sync. A revoked/suspended device is rejected on the next request; no push revocation is claimed. Re-enrollment is explicit and token-bound.
+- **S6 Rotation:** Edge self-rotation generates the new credential locally, submits only its hash, saves credentials atomically, and uses the existing `rotation_id` plus bounded grace window. Reuse of a `rotation_id` with another hash is rejected. **Automatic rotation schedule: NOT DEFINED.**
+- **S7 Secure enrollment:** device credential is generated locally; SaaS receives only the hash. Enrollment is bounded, strict, one-time/concurrency-safe and does not expose the raw token in logs or argv. Bootstrap uses the existing flow; no new QR/protocol added.
+- **S8 Replay protection:** enrollment claim, credential rotation, control commands, event UUID/idempotency and remote-config version handling use their existing stateful mechanisms. These prevent duplicate state-changing effects where covered; they are not bearer-secret anti-theft protection. Detailed lifecycle audit: `docs/security/device-lifecycle.md`.
 
 ## T — OTA
 
