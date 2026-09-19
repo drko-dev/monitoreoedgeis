@@ -166,7 +166,6 @@ func runUntil(t *testing.T, m *Module, sender *fakeSender, n int) Status {
 	return st
 }
 
-
 // --- construction -----------------------------------------------------------
 
 func TestNewRejectsIncompleteOptions(t *testing.T) {
