@@ -195,7 +195,7 @@ else
             log "removed ephemeral enrollment token seed file"
         fi
 
-        # Clear token variable from memory
+        # Unset token shell variables after use
         unset TOKEN
         unset GEOCAM_ENROLLMENT_TOKEN
     else

@@ -306,10 +306,10 @@ by **reusing the existing ONVIF WS-Discovery engine** (`internal/discovery`):
    - `discovery.Module` is started by the daemon when credentials are present.
    - After `InitialScanDelay` (5 seconds), it sends WS-Discovery multicast probes
      across private Ethernet interfaces.
-   - Discovered devices (ONVIF endpoints, RTSP URLs, hardware models) are saved
-     to local inventory (`/var/lib/geocam-edge/discovery-inventory.json`).
-   - If SaaS connectivity is active, pending discovery runs are claimed and
-     reported via `ReportDiscoveryRun`.
+   - `discovery.Module` mantiene el inventario local en memoria durante la ejecución
+     (`internal/discovery.Inventory`); no se persiste un archivo `discovery-inventory.json` en disco.
+   - Si la conectividad SaaS está activa, los discovery runs pendientes se reclaman
+     y se reportan al SaaS mediante `ReportDiscoveryRun` cuando corresponde.
 2. **On-Demand Operator Verification**:
    - Immediate discovery scan can be triggered via CLI:
      ```sh
