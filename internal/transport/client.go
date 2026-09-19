@@ -88,6 +88,13 @@ type Client struct {
 	baseURL    string
 	httpClient *http.Client
 	userAgent  string
+	traffic    *TrafficMeter
+}
+
+// SetTrafficMeter installs an optional application-payload meter. Configure it
+// before using the client concurrently. The meter itself is thread-safe.
+func (c *Client) SetTrafficMeter(m *TrafficMeter) {
+	c.traffic = m
 }
 
 // New builds a Client. baseURL must use https:// unless allowInsecureHTTP is
@@ -298,6 +305,7 @@ func (c *Client) PostFrameWithMetadata(ctx context.Context, deviceID, credential
 		req.Header.Set("X-Correlation-Id", meta.CorrelationID)
 	}
 
+	c.traffic.Record(TrafficFrames, int64(len(jpeg)), 0, 1)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -316,7 +324,8 @@ func (c *Client) PostFrameWithMetadata(ctx context.Context, deviceID, credential
 		return fmt.Errorf("%w: POST %s: %w", ErrSaaSUnavailable, FramesPath, err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	n, _ := io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	c.traffic.Record(TrafficFrames, 0, n, 0)
 
 	return classifyFrameStatusWithHeader(resp.StatusCode, resp.Header)
 }
@@ -370,11 +379,13 @@ func classifyFrameStatusWithHeader(status int, header http.Header) error {
 // credential. Neither value is ever logged or included in any returned error.
 func (c *Client) do(ctx context.Context, method, path, deviceID, credential string, payload any) (int, http.Header, []byte, error) {
 	var bodyReader io.Reader
+	var requestBytes int64
 	if payload != nil {
 		data, err := json.Marshal(payload)
 		if err != nil {
 			return 0, nil, nil, fmt.Errorf("transport: encode request: %w", err)
 		}
+		requestBytes = int64(len(data))
 		bodyReader = bytes.NewReader(data)
 	}
 
@@ -392,6 +403,8 @@ func (c *Client) do(ctx context.Context, method, path, deviceID, credential stri
 		req.Header.Set("Authorization", "Bearer "+credential)
 	}
 
+	category := classifyTrafficPath(path)
+	c.traffic.Record(category, requestBytes, 0, 1)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -412,6 +425,7 @@ func (c *Client) do(ctx context.Context, method, path, deviceID, credential stri
 	if err != nil {
 		return resp.StatusCode, resp.Header, nil, fmt.Errorf("transport: read response body: %w", err)
 	}
+	c.traffic.Record(category, 0, int64(len(data)), 0)
 	return resp.StatusCode, resp.Header, data, nil
 }
 
