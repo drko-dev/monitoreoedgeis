@@ -64,6 +64,13 @@ jobs:
           GEOCAM_PERF_DURATION: 3s
         run: go test -race ./internal/perf -run '^TestScaleFull$' -count=1 -v
 
+      - name: Hito X temporary 25-camera validation
+        env:
+          GEOCAM_PERF: '1'
+          GEOCAM_PERF_CAMERAS: '25'
+          GEOCAM_PERF_DURATION: 3s
+        run: go test ./internal/perf -run '^TestScaleFull$' -count=1 -v
+
   # Hito W10/W11: validate release artifacts for both deployment
   # architectures. This is cross-build/package evidence; it is not a claim
   # that physical ARM64 hardware was exercised.
