@@ -202,6 +202,22 @@ func (p *cameraPipeline) SetDecoderFactory(f func() (VideoDecoder, error)) {
 	p.decoderFactory = f
 }
 
+// currentDecoderFactory returns the decoder constructor the next decoder
+// generation will use, read under the same lock SetDecoderFactory writes it
+// with.
+//
+// The guard has to be two-sided: SetDecoderFactory may be called on a live
+// pipeline (a harness substituting the ffmpeg subprocess, a transition that
+// swaps the decoder for a camera that changed profile), and run() reads this
+// field at the top of every generation. Reading it unlocked while a writer
+// holds the mutex is a data race, not a benign one — `go test -race` reports it
+// as a write in SetDecoderFactory racing a read in run().
+func (p *cameraPipeline) currentDecoderFactory() func() (VideoDecoder, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.decoderFactory
+}
+
 // Wait blocks until the pipeline has fully stopped (all goroutines exited).
 // Unbounded — callers on a shutdown path that must respect a deadline
 // should use WaitContext instead.
@@ -250,7 +266,8 @@ func (p *cameraPipeline) run(ctx context.Context) {
 		}
 
 		p.setState("starting")
-		dec, err := p.decoderFactory()
+		newDecoder := p.currentDecoderFactory()
+		dec, err := newDecoder()
 		if err != nil {
 			p.logger.Warn("video decoder start failed, backing off",
 				"candidate_key", p.candidateKey, "error", truncateErr(err), "backoff", backoff)

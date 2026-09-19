@@ -65,11 +65,17 @@ def handle_request(backend: InferenceBackend, req: dict, loaded_state: dict) -> 
             if not result.ready:
                 return {"type": "health_ok", "ready": False, "error": result.error}
             loaded_state["device"] = result.device
+            loaded_state["device_requested"] = getattr(result, "device_requested", "")
             loaded_state["models_loaded"] = result.models_loaded
+            # A fallback (or any other non-fatal note) must be visible in the
+            # agent's logs, never silent -- the Go side folds this stream in.
+            if getattr(result, "warning", ""):
+                log(f"device: {result.warning}")
         return {
             "type": "health_ok",
             "ready": loaded_state.get("ready", False),
             "device": loaded_state.get("device", ""),
+            "device_requested": loaded_state.get("device_requested", ""),
             "models_loaded": loaded_state.get("models_loaded", []),
         }
 
