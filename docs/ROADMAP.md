@@ -450,6 +450,30 @@ hardware real.
 - R2 Server Linux. **CODE/INSTALL PATH READY / DOCUMENTED / NOT VALIDATED ON REAL CORPORATE TARGET** — instalación directa con `package.sh`/`install.sh` y la unidad systemd existente. No modifica firewall, networking, discos ni servicios ajenos.
 - R3 Appliance industrial. **CODE/INSTALL PATH READY / DOCUMENTED / HARDWARE NOT VALIDATED** — se trata como hardware Linux dedicado con el mismo software y lifecycle. No se certifican marcas, modelos, temperatura, IP rating, voltajes, MTBF ni aceleradores.
 - Perfiles, preflight operativo, paths, dependencias y gaps: `docs/deployment/corporate.md`.
+- R4. VPN site-to-site. **DONE (DOCUMENTED / EXTERNAL INFRASTRUCTURE ARCHITECTURE)** —
+  VPN tunnel termination is strictly external (router/firewall/gateway/subnet router),
+  never on the Edge appliance or cameras. Edge daemon requires no VPN keys, certs,
+  tunnels, or cryptographic agents; it consumes standard routed IP connectivity.
+  Documented with architecture and port flows in `docs/deployment/corporate-networking.md`.
+- R5. Subnet routing. **DONE (ROUTED RTSP TRANSPORT SUPPORTED / PROVISIONING GAP DOCUMENTED)** —
+  RTSP unicast streaming (TCP 554) and ONVIF device management (HTTP/SOAP unicast)
+  natively cross routed L3 boundaries and private subnets (RFC 1918) via standard TCP/IP.
+  `ROUTED RTSP TRANSPORT CAPABILITY: SUPPORTED`.
+  **Gaps explicitly documented**:
+  `CROSS-SUBNET TARGET PROVISIONING / AUTOMATIC DISCOVERY: CURRENT GAP / NOT IMPLEMENTED`.
+  (1) Automatic discovery: ONVIF WS-Discovery uses UDP multicast (`239.255.255.250:3702`)
+      over local network interfaces and does not cross IP routers without external multicast relay.
+  (2) Cross-subnet provisioning: Remote Config (`internal/remoteconfig`) tunes video
+      parameters for known cameras (`candidate_key`), but explicitly blocks injecting new
+      network targets/URLs (`DisallowedKeys`). Automatic provisioning of unannounced
+      cross-subnet cameras is a current gap / not implemented in this milestone.
+- R6. VLANs. **DONE (DOCUMENTED / OS-MANAGED 802.1Q ARCHITECTURE)** — Edge
+  daemon does not manage 802.1Q tags or virtual network interfaces. Supports
+  either dedicated access ports (switch untagged) or OS-managed trunk subinterfaces
+  (e.g., `eth0.20`, `enp3s0.100`). Automatic discovery scans UP/MULTICAST
+  private interfaces, or can be pinned via `GEOCAM_DISCOVERY_INTERFACES`.
+- VPN/subnet/VLAN architecture, port flows y gaps: `docs/deployment/corporate-networking.md`.
+- R7–R9: ver más abajo (integrados en el mismo cierre).
 
 ## S — Seguridad
 
