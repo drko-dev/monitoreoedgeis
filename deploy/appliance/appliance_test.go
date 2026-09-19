@@ -77,7 +77,7 @@ func fakeBinary(t *testing.T, dir, name string) string {
 func otaVerifierBinary(t *testing.T, dir, name string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
-	script := "#!/bin/sh\nif [ \"$1\" = ota ] && [ \"$2\" = verify ]; then exit 0; fi\necho fake\n"
+	script := "#!/bin/sh\nif [ \"$1\" = ota ] && [ \"$2\" = verify ]; then\n  if [ -n \"$GEOCAM_TEST_MUTATE_PENDING\" ]; then printf 'tampered-source' > \"$GEOCAM_TEST_MUTATE_PENDING/artifact.tar.gz\"; fi\n  echo artifact=artifact.tar.gz\n  exit 0\nfi\necho fake\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("writing OTA verifier binary: %v", err)
 	}
@@ -799,7 +799,7 @@ func TestPrivilegedOTAUnitTemplateStructure(t *testing.T) {
 		"Group=root",
 		"ExecStart=@GEOCAM_OTA_UPDATER_EXEC@",
 		"ProtectSystem=strict",
-		"ReadWritePaths=@GEOCAM_DATA_DIR_PLACEHOLDER@ @GEOCAM_PREFIX_PLACEHOLDER@",
+		"ReadWritePaths=@GEOCAM_DATA_DIR_PLACEHOLDER@ @GEOCAM_PREFIX_PLACEHOLDER@ @GEOCAM_CONFIG_DIR_PLACEHOLDER@ @GEOCAM_SYSTEMD_DIR_PLACEHOLDER@ @GEOCAM_LIBEXEC_PLACEHOLDER@ @GEOCAM_OTA_STAGING_PLACEHOLDER@",
 	} {
 		if !strings.Contains(serviceText, want) {
 			t.Errorf("privileged updater unit missing %q", want)
@@ -857,7 +857,12 @@ func TestPrivilegedOTAUpdaterStagesAndConsumesRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(artifactBytes)
-	checksum := fmt.Sprintf("%s  artifact.tar.gz\n", hex.EncodeToString(sum[:]))
+	otherArtifact := []byte("other-architecture-artifact")
+	otherSum := sha256.Sum256(otherArtifact)
+	if err := os.WriteFile(filepath.Join(pending, "geocam-edge-v2-linux-arm64.tar.gz"), otherArtifact, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checksum := fmt.Sprintf("%s  artifact.tar.gz\n%s  geocam-edge-v2-linux-arm64.tar.gz\n", hex.EncodeToString(sum[:]), hex.EncodeToString(otherSum[:]))
 	for name, data := range map[string][]byte{
 		"SHA256SUMS":     []byte(checksum),
 		"SHA256SUMS.sig": []byte("signature-checked-by-current-binary"),
@@ -872,7 +877,7 @@ func TestPrivilegedOTAUpdaterStagesAndConsumesRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := runScript(t, root, "ota-updater.sh", baseEnv)
+	out, err := runScript(t, root, "ota-updater.sh", append(baseEnv, "GEOCAM_TEST_MUTATE_PENDING="+pending))
 	if err != nil {
 		t.Fatalf("privileged updater failed: %v\n%s", err, out)
 	}
@@ -1023,6 +1028,7 @@ printf '%s\n' "$n" > "$state"
 		"GEOCAM_DATA_DIR=" + dataDir,
 		"GEOCAM_SYSTEMD_DIR=" + systemdDir,
 		"GEOCAM_LIBEXEC_DIR=" + filepath.Join(root, "usr", "libexec", "geocam-edge"),
+		"GEOCAM_OTA_STAGING_DIR=" + filepath.Join(root, "run", "geocam-edge", "ota-staging"),
 		"GEOCAM_TEST_BINARY_ARCH=amd64",
 		"GEOCAM_WAIT_READY_ATTEMPTS=1",
 		"GEOCAM_WAIT_READY_INTERVAL=0",

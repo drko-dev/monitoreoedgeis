@@ -96,7 +96,8 @@ else
 fi
 
 # --- 2. Directories (idempotent; never recurse-delete anything) ------------
-mkdir -p "$RELEASE_DIR" "$CONFIG_DIR" "$DATA_DIR" "$DATA_DIR/ota/pending" "$DATA_DIR/ota" "$PREFIX" "$(root_path "$GEOCAM_LIBEXEC_DIR")"
+mkdir -p "$RELEASE_DIR" "$CONFIG_DIR" "$DATA_DIR" "$DATA_DIR/ota/pending" "$DATA_DIR/ota" "$PREFIX" "$(root_path "$GEOCAM_LIBEXEC_DIR")" "$(root_path "$GEOCAM_OTA_STAGING_DIR")"
+chmod 0700 "$(root_path "$GEOCAM_OTA_STAGING_DIR")"
 chmod 0750 "$CONFIG_DIR"
 chmod 0700 "$DATA_DIR"
 DATA_DIR_PRE_EXISTING=1
@@ -179,7 +180,10 @@ if [ -f "$SCRIPT_DIR/../systemd/geocam-edge-ota-updater.service.in" ]; then
         -e "s|@GEOCAM_OTA_UPDATER_EXEC@|$GEOCAM_LIBEXEC_DIR/ota-updater.sh|g" \
         -e "s|@GEOCAM_DATA_DIR_PLACEHOLDER@|$GEOCAM_DATA_DIR|g" \
         -e "s|@GEOCAM_PREFIX_PLACEHOLDER@|$GEOCAM_PREFIX|g" \
+        -e "s|@GEOCAM_CONFIG_DIR_PLACEHOLDER@|$GEOCAM_CONFIG_DIR|g" \
+        -e "s|@GEOCAM_SYSTEMD_DIR_PLACEHOLDER@|$GEOCAM_SYSTEMD_DIR|g" \
         -e "s|@GEOCAM_LIBEXEC_PLACEHOLDER@|$GEOCAM_LIBEXEC_DIR|g" \
+        -e "s|@GEOCAM_OTA_STAGING_PLACEHOLDER@|$GEOCAM_OTA_STAGING_DIR|g" \
         "$SCRIPT_DIR/../systemd/geocam-edge-ota-updater.service.in" > "$SYSTEMD_DIR/geocam-edge-ota-updater.service"
     sed \
         -e "s|@GEOCAM_DATA_DIR_PLACEHOLDER@|$GEOCAM_DATA_DIR|g" \

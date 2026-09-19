@@ -14,6 +14,7 @@ REQUEST="$OTA_DIR/apply.request"
 PENDING="$OTA_DIR/pending"
 PREFIX="$(root_path "$GEOCAM_PREFIX")"
 STATE="$OTA_DIR/state"
+STAGING_ROOT="$(root_path "$GEOCAM_OTA_STAGING_DIR")"
 
 atomic_state() {
     local value="$1" tmp
@@ -55,18 +56,62 @@ case "$release_real" in
     *) atomic_state "failed:path-escape"; rm -f "$REQUEST"; exit 1 ;;
 esac
 
-artifact="$release_real/artifact.tar.gz"
-for required in "$artifact" "$release_real/SHA256SUMS" "$release_real/SHA256SUMS.sig" "$release_real/metadata.json"; do
-    [ -f "$required" ] && [ ! -L "$required" ] || { atomic_state "failed:missing-or-symlinked-input"; rm -f "$REQUEST"; exit 1; }
+mkdir -p "$STAGING_ROOT"
+chmod 0700 "$STAGING_ROOT"
+SNAPSHOT="$(mktemp -d "$STAGING_ROOT/release.XXXXXX")"
+SNAPSHOT="$(realpath "$SNAPSHOT")"
+trap 'rm -rf "$SNAPSHOT"' EXIT
+# Snapshot first. The daemon owns the source tree, but cannot modify this
+# private root-owned staging directory after the copy completes.
+cp -a "$release_real/." "$SNAPSHOT/"
+chmod 0700 "$SNAPSHOT"
+if is_real_linux_target; then
+    chown -R root:root "$SNAPSHOT"
+fi
+
+for required in "$SNAPSHOT/SHA256SUMS" "$SNAPSHOT/SHA256SUMS.sig" "$SNAPSHOT/metadata.json"; do
+    [ -f "$required" ] && [ ! -L "$required" ] || { atomic_state "failed:missing-or-symlinked-snapshot-input"; mv "$REQUEST" "$OTA_DIR/apply.request.processed"; exit 1; }
 done
 
 # The current release is root-owned and is the only verifier accepted here.
-# It owns the Ed25519 policy and checksum implementation; this boundary does
-# not create a second cryptographic protocol.
+# It owns the Ed25519 policy and returns the concrete authenticated artifact
+# as a single `artifact=<relative-path>` line. No second crypto protocol is
+# created here.
 verifier="$PREFIX/current/geocam-edge"
 [ -x "$verifier" ] || { atomic_state "failed:missing-verifier"; rm -f "$REQUEST"; exit 1; }
-if ! "$verifier" ota verify --artifact-dir "$release_real"; then
+verify_output="$("$verifier" ota verify --artifact-dir "$SNAPSHOT")" || {
     atomic_state "failed:verification"
+    mv "$REQUEST" "$OTA_DIR/apply.request.processed"
+    exit 1
+}
+artifact_rel="$(printf '%s\n' "$verify_output" | awk -F= '$1 == "artifact" {print substr($0, 10)}')"
+artifact_count="$(printf '%s\n' "$verify_output" | awk -F= '$1 == "artifact" {n++} END {print n+0}')"
+case "$artifact_count" in
+    1) ;;
+    *) atomic_state "failed:verifier-artifact-contract"; mv "$REQUEST" "$OTA_DIR/apply.request.processed"; exit 1 ;;
+esac
+if ! printf '%s\n' "$artifact_rel" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*\.tar\.gz$'; then
+    atomic_state "failed:invalid-verified-artifact"
+    mv "$REQUEST" "$OTA_DIR/apply.request.processed"
+    exit 1
+fi
+artifact="$SNAPSHOT/$artifact_rel"
+artifact_real="$(realpath "$artifact" 2>/dev/null || true)"
+case "$artifact_real" in
+    "$SNAPSHOT"/*) ;;
+    *) atomic_state "failed:artifact-path-escape"; mv "$REQUEST" "$OTA_DIR/apply.request.processed"; exit 1 ;;
+esac
+[ -f "$artifact_real" ] && [ ! -L "$artifact_real" ] || { atomic_state "failed:invalid-verified-artifact"; mv "$REQUEST" "$OTA_DIR/apply.request.processed"; exit 1; }
+
+# update.sh keeps the historical local `<artifact>.sha256` path. Generate
+# that handoff from the already verified immutable snapshot, rather than
+# interpreting every line of a multi-artifact signed manifest.
+if have_cmd sha256sum; then
+    ( cd "$(dirname "$artifact_real")" && sha256sum "$(basename "$artifact_real")" > "$artifact_real.sha256" )
+elif have_cmd shasum; then
+    ( cd "$(dirname "$artifact_real")" && shasum -a 256 "$(basename "$artifact_real")" > "$artifact_real.sha256" )
+else
+    atomic_state "failed:no-sha256-tool"
     mv "$REQUEST" "$OTA_DIR/apply.request.processed"
     exit 1
 fi
