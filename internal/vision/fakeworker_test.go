@@ -64,8 +64,19 @@ func fakeWorkerMain() {
 		}
 		switch req.Type {
 		case "health":
+			// The effective device defaults to "cpu" and can be overridden, so a
+			// test can assert that the effective and requested devices are
+			// reported separately rather than one being echoed as the other.
+			effective := os.Getenv("GEOCAM_VISION_FAKE_EFFECTIVE_DEVICE")
+			if effective == "" {
+				effective = "cpu"
+			}
+			requested := os.Getenv("GEOCAM_VISION_FAKE_REQUESTED_DEVICE")
+			if requested == "" {
+				requested = effective
+			}
 			writeResp(conn, wireResponse{
-				Type: "health_ok", Ready: true, Device: "cpu",
+				Type: "health_ok", Ready: true, Device: effective, DeviceRequested: requested,
 				ModelsLoaded: []string{"yolo11s-pose.pt", "yolo11n.pt"},
 			})
 		case "infer":

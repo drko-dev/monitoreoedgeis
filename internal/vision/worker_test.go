@@ -137,6 +137,45 @@ func TestWorker_StartAndInfer(t *testing.T) {
 	}
 }
 
+// TestWorker_ReportsRequestedAndEffectiveDeviceSeparately pins the handshake
+// contract Hito X's device reporting depends on: the effective device the
+// worker will really use is never conflated with the value it was configured
+// with. A worker that echoes its input (which is exactly how the real worker
+// behaved before Hito X resolved `auto`/`cuda`-without-CUDA) must be
+// distinguishable from one that resolved it.
+func TestWorker_DeviceFields(t *testing.T) {
+	cfg := baseTestConfig(t)
+	cfg.Device = "auto"
+	w, _ := startWorkerWithEnv(t, cfg,
+		"GEOCAM_VISION_FAKE_EFFECTIVE_DEVICE", "cpu",
+		"GEOCAM_VISION_FAKE_REQUESTED_DEVICE", "auto",
+	)
+	waitForState(t, w, StateReady, 5*time.Second)
+
+	status := w.Status()
+	if status.Device != "cpu" {
+		t.Errorf("effective device = %q, want the worker-reported cpu", status.Device)
+	}
+	if status.DeviceRequested != "auto" {
+		t.Errorf("requested device = %q, want the configured auto", status.DeviceRequested)
+	}
+}
+
+// TestWorker_EchoedDeviceIsStillReportedAsBoth covers the honest degenerate
+// case: when the worker reports the same value for both, both fields say so
+// rather than the harness inferring an effective device that was never
+// verified.
+func TestWorker_EchoedDevice(t *testing.T) {
+	cfg := baseTestConfig(t)
+	w, _ := startWorkerWithEnv(t, cfg, "GEOCAM_VISION_FAKE_EFFECTIVE_DEVICE", "auto", "GEOCAM_VISION_FAKE_REQUESTED_DEVICE", "auto")
+	waitForState(t, w, StateReady, 5*time.Second)
+
+	status := w.Status()
+	if status.Device != "auto" || status.DeviceRequested != "auto" {
+		t.Fatalf("device/device_requested = %q/%q, want auto/auto so the echo is visible", status.Device, status.DeviceRequested)
+	}
+}
+
 // TestWorker_HealthRejected covers a worker process that starts but reports
 // itself not ready (e.g. a real model failed to load) — must never be
 // treated as Ready.

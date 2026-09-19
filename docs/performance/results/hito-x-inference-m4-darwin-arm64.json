@@ -1,0 +1,121 @@
+{
+  "schema_version": "geocam-perf/hito-x/1",
+  "kind": "inference",
+  "generated_at": "2026-09-19T21:16:54.811573Z",
+  "harness": "internal/perf (go test -tags localbench ./internal/perf -run TestXPerformanceInference)",
+  "host": {
+    "goos": "darwin",
+    "goarch": "arm64",
+    "go_version": "go1.27.1",
+    "num_cpu": 10,
+    "cpu_model": "Apple M4",
+    "memory_bytes": 17179869184,
+    "os_version": "macOS 27.0 26A428",
+    "ffmpeg_version": "ffmpeg version 8.1 Copyright (c) 2000-2026 the FFmpeg developers",
+    "ffprobe_version": "ffprobe version 8.1 Copyright (c) 2007-2026 the FFmpeg developers",
+    "python_version": "Python 3.14.6",
+    "torch_version": "2.14.0",
+    "ultralytics_version": "8.4.155",
+    "torch_cuda_reported": "unavailable",
+    "torch_mps_reported": "available"
+  },
+  "clip": {
+    "path": "/tmp/px/hito-x-clip.h264",
+    "sha256": "beb3690febdd8865a637ae3a749d02260d6852cce6757fa43e115401b32e3b6e",
+    "bytes": 1974784,
+    "container": "raw H.264 Annex-B elementary stream (-f h264)",
+    "codec": "h264",
+    "profile": "Main",
+    "pix_fmt": "yuv420p",
+    "width": 640,
+    "height": 360,
+    "nominal_source_fps": 15,
+    "nominal_source_fps_source": "ffmpeg generator -r 15 (authoritative; raw Annex-B carries no container timing)",
+    "ffprobe_guessed_fps": "30/1",
+    "coded_frames": 300,
+    "access_unit_boundary": "aud",
+    "nominal_duration_s": 20,
+    "generation_command": "ffmpeg -hide_banner -loglevel error -nostdin -fflags +bitexact -f lavfi -i testsrc2=size=640x360:rate=15 -frames:v 300 -r 15 -c:v libx264 -flags:v +bitexact -preset veryfast -tune zerolatency -profile:v main -g 30 -keyint_min 30 -sc_threshold 0 -pix_fmt yuv420p -x264-params no-scenecut=1:repeat-headers=1:aud=1 -f h264 /tmp/px/hito-x-clip.h264",
+    "ffmpeg_version": "ffmpeg version 8.1 Copyright (c) 2000-2026 the FFmpeg developers",
+    "regenerated_identical": true
+  },
+  "inference": {
+    "kind": "real-yolo",
+    "real_inference_performance_validated": true,
+    "device_requested": "cpu",
+    "device_effective": "cpu",
+    "device_effective_source": "worker-reported concrete device, equal to the request; Ultralytics is driven with exactly this value",
+    "worker_state": "ready",
+    "models_loaded": [
+      "/tmp/geocam-perf-models/yolo11s-pose.pt",
+      "/tmp/geocam-perf-models/yolo11n.pt"
+    ],
+    "model_sha256": {
+      "yolo11n.pt": "0ebbc80d4a7680d14987a577cd21342b65ecfd94632bd9a8da63ae6417644ee1",
+      "yolo11s-pose.pt": "1060bda4a27012060eca246f9b2adeea22eabb045a1e58f8d229be29b7ebc2ba"
+    },
+    "imgsz": 640,
+    "person_confidence": 0.5,
+    "vehicle_confidence": 0.5,
+    "nms_iou": 0.45,
+    "jpeg_quality": 90,
+    "frame_source": "real pipeline-decoded frames (640x360, sampled at 5 fps)",
+    "frame_width": 640,
+    "frame_height": 360,
+    "warmup_inferences": 3,
+    "warmup_ms": [
+      802.117,
+      65.858,
+      62.821
+    ],
+    "warmup_note": "warm-up samples are reported separately and excluded from every latency statistic; the first call includes one-time model/backend initialization",
+    "measured_samples": 50,
+    "worker_inference_latency": {
+      "count": 50,
+      "min_ms": 56.10658299701754,
+      "max_ms": 67.87179099046625,
+      "mean_ms": 59.34071413881611,
+      "p50_ms": 58.32304200157523,
+      "p95_ms": 64.38450000132434,
+      "p99_ms": 67.87179099046625
+    },
+    "sink_route_latency": {
+      "count": 50,
+      "min_ms": 58.925,
+      "max_ms": 98.695,
+      "mean_ms": 62.619260000000004,
+      "p50_ms": 61.418,
+      "p95_ms": 66.192,
+      "p99_ms": 98.695
+    },
+    "encode_and_ipc_p50_estimate_ms": 3.095,
+    "worker_inference_fps": 16.6743139127687,
+    "sink_route_fps": 15.968961663217282,
+    "worker_pass_wall_ms": 2998.649,
+    "sink_pass_wall_ms": 3131.071,
+    "inference_errors": 0,
+    "worker_reported_inference_errors": 0,
+    "detections_total": 0,
+    "frames_with_detections": 0,
+    "host_device_notes": [
+      "host darwin/arm64, 10 CPUs",
+      "torch 2.14.0, ultralytics 8.4.155, cuda unavailable, mps available"
+    ],
+    "limitations": [
+      "CUDA is unavailable on this host: no GPU number was measured and CPU numbers must not be extrapolated to a GPU"
+    ]
+  },
+  "environment": {
+    "GEOCAM_PERF": "1",
+    "GEOCAM_PERF_DEVICE": "cpu",
+    "GEOCAM_PERF_INFER_SAMPLES": "50",
+    "GEOCAM_PERF_INFER_WARMUP": "3",
+    "GEOCAM_PERF_MODELS_DIR": "/tmp/geocam-perf-models",
+    "GEOCAM_PERF_OUT": "/tmp/px",
+    "GEOCAM_PERF_PYTHON": "/tmp/geocam-perf-venv/bin/python"
+  },
+  "limitations": [
+    "the frames fed to the worker come from a synthetic testsrc2 clip, not from a real camera",
+    "this measures the model on the benchmark host; it is not a claim about the appliance's CPU, and CPU numbers must never be extrapolated to a GPU (or the reverse)"
+  ]
+}

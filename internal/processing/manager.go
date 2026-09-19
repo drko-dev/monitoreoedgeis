@@ -300,8 +300,13 @@ func (m *Manager) RestartCameraPipeline(ctx context.Context, candidateKey string
 
 	// 2. Create new pipeline
 	newPipeline := newCameraPipeline(candidateKey, desc, newCfg, router, m.logger.With("candidate_key", candidateKey))
-	if exists && oldPipeline != nil && oldPipeline.decoderFactory != nil {
-		newPipeline.SetDecoderFactory(oldPipeline.decoderFactory)
+	if exists && oldPipeline != nil {
+		// Read through the accessor, never the field: the old pipeline's
+		// run() goroutine reads the same field, so an unsynchronized read
+		// here would race with a concurrent SetDecoderFactory.
+		if factory := oldPipeline.currentDecoderFactory(); factory != nil {
+			newPipeline.SetDecoderFactory(factory)
+		}
 	}
 
 	// 3. Register and start new pipeline
