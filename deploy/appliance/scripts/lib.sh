@@ -127,7 +127,7 @@ arch_check_required() {
 # symlink present) on non-Linux. That gap is not a production concern: the
 # appliance only ever runs this on Linux.
 atomic_symlink_swap() {
-    if [ "$(uname -s)" = "Linux" ]; then
+    if [ "$(uname -s)" = "Linux" ] && mv --help 2>&1 | grep -q -- '-T'; then
         local tmp
         tmp="$(dirname "$1")/.$(basename "$1").tmp.$$"
         ln -sfn "$2" "$tmp"

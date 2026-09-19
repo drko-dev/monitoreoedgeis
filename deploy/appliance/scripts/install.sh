@@ -111,6 +111,9 @@ if [ -n "$FFMPEG_SRC" ]; then
     cp "$FFMPEG_SRC" "$RELEASE_DIR/ffmpeg"
     chmod 0755 "$RELEASE_DIR/ffmpeg"
 fi
+mkdir -p "$RELEASE_DIR/scripts"
+cp "$SCRIPT_DIR"/*.sh "$RELEASE_DIR/scripts/" 2>/dev/null || true
+chmod 0755 "$RELEASE_DIR/scripts"/*.sh 2>/dev/null || true
 
 # --- 4. Point `current` at this release. Record the prior target first so --
 #        rollback.sh has something deterministic to restore, but only if
@@ -157,6 +160,15 @@ sed \
     "$SCRIPT_DIR/../systemd/geocam-edge.service.in" > "$SYSTEMD_DIR/geocam-edge.service"
 log "wrote systemd unit to $SYSTEMD_DIR/geocam-edge.service"
 
+if [ -f "$SCRIPT_DIR/../systemd/geocam-edge-bootstrap.service.in" ]; then
+    sed \
+        -e "s|@GEOCAM_BOOTSTRAP_EXEC@|$GEOCAM_PREFIX/current/scripts/bootstrap.sh|g" \
+        -e "s|@GEOCAM_ENV_FILE@|$GEOCAM_CONFIG_DIR/geocam-edge.env|g" \
+        -e "s|@GEOCAM_DATA_DIR_PLACEHOLDER@|$GEOCAM_DATA_DIR|g" \
+        "$SCRIPT_DIR/../systemd/geocam-edge-bootstrap.service.in" > "$SYSTEMD_DIR/geocam-edge-bootstrap.service"
+    log "wrote systemd unit to $SYSTEMD_DIR/geocam-edge-bootstrap.service"
+fi
+
 # --- 7. Ownership: service user owns its data dir and the release tree; --
 #        config dir stays root:service-group readable only (0640 file above).
 if is_real_linux_target; then
@@ -169,7 +181,10 @@ fi
 if is_real_linux_target && have_cmd systemctl; then
     systemctl daemon-reload
     systemctl enable geocam-edge.service
-    log "enabled geocam-edge.service (not started — run 'systemctl start geocam-edge' after enrollment)"
+    if [ -f "$SYSTEMD_DIR/geocam-edge-bootstrap.service" ]; then
+        systemctl enable geocam-edge-bootstrap.service
+    fi
+    log "enabled geocam-edge services (run bootstrap or manual enrollment before start)"
 else
     log "skipping systemctl enable (no systemd on this target, or staged/test install)"
 fi

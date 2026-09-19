@@ -23,10 +23,10 @@ DATA_DIR="$(root_path "$GEOCAM_DATA_DIR")"
 SYSTEMD_DIR="$(root_path "$GEOCAM_SYSTEMD_DIR")"
 
 if is_real_linux_target && have_cmd systemctl; then
-    systemctl stop geocam-edge.service 2>/dev/null || true
-    systemctl disable geocam-edge.service 2>/dev/null || true
+    systemctl stop geocam-edge.service geocam-edge-bootstrap.service 2>/dev/null || true
+    systemctl disable geocam-edge.service geocam-edge-bootstrap.service 2>/dev/null || true
 fi
-rm -f "$SYSTEMD_DIR/geocam-edge.service"
+rm -f "$SYSTEMD_DIR/geocam-edge.service" "$SYSTEMD_DIR/geocam-edge-bootstrap.service"
 is_real_linux_target && have_cmd systemctl && systemctl daemon-reload || true
 
 # Binaries/releases only — never the data or config dirs, regardless of

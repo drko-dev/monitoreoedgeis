@@ -24,17 +24,22 @@ this document does not claim a real installation happened if it didn't.
   tool (on the machine producing the package), to extract a static ffmpeg
   binary by reusing the existing root `Dockerfile`'s `ffmpeg-build` stage —
   see [ffmpeg](#ffmpeg).
+- For sizing residential/small-site hardware (RAM, storage, network,
+  GPU/NPU, ARM64 vs. amd64) see
+  [`docs/deployment/hardware.md`](hardware.md).
 
 ## Layout
 
 | Path | Purpose | Touched by |
 |---|---|---|
-| `/opt/geocam-edge/releases/<version>/` | One immutable directory per installed version (`geocam-edge`, optionally `ffmpeg`) | install/update, never deleted except by `uninstall.sh` |
+| `/opt/geocam-edge/releases/<version>/` | One immutable directory per installed version (`geocam-edge`, optionally `ffmpeg`, `scripts/`) | install/update, never deleted except by `uninstall.sh` |
 | `/opt/geocam-edge/current` | Symlink to the active `releases/<version>` — this is what systemd actually runs | install/update/rollback |
+| `/opt/geocam-edge/current/scripts/bootstrap.sh` | First-boot zero-touch enrollment and initialization script | install/package |
 | `/opt/geocam-edge/.previous` | Records the release to restore on `rollback.sh` | install/update |
 | `/etc/geocam-edge/geocam-edge.env` | Non-secret configuration (systemd `EnvironmentFile`) | created once on first install, **never overwritten** afterward |
 | `/var/lib/geocam-edge` | `GEOCAM_DATA_DIR`: `identity.json`, `credentials.json`, offline buffer state | the running agent only — install/update/uninstall never touch its contents (see [Data safety](#data-safety)) |
-| `/etc/systemd/system/geocam-edge.service` | systemd unit | refreshed on every install (not operator-editable state) |
+| `/etc/systemd/system/geocam-edge.service` | Main daemon systemd unit | refreshed on every install (not operator-editable state) |
+| `/etc/systemd/system/geocam-edge-bootstrap.service` | First-boot oneshot unit (runs `bootstrap.sh` before `geocam-edge.service`) | refreshed on every install |
 
 The service runs as a dedicated, unprivileged system user (`geocam-edge` by
 default, no login shell, no home directory contents) — the same
@@ -186,6 +191,141 @@ a container layer). Docker is required on the **build** machine only for
 this one step; the appliance itself never runs Docker. `package.sh` bundles
 the resulting binary into the tarball automatically if
 `dist/ffmpeg-linux-<arch>` exists when it runs.
+
+## Appliance Image Preparation & First Boot (Q4)
+
+Rather than maintaining a heavy custom Linux distribution from scratch, the
+production appliance image is defined as a minimal, reproducible provisioning
+layer on top of standard base Linux distributions (Debian 12 minimal, Ubuntu
+24.04 Server, or Raspberry Pi OS Lite 64-bit):
+
+1. **Base OS Flashing**: Flash the standard distribution image to storage
+   (eMMC, SD card, or NVMe SSD).
+2. **Appliance Provisioning**:
+   - Extract the pre-packaged release: `tar xzf geocam-edge-<version>-linux-<arch>.tar.gz`.
+     > [!NOTE]
+     > El appliance tarball completo (que incluye el binario `geocam-edge`,
+     > `scripts/`, `systemd/`, `config/`, `VERSION` y `ARCH`) es el generado por
+     > `deploy/appliance/scripts/package.sh`. No debe confundirse con el tarball de
+     > GitHub Release P6 actual (`.github/workflows/release.yml`), que hoy empaqueta
+     > únicamente el binario suelto.
+   - Execute installation: `sudo GEOCAM_VERSION=<version> ./scripts/install.sh ./geocam-edge ./ffmpeg`.
+   - This writes:
+     - Versioned binaries and helper scripts in `/opt/geocam-edge/releases/<version>/`.
+     - Active symlink at `/opt/geocam-edge/current`.
+     - Systemd units: `/etc/systemd/system/geocam-edge.service` and `/etc/systemd/system/geocam-edge-bootstrap.service`.
+     - Config template `/etc/geocam-edge/geocam-edge.env` with `GEOCAM_SAAS_URL` configured for the target environment.
+3. **First-Boot Lifecycle (`bootstrap.sh`)**:
+   - `geocam-edge-bootstrap.service` is a `Type=oneshot` systemd unit ordered `Before=geocam-edge.service`.
+   - On first boot, systemd executes `/opt/geocam-edge/current/scripts/bootstrap.sh`.
+   - Under systemd service context (`INVOCATION_ID`), `bootstrap.sh` claims enrollment if a seed token is found, removes the seed file best-effort, and exits cleanly (exit 0) **without** attempting to synchronously start `geocam-edge.service` or block on readiness. Systemd then proceeds to start `geocam-edge.service` naturally, respecting the `Before=` dependency.
+   - If no token is discovered, the appliance remains cleanly installed and awaits out-of-band or manual enrollment.
+   - On subsequent boots, `bootstrap.sh` detects existing credentials and exits immediately without side effects.
+
+## Hardware, Ethernet & Power Specifications (Q5)
+
+The residential appliance baseline is designed for unattended operation in home
+or small office networks:
+
+- **Network Connectivity**:
+  - **Wired Ethernet is the primary supported path** (e.g. `eth0`, `enp*`) via DHCP.
+  - *Rationale*: CCTV streaming pipelines require deterministic throughput and
+    low jitter. Furthermore, local camera discovery relies on ONVIF WS-Discovery
+    multicast (`239.255.255.250:3702` UDP), which is frequently filtered,
+    dropped, or heavily delayed on residential Wi-Fi access points.
+  - Wi-Fi is deliberately **not** the primary supported appliance path.
+- **Power Specifications**:
+  - **Alimentación según especificación del hardware seleccionado**: utilizar siempre
+    una fuente de alimentación adecuada al fabricante y modelo implementado.
+  - *Ejemplo específico de modelo (no requisito universal GEO CAM)*:
+    - Una SBC tipo Raspberry Pi 5 típicamente requiere una fuente oficial USB-C de
+      5V / 5.0A (27W) para evitar throttling bajo carga de decodificación o inferencia local.
+    - Un mini-PC x86_64 (e.g. Intel N100 / AMD Ryzen embedded) típicamente utiliza una
+      fuente externa de 12V–19V DC según especificación del fabricante de la placa.
+- **Power over Ethernet (PoE)**:
+  - **No se asume ni requiere hardware PoE integrado en placa.**
+  - PoE soportado **estrictamente mediante solución o adaptador externo compatible si corresponde**
+    (e.g. un splitter Gigabit externo IEEE 802.3af/at que derive datos a RJ45 y alimentación
+    al puerto USB-C o jack barril correspondiente).
+  - No asumir circuitos PoE propietarios integrados en el software.
+
+## Zero-Touch Enrollment (Q6)
+
+Zero-touch enrollment allows an appliance to be claimed and bound to a SaaS
+tenant without manual SSH access or shell commands on the physical unit:
+
+```
+[First Boot]
+     │
+     ▼
+[Edge has no identity/credentials]
+     │
+     ▼
+[bootstrap.sh checks for ephemeral token]
+   ├── /boot/geocam-enroll.token (or /boot/firmware/geocam-enroll.token)
+   ├── /etc/geocam-edge/enroll.token
+   ├── GEOCAM_ENROLLMENT_TOKEN (environment / cloud-init)
+   └── /media/*/geocam-enroll.token (USB seed drive)
+     │
+     ▼
+[Found token?] ─── No ───► [Log "awaiting enrollment" and exit 0]
+     │
+    Yes
+     ▼
+[Pipe token to: `geocam-edge enroll` via stdin]
+  (Existing CLI: hashes token with SHA-256, claims device credential from SaaS)
+     │
+     ▼
+[Persist identity.json & credentials.json in /var/lib/geocam-edge]
+  (Mode 0600, owned by geocam-edge service user)
+     │
+     ▼
+[Delete ephemeral seed file (best-effort)] ◄── Never persist token in plaintext!
+     │
+     ▼
+[Exit 0 ──► systemd starts geocam-edge.service respecting Before=]
+```
+
+Key guarantees:
+- **No new enrollment protocol**: Reuses the exact existing `geocam-edge enroll`
+  command and `POST /api/v1/edge/enroll` SaaS endpoint (SHA-256 token exchange).
+  The token is supplied via stdin, never in command line arguments (`--token` was removed from bootstrap).
+- **Ephemeral token handling**: If read from `/boot/geocam-enroll.token` or disk,
+  the seed file must be treated as a secret while present, and is deleted
+  best-effort (`shred -u` or `rm -f`) immediately after enrollment. In flash
+  storage (eMMC, SD card) wear-leveling prevents cryptographically guaranteed
+  physical erasure, so the seed file must be treated with appropriate confidentiality
+  while it exists. The token is never written to logs, systemd units, or persistent configuration.
+- **FAT32 Boot Partition Friendly**: Placing `geocam-enroll.token` on `/boot` or
+  `/boot/firmware` allows a field technician or distributor to drop an enrollment
+  token onto an SD card/USB drive from Windows, macOS, or Linux without ext4 tools.
+
+## Camera Discovery Integration (Q7)
+
+Once enrolled and started, the appliance discovers local cameras automatically
+by **reusing the existing ONVIF WS-Discovery engine** (`internal/discovery`):
+
+1. **Automatic Background Scan**:
+   - `discovery.Module` is started by the daemon when credentials are present.
+   - After `InitialScanDelay` (5 seconds), it sends WS-Discovery multicast probes
+     across private Ethernet interfaces.
+   - `discovery.Module` mantiene el inventario local en memoria durante la ejecución
+     (`internal/discovery.Inventory`); no se persiste un archivo `discovery-inventory.json` en disco.
+   - Si la conectividad SaaS está activa, los discovery runs pendientes se reclaman
+     y se reportan al SaaS mediante `ReportDiscoveryRun` cuando corresponde.
+2. **On-Demand Operator Verification**:
+   - Immediate discovery scan can be triggered via CLI:
+     ```sh
+     sudo -u geocam-edge /opt/geocam-edge/current/geocam-edge discovery scan
+     ```
+   - Or during bootstrap using:
+     ```sh
+     sudo /opt/geocam-edge/current/scripts/bootstrap.sh --scan
+     ```
+3. **Zero Redundancy**:
+   - No second network scanner or secondary protocol was created.
+   - Discovery strictly reuses `internal/discovery/wsdiscovery` and
+     `internal/transport/discovery.go`.
 
 ## K3s dev deploy vs. this appliance
 

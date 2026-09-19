@@ -1,0 +1,20 @@
+[Unit]
+Description=GEO CAM Edge Appliance First-Boot Bootstrap & Zero-Touch Enrollment
+Documentation=https://github.com/drko-dev/monitoreoedgeis/blob/main/docs/deployment/appliance.md
+After=network-online.target
+Wants=network-online.target
+Before=geocam-edge.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=@GEOCAM_DATA_DIR_PLACEHOLDER@
+EnvironmentFile=-@GEOCAM_ENV_FILE@
+ExecStart=@GEOCAM_BOOTSTRAP_EXEC@
+User=root
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=geocam-edge-bootstrap
+
+[Install]
+WantedBy=multi-user.target
