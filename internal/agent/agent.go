@@ -29,15 +29,18 @@ import (
 
 // Agent is the edge agent core.
 type Agent struct {
-	cfg              *config.Config
-	log              *slog.Logger
-	identity         identity.Identity
-	identityErr      error
-	credentials      credentials.Credentials
-	credentialsErr   error
-	platform         platform.Info
-	health           *health.Reporter
-	healthGate       *agentHealthGate
+	cfg            *config.Config
+	log            *slog.Logger
+	identity       identity.Identity
+	identityErr    error
+	credentials    credentials.Credentials
+	credentialsErr error
+	platform       platform.Info
+	health         *health.Reporter
+	healthGate     *agentHealthGate
+	// livenessProbe is the health HTTP surface itself, used by the systemd
+	// watchdog to decide whether the process may still be considered alive.
+	livenessProbe    livenessProbe
 	heartbeatErr     error
 	discoveryErr     error
 	controlErr       error
@@ -83,8 +86,10 @@ func New(cfg *config.Config) *Agent {
 		health:         reporter,
 		healthGate:     newAgentHealthGate(reporter),
 	}
+	healthModule := newHealthServerModule(cfg.HealthAddr, reporter, logging.Component(log, "health-http"))
+	a.livenessProbe = healthModule
 	mods := []Module{
-		newHealthServerModule(cfg.HealthAddr, reporter, logging.Component(log, "health-http")),
+		healthModule,
 	}
 
 	// otaModule (Hito T) is built before heartbeat so heartbeat can wire it
@@ -287,8 +292,25 @@ func New(cfg *config.Config) *Agent {
 	a.controlErr = controlErr
 	a.remoteConfigErr = remoteConfigErr
 	a.localEventsErr = localEventsErr
-	a.modules = newModuleManager(reporter.SetModuleState, mods...)
+	a.modules = newModuleManager(a.onModuleState, mods...)
 	return a
+}
+
+// onModuleState mirrors a module's lifecycle into the health snapshot, and uses
+// the health server's own transition to complete Type=notify startup.
+//
+// READY=1 is sent when the health HTTP surface is actually serving, not after
+// every module has started. That is the honest meaning of "startup complete" for
+// a process whose contract is to stay reachable and report, and it keeps
+// `systemctl restart` (which blocks until READY=1 under Type=notify, and is run
+// by the appliance's own update.sh) from waiting on a slow Full Edge vision
+// worker. Waiting for /readyz is the readiness gate's job, and wait-ready.sh
+// already does exactly that.
+func (a *Agent) onModuleState(name, state string) {
+	a.health.SetModuleState(name, state)
+	if name == "health-http" && state == "running" {
+		a.notifySystemdReady()
+	}
 }
 
 // Health exposes the health reporter (used by tests and future endpoints).
@@ -395,6 +417,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	// here the only transitions left are a credential revocation and its
 	// recovery, plus STOPPING at shutdown.
 	initial := a.healthGate.activate()
+
+	// Arm systemd's watchdog against a real liveness probe. READY=1 was already
+	// sent when the health surface came up (see onModuleState); both are no-ops
+	// outside a unit that sets NOTIFY_SOCKET / WATCHDOG_USEC.
+	a.startWatchdog(ctx, a.livenessProbe)
 	if initial == health.StateReady {
 		a.log.Info("agent ready", slog.String("status", initial.String()))
 	} else {
@@ -456,6 +483,10 @@ func (a *Agent) logStartup() {
 }
 
 func (a *Agent) shutdown() error {
+	// Tell systemd a clean stop has begun before the health surface goes away:
+	// this also cancels its watchdog timer, so a slow-but-deliberate shutdown is
+	// never mistaken for a hang.
+	a.notifySystemdStopping()
 	a.health.Set(health.StateStopping)
 	a.log.Info("shutdown signal received",
 		slog.String("status", health.StateStopping.String()),
