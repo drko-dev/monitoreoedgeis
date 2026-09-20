@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
+	"github.com/drko-dev/monitoreoedgeis/internal/fulledge"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 	"github.com/drko-dev/monitoreoedgeis/internal/vision"
@@ -123,5 +124,43 @@ func TestEdgeVisionReady_NonEdgeModesAreUnaffected(t *testing.T) {
 		if !r.EdgeVisionReady() {
 			t.Errorf("mode %q must not be gated on the vision worker", mode)
 		}
+	}
+}
+
+
+func TestSnapshot_FullEdgeStatusFollowsEffectiveProfile(t *testing.T) {
+	r := reporterFor(t, config.ModeCloud, true)
+	r.SetFullEdgeStatus(fulledge.Status{LocalDetections: 7})
+
+	if snap := r.Snapshot(); snap.Profile != config.ProfileGateway || snap.FullEdge != nil {
+		t.Fatalf("cloud snapshot = profile %q full_edge=%+v, want gateway with no full_edge", snap.Profile, snap.FullEdge)
+	}
+
+	r.SetProcessingMode(config.ModeHybrid.String())
+	if snap := r.Snapshot(); snap.Profile != config.ProfileHybrid || snap.FullEdge != nil {
+		t.Fatalf("hybrid snapshot = profile %q full_edge=%+v, want hybrid with no full_edge", snap.Profile, snap.FullEdge)
+	}
+
+	r.SetProcessingMode(config.ModeEdge.String())
+	if snap := r.Snapshot(); snap.Profile != config.ProfileFullEdge || snap.FullEdge == nil {
+		t.Fatalf("edge snapshot = profile %q full_edge=%+v, want full-edge with full_edge status", snap.Profile, snap.FullEdge)
+	}
+
+	r.SetProcessingMode(config.ModeCloud.String())
+	if snap := r.Snapshot(); snap.Profile != config.ProfileGateway || snap.FullEdge != nil {
+		t.Fatalf("cloud-after-transition snapshot = profile %q full_edge=%+v, want gateway with no stale full_edge", snap.Profile, snap.FullEdge)
+	}
+}
+
+func TestSnapshot_FullEdgeStatusHiddenWhenPipelineDisabled(t *testing.T) {
+	r := reporterFor(t, config.ModeEdge, false)
+	r.SetFullEdgeStatus(fulledge.Status{LocalDetections: 7})
+
+	snap := r.Snapshot()
+	if snap.Profile != config.ProfileGatewayNoMedia {
+		t.Fatalf("Profile = %q, want %q", snap.Profile, config.ProfileGatewayNoMedia)
+	}
+	if snap.FullEdge != nil {
+		t.Fatalf("FullEdge = %+v, want nil when effective profile is not Full Edge", snap.FullEdge)
 	}
 }
