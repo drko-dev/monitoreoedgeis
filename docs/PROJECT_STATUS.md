@@ -9,9 +9,9 @@
 | --- | --- |
 | **PROJECT** | GEO CAM Edge |
 | **CURRENT HITO** | Z — Producción/evolución |
-| **STATE** | Hito Z functional blockers closed; final integration gate pending |
-| **INTEGRATION BRANCH** | `integration/hito-z-final` |
-| **SOFTWARE 1.0** | **CANDIDATE** — becomes READY when the final integration PR passes and merges unchanged into `main` |
+| **STATE** | **HITO Z SOFTWARE CLOSED** — final integration merged |
+| **MAIN** | `73b9f07fbab3a9a57f8bb652fdec9632a6cb38cc` (PR #100) |
+| **SOFTWARE 1.0** | **READY** — final integration CI 7/7 PASS and merged unchanged into `main` |
 | **RELEASE 1.0** | **NOT_VALIDATED** — B11: no real signed `v1.0.0` run yet |
 | **DEPLOYED PROD** | **NO / NO TARGET REGISTERED** |
 | **REAL CAMERA / PILOT** | **NOT_VALIDATED / NOT EXECUTED** |
@@ -26,6 +26,7 @@
 `B9` is physical validation and remains a separate validation axis.
 `B11` is the real signed release gate and remains NOT_VALIDATED until a tag-driven release actually runs.
 
+PR #100 is the canonical Hito Z integration: CI 7/7 PASS, merged to `main`.
 See `docs/product/RELEASE_1_0_READINESS.md` for the authoritative distinction between SOFTWARE 1.0, RELEASE 1.0 and DEPLOYED PROD.
 
 ## Hito A — what was implemented (MERGED)
