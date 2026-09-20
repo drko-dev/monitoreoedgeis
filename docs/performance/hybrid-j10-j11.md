@@ -64,8 +64,11 @@ Stream configuration: 640×360, JPEG quality 85, target 5.0 FPS, 50 frames.
 
 ---
 
-## 4. Acceptance Criteria Proposals (Fase 7)
+## 4. Measurement acceptance and Software 1.0 claim boundary
 
 1. **Comparability Requirement:** Benchmark runs must process identical frame counts and stream configurations.
-2. **Bandwidth Savings:** Hybrid mode must yield positive bandwidth reduction ($\text{Reduction} > 0\%$) on non-continuous scenes.
-3. **Fail-Closed Principle:** If candidate classification fails or is disabled, the system defaults to candidate transmission (`is_candidate = True`) to prevent silent event dropping.
+2. **Integrated-Hybrid requirement:** a quantitative Hybrid bandwidth result is valid only when the real Hybrid motion/ROI candidate path is what selects uploads. The fixed `i%3==0` selector in this document does not satisfy that requirement.
+3. **Field/product claim requirement:** no bandwidth-saving percentage may be presented as a product/field result until representative camera/scene/network measurement exists and its workload is stated.
+4. **Fail-Closed Principle:** If candidate classification fails or is disabled, the system defaults to candidate transmission (`is_candidate = True`) to prevent silent event dropping.
+
+For Software 1.0 the decision is therefore **no quantitative Hybrid bandwidth-saving claim**. The controlled 66.00% result above remains a synthetic transport/accounting sensitivity result only. See `docs/hito-z-bandwidth-decision.md`.
