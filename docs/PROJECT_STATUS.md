@@ -1227,19 +1227,20 @@ Explicit non-claims:
 Edge PROD: **N/A** — no real production Edge appliance/VM target is documented.
 SaaS PROD: **NOT TOUCHED** — Hito X contains no SaaS deployment change.
 
-## Hito Y — Resiliencia — INTEGRATED / CI VALIDATED
+## Hito Y — Resiliencia — MERGED
 
-Three parallel blocks integrated into `integration/hito-y-resilience`
-(Draft PR #80, `main @ d6d29f539017c504e56ae2f14f358d04abd839da`), full CI
-green. **Not merged to `main`, not deployed.**
+Three accepted blocks were integrated in `integration/hito-y-resilience`
+and merged through PR #80 to
+`main @ a790ea64199818c78e7bad1d602db70326e6d0bd`. Final integration CI was
+green. No Edge production deployment exists for this repository; SaaS was not touched.
 
-- IA1 — Y1/Y2/Y8: Draft PR #77, `resilience/hito-y-lifecycle-config`,
+- IA1 — Y1/Y2/Y8: source PR #77, `resilience/hito-y-lifecycle-config`,
   `fa01830c274aabf18362cd10ef4e9daaf146f3b6`.
-- IA2 — Y3/Y4/Y5: Draft PR #79, `resilience/hito-y-connectivity-camera`,
+- IA2 — Y3/Y4/Y5: source PR #79, `resilience/hito-y-connectivity-camera`,
   `7149c20` (republished from a preserved local-work package after the
   original session's worktree was unavailable; independently re-verified,
   not merged on trust).
-- IA3 — Y6/Y7/Y9/Y10: Draft PR #78, `resilience/hito-y-resources-health`,
+- IA3 — Y6/Y7/Y9/Y10: source PR #78, `resilience/hito-y-resources-health`,
   `a11c2b12d61dc748f1d2504f701083be1cd1f1a8`.
 
 Semantic conflict resolution (`internal/edgebacklog/backlog.go`, the only
