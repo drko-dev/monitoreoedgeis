@@ -64,6 +64,25 @@ jobs:
           GEOCAM_PERF_DURATION: 3s
         run: go test -race ./internal/perf -run '^TestScaleFull$' -count=1 -v
 
+  # Hito Z B6: run the Python Vision Worker protocol/device tests in the
+  # canonical PR gate. These tests use FakeBackend and intentionally do not
+  # install torch, ultralytics, model weights, or require a GPU.
+  vision-worker-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Vision Worker Python tests
+        run: |
+          python -m unittest discover \
+            -s deploy/vision-worker/tests \
+            -p 'test_*.py' \
+            -v
+
   # Hito W10/W11: validate release artifacts for both deployment
   # architectures. This is cross-build/package evidence; it is not a claim
   # that physical ARM64 hardware was exercised.
