@@ -6,8 +6,8 @@ development is never read as a physical gap.
 
 | | |
 | --- | --- |
-| **Register date** | 2026-09-20 |
-| **`main`** | `b007c88be578487d43a1f0d673567abdd469a37b` |
+| **Register date** | 2026-09-20 (register content) / verified against `main` again for Hito 2A |
+| **`main`** | `6617322549e4d9ac815317a0724b92d3e4613045` |
 | **SOFTWARE 1.0** | **READY** — see `docs/product/RELEASE_1_0_READINESS.md` |
 | **FIELD / HARDWARE VALIDATION** | **PENDING** — every row below is `NOT_VALIDATED` |
 
