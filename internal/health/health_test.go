@@ -312,10 +312,11 @@ func TestSnapshot_QueuesDistinctAndCoherent(t *testing.T) {
 	// 3. FullEdge & Vision
 	r.SetFullEdgeStatus(fulledge.Status{
 		Limits: fulledge.LimitsStatus{
-			InFlightInference: 1,
-			QueueDepth:        8,
-			QueueDropped:      3,
-			MemoryPressure:    false,
+			InFlightInference:      1,
+			MaxConcurrentInference: 2,
+			QueueDepth:             8,
+			QueueDropped:           3,
+			MemoryPressure:         false,
 		},
 	})
 
@@ -343,8 +344,18 @@ func TestSnapshot_QueuesDistinctAndCoherent(t *testing.T) {
 		t.Errorf("unexpected EdgeBacklog queue: %+v", snap.Queues.EdgeBacklog)
 	}
 
-	if snap.Queues.Vision == nil || snap.Queues.Vision.Depth != 1 || snap.Queues.Vision.Capacity != 8 || snap.Queues.Vision.Drops != 3 {
+	// Capacity must be the bound that actually applies to Depth. Depth is
+	// InFlightInference, whose real bound is the MaxConcurrentInference
+	// admission semaphore — NOT Limits.QueueDepth (8 here), which no code path
+	// enforces. Reporting QueueDepth claimed a vision queue bound that does not
+	// exist: the real frame-level queue for this sink is its
+	// processing.Router channel, reported under router[] with its own capacity
+	// and drop counter.
+	if snap.Queues.Vision == nil || snap.Queues.Vision.Depth != 1 || snap.Queues.Vision.Capacity != 2 || snap.Queues.Vision.Drops != 3 {
 		t.Errorf("unexpected Vision queue: %+v", snap.Queues.Vision)
+	}
+	if snap.Queues.Vision.Capacity == 8 {
+		t.Error("vision queue Capacity is still the unenforced Limits.QueueDepth; it must report the real admission bound")
 	}
 }
 

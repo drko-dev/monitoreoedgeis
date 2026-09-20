@@ -587,9 +587,12 @@ func buildQueuesStatus(
 				Name:          "cloud_buffer",
 				Depth:         cb.BufferedFrames,
 				Capacity:      cb.Capacity,
-				Drops:         cb.DroppedFull + cb.DroppedOversize,
+				Drops:         cb.DroppedFull + cb.DroppedOversize + cb.DroppedAge + cb.DroppedOverCapacity,
 				OldestPending: cb.OldestPending,
-				Degraded:      cb.DroppedFull > 0,
+				// A spool that was over its own bound at recovery is a real
+				// degradation (the configured limit was violated), unlike an
+				// age eviction, which is the buffer working as designed.
+				Degraded: cb.DroppedFull > 0 || cb.DroppedOverCapacity > 0,
 			}
 			hasAny = true
 		}
@@ -602,8 +605,11 @@ func buildQueuesStatus(
 			Capacity:      backlog.Capacity,
 			Drops:         backlog.Drops,
 			OldestPending: backlog.OldestPending,
-			Degraded:      backlog.Degraded,
-			Quarantined:   backlog.Quarantined,
+			// DiskFull/OverCapacity make a persistence problem visible here
+			// too: before this, a backlog whose writes were all failing
+			// looked perfectly healthy on /status.
+			Degraded:    backlog.Degraded || backlog.DiskFull || backlog.OverCapacity,
+			Quarantined: backlog.Quarantined,
 		}
 		hasAny = true
 	}
@@ -613,10 +619,17 @@ func buildQueuesStatus(
 		if vis != nil && (vis.Worker.State == vision.StateError || vis.Worker.State == vision.StateRestarting) {
 			isDegraded = true
 		}
+		// Capacity is MaxConcurrentInference, not Limits.QueueDepth: Depth is
+		// InFlightInference, which is bounded by the admission semaphore
+		// (TryAcquireInference) and not by any queue. Reporting QueueDepth here
+		// claimed a bound of EdgeInferenceQueueDepth that this component never
+		// enforces — the real frame-level bound for the vision sink is its
+		// Router queue, already reported above under router[] with the real
+		// GEOCAM_VIDEO_QUEUE_DEPTH capacity and its own drop counter.
 		qs.Vision = &QueueComponentStatus{
 			Name:     "vision",
 			Depth:    fullEdge.Limits.InFlightInference,
-			Capacity: fullEdge.Limits.QueueDepth,
+			Capacity: fullEdge.Limits.MaxConcurrentInference,
 			Drops:    fullEdge.Limits.QueueDropped,
 			Degraded: isDegraded,
 		}

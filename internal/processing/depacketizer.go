@@ -10,6 +10,30 @@ const (
 	nalTypeFUA   = 28
 )
 
+// maxAccessUnitBytes bounds the total size of one reassembled access unit, and
+// maxAccessUnitNALUs bounds how many NAL units it may aggregate. Both are
+// protocol-safety ceilings, not tuning knobs, and they follow the same pattern
+// as maxPendingTimes and stderrTailMax in ffmpeg_decoder.go: an accumulator fed
+// by the network must have a ceiling, or a broken or hostile sender can make it
+// grow until the process runs out of memory.
+//
+// Before these existed, two accumulators grew with no bound at all:
+// auNALUs grew for every NAL-1..23 packet carrying a constant RTP timestamp
+// and no marker bit, and fuBuf grew for every FU-A fragment of a run that
+// never set its end bit with contiguous sequence numbers. Neither needs a
+// malicious camera: a sender that simply never signals a frame boundary is
+// enough, and one such pipeline exists per camera.
+//
+// 8 MiB is deliberately far above any real access unit at the resolutions this
+// Edge ingests (a 4K H.264 keyframe is on the order of 1-2 MB, and the default
+// stream role is the camera substream), so a legitimate frame is never
+// affected, while the ceiling keeps worst-case reassembly memory per camera
+// bounded and small. 4096 NAL units is likewise far above any real frame.
+const (
+	maxAccessUnitBytes = 8 << 20
+	maxAccessUnitNALUs = 4096
+)
+
 var (
 	errSTAPABounds = errors.New("processing: stap-a nalu size exceeds remaining payload")
 	errSTAPAEmpty  = errors.New("processing: stap-a with no aggregated NALUs")
@@ -40,10 +64,15 @@ type H264Depacketizer struct {
 	lastSeq     uint16
 
 	auNALUs      [][]byte
+	auBytes      int
 	auReceivedAt time.Time
 	auTimestamp  uint32
 	auOpen       bool
 	auCorrupt    bool
+	// auOverflow records that this access unit was abandoned because it
+	// exceeded a reassembly ceiling. While it is set, appendNALU is a no-op,
+	// so the accumulator holds no memory until the boundary closes the AU.
+	auOverflow bool
 
 	fuActive    bool
 	fuNALHeader byte
@@ -60,6 +89,13 @@ type H264Depacketizer struct {
 	// UnsupportedNALTypes counts NAL types this depacketizer does not
 	// implement (FU-B, MTAP, STAP-B, reserved types).
 	UnsupportedNALTypes int64
+	// OversizedAUsDropped counts access units abandoned because reassembly
+	// exceeded maxAccessUnitBytes or maxAccessUnitNALUs. It is separate from
+	// IncompleteAUsDropped (packet loss) on purpose: "this sender never
+	// closes a frame" and "packets were lost" need different operator
+	// responses, and folding them together would hide a wedged camera behind
+	// a packet-loss number.
+	OversizedAUsDropped int64
 }
 
 // NewH264Depacketizer creates a depacketizer with fresh reassembly state.
@@ -163,11 +199,40 @@ func (d *H264Depacketizer) appendNALU(nalu []byte, timestamp uint32, recvAt time
 		d.auReceivedAt = recvAt
 		d.auTimestamp = timestamp
 	}
+	// Once the AU has been abandoned there is nothing to accumulate: staying
+	// a no-op keeps the accumulator at zero bytes until the boundary arrives,
+	// instead of freeing and immediately re-growing it packet after packet.
+	if d.auOverflow {
+		return
+	}
+	if d.auBytes+len(nalu) > maxAccessUnitBytes || len(d.auNALUs) >= maxAccessUnitNALUs {
+		d.abandonOversizedAU()
+		return
+	}
 	d.auNALUs = append(d.auNALUs, nalu)
+	d.auBytes += len(nalu)
+}
+
+// abandonOversizedAU throws away an access unit that exceeded a reassembly
+// ceiling. The frame cannot be decoded from a truncated AU, and these are live
+// media frames — the safely-droppable class — so dropping it is correct; the
+// point of the ceiling is that dropping it must be bounded AND counted rather
+// than becoming an out-of-memory kill. Opening the AU if it was not open
+// already keeps the accounting honest: data really was received for a frame
+// that has now been discarded.
+func (d *H264Depacketizer) abandonOversizedAU() {
+	d.auOpen = true
+	d.auOverflow = true
+	d.auNALUs = nil
+	d.auBytes = 0
 }
 
 func (d *H264Depacketizer) closeAU() *AccessUnit {
 	defer d.resetAUState()
+	if d.auOverflow {
+		d.OversizedAUsDropped++
+		return nil
+	}
 	if d.auCorrupt || len(d.auNALUs) == 0 {
 		if d.auCorrupt {
 			d.IncompleteAUsDropped++
@@ -179,8 +244,10 @@ func (d *H264Depacketizer) closeAU() *AccessUnit {
 
 func (d *H264Depacketizer) resetAUState() {
 	d.auNALUs = nil
+	d.auBytes = 0
 	d.auOpen = false
 	d.auCorrupt = false
+	d.auOverflow = false
 	d.auTimestamp = 0
 }
 
@@ -206,6 +273,20 @@ func (d *H264Depacketizer) handleFUA(payload []byte, hdr RTPHeader, recvAt time.
 	} else {
 		if !d.fuActive {
 			d.ReassemblyErrors++
+			d.maybeCloseOnMarker(hdr)
+			return
+		}
+		// Bound the reassembly buffer: a fragment run that never sets its end
+		// bit would otherwise grow this slice for as long as the sender keeps
+		// going, which is a memory-exhaustion path reachable from the wire.
+		// Abandoning the run leaves the frame undecodable either way, since a
+		// truncated NAL unit cannot be decoded — so the run is dropped, the
+		// AU it belonged to is abandoned, and both are counted.
+		if len(d.fuBuf)+len(payload)-2 > maxAccessUnitBytes {
+			d.fuActive = false
+			d.fuBuf = nil
+			d.ReassemblyErrors++
+			d.abandonOversizedAU()
 			d.maybeCloseOnMarker(hdr)
 			return
 		}

@@ -102,6 +102,15 @@ type Options struct {
 	// OnUnauthorized, when set, is called once each time a 401/403 is newly
 	// observed, so the agent can mark itself DEGRADED.
 	OnUnauthorized func()
+	// OnRecovered, when set, is called once when a heartbeat succeeds after
+	// the module had stopped running cleanly (a transient failure, or a 401
+	// the SaaS later cleared). It is the counterpart OnUnauthorized needs: an
+	// agent that marks itself DEGRADED on a revoked credential and has no
+	// matching recovery hook stays DEGRADED — and /readyz stays 503 — until
+	// the process is restarted, even after the operator re-enables the
+	// device. Like OnSuccess it runs in the heartbeat loop's goroutine and
+	// must return promptly.
+	OnRecovered func()
 	// OnSuccess, when set, is called after each successful heartbeat send
 	// (Hito T: this is the "after a successful SaaS heartbeat, Edge may run
 	// an OTA CheckOnce" cadence). It runs synchronously in the heartbeat
@@ -112,6 +121,12 @@ type Options struct {
 	// log; it can never turn this already-successful heartbeat into a
 	// failure.
 	OnSuccess func()
+
+	// AuthFailureInterval overrides the slow poll used after a 401/403. Zero
+	// selects AuthFailureInterval (five minutes). It is settable because that
+	// value is also the worst-case delay before the Edge notices a re-enabled
+	// credential and clears DEGRADED, which a test has to be able to compress.
+	AuthFailureInterval time.Duration
 
 	// Now, Rand and NewTimer are seams for deterministic tests. Zero values
 	// select the real clock, a locally seeded RNG and time.NewTimer.
@@ -212,6 +227,15 @@ func (m *Module) Stop(ctx context.Context) error {
 	return nil
 }
 
+// authFailureInterval returns the configured post-401/403 poll interval, or the
+// package default when unset.
+func (m *Module) authFailureInterval() time.Duration {
+	if m.opts.AuthFailureInterval > 0 {
+		return m.opts.AuthFailureInterval
+	}
+	return AuthFailureInterval
+}
+
 // Status returns a copy of the current module status.
 func (m *Module) Status() Status {
 	m.mu.RLock()
@@ -237,6 +261,10 @@ func (m *Module) loop(ctx context.Context) {
 	// instead of converging on one second.
 	delay := time.Duration(m.opts.Rand() * float64(InitialDelay))
 	unauthorizedReported := false
+	// wasFailing tracks whether the previous outcome left the module in a
+	// non-running state, so OnRecovered fires exactly once on the transition
+	// back to running rather than on every successful heartbeat.
+	wasFailing := false
 
 	for {
 		if !m.wait(ctx, delay) {
@@ -252,6 +280,8 @@ func (m *Module) loop(ctx context.Context) {
 		case err == nil:
 			bo.reset()
 			unauthorizedReported = false
+			recovered := wasFailing
+			wasFailing = false
 			now := m.opts.Now()
 			m.setStatus(func(s *Status) {
 				s.State = StateRunning
@@ -260,6 +290,9 @@ func (m *Module) loop(ctx context.Context) {
 				s.ConsecutiveFailures = 0
 				s.LastError = ""
 			})
+			if recovered && m.opts.OnRecovered != nil {
+				m.opts.OnRecovered()
+			}
 			if m.opts.OnSuccess != nil {
 				m.opts.OnSuccess()
 			}
@@ -269,6 +302,7 @@ func (m *Module) loop(ctx context.Context) {
 			// Credential revoked or device disabled. Slow poll, no backoff
 			// escalation, and crucially no re-enrollment: the stored
 			// credential and identity stay exactly as they are.
+			wasFailing = true
 			m.recordFailure("unauthorized", StateUnauthorized)
 			if !unauthorizedReported {
 				unauthorizedReported = true
@@ -278,10 +312,11 @@ func (m *Module) loop(ctx context.Context) {
 					m.opts.OnUnauthorized()
 				}
 			}
-			delay = m.jittered(AuthFailureInterval)
+			delay = m.jittered(m.authFailureInterval())
 
 		default:
 			class, wait := m.classify(err, bo)
+			wasFailing = true
 			m.recordFailure(class, StateDegraded)
 			m.opts.Log.Warn("heartbeat failed, will retry",
 				slog.String("class", class),

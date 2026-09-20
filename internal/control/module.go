@@ -43,7 +43,17 @@ type Module struct {
 
 	mu       sync.Mutex
 	executed map[string]commandExecution
+	// executedOrder is the insertion order of executed's keys, used to bound
+	// the map. See trackExecutedLocked.
+	executedOrder []string
 }
+
+// defaultMaxTrackedExecutions bounds Module.executed when no ledger is
+// configured. It is deliberately larger than the ledger's own default of 100 so
+// the in-memory map never forgets a command the durable ledger still remembers
+// — the two together are the idempotency guarantee, and a smaller in-memory
+// bound than the durable one would let a re-delivered command run twice.
+const defaultMaxTrackedExecutions = 256
 
 type commandExecution struct {
 	status    string
@@ -199,7 +209,7 @@ func (m *Module) execute(ctx context.Context, cmd *transport.ControlCommand) (st
 	}
 
 	m.mu.Lock()
-	m.executed[cmd.ID] = commandExecution{status: StatusExecuting}
+	m.trackExecutedLocked(cmd.ID, commandExecution{status: StatusExecuting})
 	m.mu.Unlock()
 
 	var state, code string
@@ -253,14 +263,38 @@ func (m *Module) execute(ctx context.Context, cmd *transport.ControlCommand) (st
 	}
 
 	m.mu.Lock()
-	m.executed[cmd.ID] = commandExecution{
+	m.trackExecutedLocked(cmd.ID, commandExecution{
 		status:    state,
 		result:    result,
 		errorCode: code,
-	}
+	})
 	m.mu.Unlock()
 
 	return state, result, code, nil
+}
+
+// trackExecutedLocked records a command's outcome and keeps the in-memory
+// idempotency map bounded, oldest-first — the same policy the durable ledger
+// applies to its own record set. The map previously had no delete path at all,
+// so every distinct control command the SaaS ever dispatched added a permanent
+// entry for the lifetime of the process. m.mu must be held.
+func (m *Module) trackExecutedLocked(id string, exec commandExecution) {
+	if _, seen := m.executed[id]; !seen {
+		m.executedOrder = append(m.executedOrder, id)
+	}
+	m.executed[id] = exec
+
+	bound := defaultMaxTrackedExecutions
+	if m.ledger != nil {
+		if n := m.ledger.MaxEntries(); n > bound {
+			bound = n
+		}
+	}
+	for len(m.executedOrder) > bound {
+		oldest := m.executedOrder[0]
+		m.executedOrder = m.executedOrder[1:]
+		delete(m.executed, oldest)
+	}
 }
 
 // ExecuteCommand executes a single control command directly (useful for tests).

@@ -1227,6 +1227,93 @@ Explicit non-claims:
 Edge PROD: **N/A** — no real production Edge appliance/VM target is documented.
 SaaS PROD: **NOT TOUCHED** — Hito X contains no SaaS deployment change.
 
+## Hito Y — Resiliencia — INTEGRATED / CI VALIDATED
+
+Three parallel blocks integrated into `integration/hito-y-resilience`
+(Draft PR #80, `main @ d6d29f539017c504e56ae2f14f358d04abd839da`), full CI
+green. **Not merged to `main`, not deployed.**
+
+- IA1 — Y1/Y2/Y8: Draft PR #77, `resilience/hito-y-lifecycle-config`,
+  `fa01830c274aabf18362cd10ef4e9daaf146f3b6`.
+- IA2 — Y3/Y4/Y5: Draft PR #79, `resilience/hito-y-connectivity-camera`,
+  `7149c20` (republished from a preserved local-work package after the
+  original session's worktree was unavailable; independently re-verified,
+  not merged on trust).
+- IA3 — Y6/Y7/Y9/Y10: Draft PR #78, `resilience/hito-y-resources-health`,
+  `a11c2b12d61dc748f1d2504f701083be1cd1f1a8`.
+
+Semantic conflict resolution (`internal/edgebacklog/backlog.go`, the only
+real overlap): `writeLocked` now combines IA1's fsync-before-rename with
+IA3's injectable write/rename/remove seam — the default write path fsyncs
+*and* is ENOSPC/EDQUOT-classified. `recover()`'s corrupt-pending-record
+handling no longer claims a successful quarantine when the move can fail;
+it now matches `quarantineLocked`'s record-the-failure semantics exactly.
+`internal/identity`, `internal/credentials` and `internal/cameracreds`
+auto-merged cleanly and were confirmed to keep both fsync and disk-error
+classification simultaneously.
+
+Per-scenario status:
+
+- **Y1 (restart)**: VALIDATED — by Hito W's existing restart/idempotency
+  tests, reused as-is (identity/credentials byte-identical across restart,
+  boot_id/sequence/uptime correctly reset, no duplicate supervisors).
+- **Y2 (power loss)**: PARTIALLY_VALIDATED — fsync-before-rename plus
+  ENOSPC/EDQUOT classification on every durable write (identity,
+  credentials, cameracreds, edgebacklog); validated via deterministic
+  abrupt-termination proxies (leftover `.tmp` files, injected rename
+  failures), not a real power cut.
+- **Y3 (SaaS offline/recovery)**: VALIDATED — by simulation/integration
+  tests against a fake SaaS.
+- **Y4 (Internet/network outage)**: VALIDATED within the limits of the
+  simulated transports used; there is intentionally no synthetic global
+  "Internet offline" detector.
+- **Y5 (camera offline/auth/recovery)**: VALIDATED — RTSP 401 classified as
+  `auth_failed`, distinct from a generic dial failure; recovery via
+  `Manager.SetTargets` with corrected credentials, no supervisor
+  duplication, against RTSP simulators.
+- **Y6 (disk full)**: VALIDATED — with injected ENOSPC/EDQUOT (a
+  deterministic seam), not a real full filesystem; real appliance
+  filesystem-exhaustion/quota behavior is NOT_VALIDATED.
+- **Y7 (queue overflow)**: VALIDATED — with deterministic bounds
+  (`MaxOperations`/`MaxBytes`, bounded quarantine arena).
+- **Y8 (config corruption)**: VALIDATED — fail-closed on corrupt identity/
+  credentials/control-ledger/remote-config state, with the corrupt file
+  preserved for diagnosis rather than overwritten; corrupt pending records
+  are quarantined (or the failure to do so is reported), never silently
+  dropped.
+- **Y9 (watchdog)**: PARTIALLY_VALIDATED — systemd `Type=notify` and an
+  internal watchdog are implemented and unit-tested; a real systemd PID1
+  watchdog kill/restart cycle is NOT_VALIDATED (requires a real systemd
+  host, not exercised here).
+- **Y10 (health recovery)**: VALIDATED — in-process (credential revocation
+  → recovery without restart, startup faults not silently cleared by an
+  unrelated heartbeat recovery, health-gate contract).
+
+Explicitly **NOT_VALIDATED** (never claimed as physically validated by this
+milestone):
+- real physical power loss;
+- a real systemd PID1 watchdog kill/restart;
+- real appliance filesystem exhaustion/quota behavior;
+- physical ARM64 appliance hardware (CI covers cross-build and QEMU-based
+  Docker multiarch stages only, never physical ARM64 execution);
+- real camera/network field conditions where only simulators were used;
+- CUDA/GPU;
+- a long-running production soak of Hito Y.
+
+None of these gaps are treated as blockers: this milestone never claimed to
+validate them physically.
+
+Verification: `gofmt -l .` clean; `go vet ./...` clean; `go build ./...`
+clean; `go test ./...` all pass; `go test -race` on every touched package
+(agent, rtsp, heartbeat, health, identity, credentials, cameracreds,
+edgebacklog, cloudsink, control, ota, processing, platform, systemd) pass;
+focal tests stable at `-count=10`; full CI green on PR #80 (build,
+multiarch-artifacts, docker-go-stage-multiarch amd64/arm64 — QEMU, not
+physical ARM64 —, docker-amd64-smoke).
+
+Edge PROD: **N/A** — no real production Edge appliance/VM target exists.
+SaaS PROD: **NOT TOUCHED** — Hito Y contains no SaaS deployment change.
+
 ## HOW ANOTHER AI SHOULD CONTINUE
 
 1. Read `AGENTS.md`.

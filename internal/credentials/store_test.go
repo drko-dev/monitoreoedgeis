@@ -166,3 +166,44 @@ func TestSaveFailureLeavesOldCredentialIntact(t *testing.T) {
 		t.Error("credentials.json changed despite failed Save()")
 	}
 }
+
+// TestLoad_SurvivesLeftoverTmpFromAbruptKill (Y2): mirrors
+// internal/identity's test of the same name. A process killed between
+// os.CreateTemp and the final os.Rename in save() leaves a randomly-named
+// ".credentials-*.json.tmp" file behind -- the deterministic proxy this
+// task asks for in place of a real power cut. Load must never pick it up.
+func TestLoad_SurvivesLeftoverTmpFromAbruptKill(t *testing.T) {
+	dir := t.TempDir()
+	want := Credentials{EdgeID: "edge-1", DeviceID: "device-1", Credential: "edg_live_secret", CredentialVersion: 1, EnrolledAt: time.Now().UTC().Truncate(time.Second)}
+	if err := Save(dir, want); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	before, err := os.ReadFile(credentialsPath(dir))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	leftover, err := os.CreateTemp(dir, ".credentials-*.json.tmp")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	if _, err := leftover.WriteString(`{"edge_id":"garbage`); err != nil {
+		t.Fatal(err)
+	}
+	leftover.Close()
+
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load() after leftover tmp file: %v", err)
+	}
+	if got.Credential != want.Credential || got.EdgeID != want.EdgeID {
+		t.Errorf("got = %+v, want %+v", got, want)
+	}
+	after, err := os.ReadFile(credentialsPath(dir))
+	if err != nil {
+		t.Fatalf("read after leftover tmp file: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("credentials.json content changed:\nbefore: %s\nafter:  %s", before, after)
+	}
+}

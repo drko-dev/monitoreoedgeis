@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 )
 
 const schemaVersion = 1
@@ -105,17 +107,35 @@ func writeAtomic(dataDir string, rec fileRecord) error {
 
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
-		return fmt.Errorf("identity: write temp file: %w", err)
+		return platform.WrapDiskError(fmt.Errorf("identity: write temp file: %w", err))
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("identity: sync temp file: %w", err)
 	}
 	if err := tmp.Chmod(0o600); err != nil {
 		tmp.Close()
 		return fmt.Errorf("identity: chmod temp file: %w", err)
 	}
+	// Flush the file's data and metadata BEFORE the rename publishes it.
+	// Without this, temp-file-then-rename is atomic with respect to ordering
+	// but not with respect to durability: on a filesystem with delayed
+	// allocation a power loss after the rename can leave the new name
+	// pointing at a zero-length or partially-written file. For this call site
+	// that is fatal rather than merely annoying -- a truncated identity.json,
+	// credentials.json or camera_master.key is treated as corruption and never
+	// regenerated, so the agent would stay DEGRADED until an operator
+	// intervened. These are cold paths (enrollment, rotation, a credential
+	// sync), so the fsync costs nothing in steady state.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return platform.WrapDiskError(fmt.Errorf("identity: sync temp file: %w", err))
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("identity: close temp file: %w", err)
 	}
 	if err := os.Rename(tmpPath, identityPath(dataDir)); err != nil {
-		return fmt.Errorf("identity: rename into place: %w", err)
+		return platform.WrapDiskError(fmt.Errorf("identity: rename into place: %w", err))
 	}
 	return nil
 }

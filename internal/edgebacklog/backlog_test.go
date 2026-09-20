@@ -254,3 +254,83 @@ func TestBacklogDedupe_DifferentCorrelationIDConflict(t *testing.T) {
 		t.Fatalf("expected ErrSubmissionConflict on divergent CorrelationID, got %v", err)
 	}
 }
+
+// TestBacklogRecover_QuarantinesCorruptPendingFile (Y8/Y2): a pending record
+// file that is truncated or otherwise unparsable -- the deterministic proxy
+// for a power loss mid-write -- must not be silently dropped or left
+// invisibly stuck in pending/ forever. Open() must move it into the
+// existing quarantine/ directory and count it, exactly as a bad record
+// found at send time already is (see saas_outage_test.go).
+func TestBacklogRecover_QuarantinesCorruptPendingFile(t *testing.T) {
+	d := t.TempDir()
+
+	// A healthy record recovers normally alongside the corrupt one.
+	b := open(t, d)
+	if err := b.Enqueue(submission(t, d, "good-one")); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	// Simulate an abrupt kill mid-write: a pending/*.json file that is
+	// present but truncated (not valid JSON), sharing the same naming
+	// convention Open()'s recovery scan expects.
+	corruptPath := filepath.Join(d, "pending", "00000000000000000099.json")
+	if err := os.WriteFile(corruptPath, []byte(`{"sequence":99,"submissio`), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	b2, err := Open(Config{Dir: d, MaxOperations: 2, MaxBytes: 1024, RetryBase: time.Millisecond, RetryMax: time.Millisecond})
+	if err != nil {
+		t.Fatalf("Open after corrupt pending file: %v", err)
+	}
+
+	status := b2.Status()
+	if status.BacklogCount != 1 {
+		t.Errorf("BacklogCount after recovery = %d, want 1 (only the healthy record)", status.BacklogCount)
+	}
+	if status.Quarantined != 1 {
+		t.Errorf("Quarantined after recovery = %d, want 1 (the corrupt record)", status.Quarantined)
+	}
+
+	if _, err := os.Stat(corruptPath); !os.IsNotExist(err) {
+		t.Errorf("corrupt file still present at %s, want it moved out of pending/", corruptPath)
+	}
+	quarantinedPath := filepath.Join(d, "quarantine", "00000000000000000099.json")
+	if _, err := os.Stat(quarantinedPath); err != nil {
+		t.Errorf("expected corrupt file preserved at %s for diagnosis: %v", quarantinedPath, err)
+	}
+}
+
+// TestBacklogWriteLocked_SurvivesLeftoverTmpFile (Y2): a stale .tmp file
+// left behind by a process killed between CreateTemp and the final Rename
+// (the deterministic proxy for power loss during a write) must never be
+// mistaken for a real pending record, and a subsequent write must still
+// succeed cleanly.
+func TestBacklogWriteLocked_SurvivesLeftoverTmpFile(t *testing.T) {
+	d := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(d, "pending"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(d, "quarantine"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	// Leftover partial write from a previous, abruptly killed process.
+	leftoverTmp := filepath.Join(d, "pending", "00000000000000000001.json.tmp")
+	if err := os.WriteFile(leftoverTmp, []byte("partial-gar"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	b := open(t, d)
+	if err := b.Enqueue(submission(t, d, "after-crash")); err != nil {
+		t.Fatalf("enqueue after leftover tmp file: %v", err)
+	}
+	if got := b.Status().BacklogCount; got != 1 {
+		t.Fatalf("BacklogCount = %d, want 1", got)
+	}
+
+	// The stale .tmp is not a ".json" pending record and must be ignored by
+	// recovery, never surfacing as a phantom entry or a quarantine count.
+	if got := b.Status().Quarantined; got != 0 {
+		t.Errorf("Quarantined = %d, want 0 (a stray .tmp file is not a record)", got)
+	}
+}

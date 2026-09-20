@@ -664,10 +664,22 @@ work from PRs #69 (camera scale + CPU/RAM), #70 (decode + inference) and #72
 - Edge PROD: **N/A** — no real production Edge target exists.
 - SaaS PROD: **NOT TOUCHED** by Hito X.
 
-## Y — Resiliencia
+## Y — Resiliencia — INTEGRATED / CI VALIDATED (not merged)
 
 - Y1–Y10: restart, power loss, SaaS offline, Internet offline, camera offline,
-  disk full, queue overflow, config corruption, watchdog, health recovery.
+  disk full, queue overflow, config corruption, watchdog, health recovery —
+  all implemented and integrated in Draft PR #80
+  (`integration/hito-y-resilience`), full CI green.
+- Y1, Y3, Y4, Y5, Y6, Y7, Y8, Y10: **VALIDATED** within this milestone's own
+  simulated/deterministic scope (see `docs/PROJECT_STATUS.md` for the exact
+  boundary per scenario).
+- Y2 (power loss) and Y9 (watchdog): **PARTIALLY_VALIDATED** — deterministic
+  proxies used in place of a real power cut / a real systemd PID1 kill.
+- Physical power loss, physical ARM64 hardware, a real systemd watchdog
+  kill/restart, and real camera/network field conditions remain
+  **NOT VALIDATED** — this milestone never claimed to validate them
+  physically.
+- No merge to `main`, no deploy, no SaaS change.
 
 ## Z — Producción/evolución
 

@@ -179,10 +179,6 @@ func (s *Supervisor) run(ctx context.Context) {
 		default:
 		}
 
-		s.mu.Lock()
-		s.status.Status = StateConnecting
-		s.mu.Unlock()
-
 		s.logger.Info("connecting to camera stream", "addr", s.target.Addr, "path", s.target.RTSPPath)
 
 		session, err := Dial(ctx, s.target.Addr, s.target.RTSPPath, s.target.Username, s.target.Password, s.cfg.DialTimeout)
@@ -190,7 +186,11 @@ func (s *Supervisor) run(ctx context.Context) {
 			if errors.Is(err, ErrTimeout) || isTimeout(err) || errors.Is(err, context.DeadlineExceeded) {
 				s.incrementTimeout()
 			}
-			s.recordError(err, StateDegraded)
+			state := StateDegraded
+			if errors.Is(err, ErrAuthFailed) {
+				state = StateAuthFailed
+			}
+			s.recordError(err, state)
 			s.logger.Warn("stream dial failed, backing off", "error", s.safeError(err), "backoff", backoff)
 
 			if !s.sleepBackoff(ctx, backoff) {

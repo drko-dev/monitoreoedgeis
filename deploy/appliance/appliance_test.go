@@ -743,6 +743,14 @@ func TestSystemdUnitTemplateStructure(t *testing.T) {
 		"Restart=on-failure",
 		"KillSignal=SIGTERM",
 		"WantedBy=multi-user.target",
+		// Hito Y / Y9: the agent implements sd_notify, so systemd can tell
+		// "still starting" from "started" and can detect a process that is
+		// running but no longer serving. Restart=on-failure alone only covers
+		// a process that exits.
+		"Type=notify",
+		"NotifyAccess=main",
+		"WatchdogSec=60",
+		"TimeoutStartSec=30",
 		// Hito S / S10: least-privilege hardening confirmed safe -- no
 		// Linux capability is needed by this agent/ffmpeg. PrivateDevices
 		// is deliberately NOT required here: Full Edge's CUDA vision
@@ -760,6 +768,10 @@ func TestSystemdUnitTemplateStructure(t *testing.T) {
 
 	forbidden := []string{
 		"sleep ", "GEOCAM_ENROLLMENT_TOKEN=", "Type=forking",
+		// Type=simple cannot express readiness or liveness: systemd would
+		// consider the unit started the moment exec returned, so a wedged
+		// agent would look healthy forever. Y9 requires Type=notify.
+		"Type=simple",
 		// Hito S / S10 correction: PrivateDevices=true would mask the host
 		// accelerator device nodes (/dev/nvidia*) Full Edge's CUDA vision
 		// worker profile (GEOCAM_EDGE_YOLO_DEVICE=cuda, Hito K/K5) needs.
@@ -767,9 +779,23 @@ func TestSystemdUnitTemplateStructure(t *testing.T) {
 		// assume CPU-only.
 		"PrivateDevices=true",
 	}
+	// Forbidden checks apply to real directives, not to prose: the comments in
+	// this template deliberately name the directives that were evaluated and
+	// rejected (Type=simple, PrivateDevices=true) so the reasoning survives.
+	// Matching a comment would forbid documenting a rejected option.
+	var directiveLines strings.Builder
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		directiveLines.WriteString(trimmed)
+		directiveLines.WriteString("\n")
+	}
+	directives := directiveLines.String()
 	for _, bad := range forbidden {
-		if strings.Contains(content, bad) {
-			t.Errorf("unit template contains disallowed content: %q", bad)
+		if strings.Contains(directives, bad) {
+			t.Errorf("unit template contains disallowed directive: %q", bad)
 		}
 	}
 
@@ -794,6 +820,16 @@ func TestPrivilegedOTAUnitTemplateStructure(t *testing.T) {
 	}
 	serviceText := string(service)
 	pathText := string(pathUnit)
+
+	// The privileged updater is a oneshot: it has nothing to notify about and
+	// no long-running loop to watch, so a watchdog there would be meaningless
+	// and is deliberately absent. The agent unit is the only one that declares
+	// one (see TestSystemdUnitTemplateStructure).
+	for _, bad := range []string{"WatchdogSec=", "Type=notify"} {
+		if strings.Contains(serviceText, bad) {
+			t.Errorf("privileged OTA updater unit must not declare %q", bad)
+		}
+	}
 	for _, want := range []string{
 		"User=root",
 		"Group=root",

@@ -19,8 +19,16 @@ type Config struct {
 	LogLevel          string
 	SaaSURL           string
 	HeartbeatInterval time.Duration
-	DataDir           string
-	HealthAddr        string
+	// HeartbeatAuthFailureInterval is the slow poll used after the SaaS
+	// rejects the Edge credential with a 401/403, and therefore also the
+	// worst-case delay before the Edge notices the credential works again and
+	// clears its DEGRADED state. Zero means "use the heartbeat module's own
+	// default" (heartbeat.AuthFailureInterval, five minutes) rather than
+	// duplicating that number here; tests set it explicitly to exercise
+	// recovery without waiting for the production cadence.
+	HeartbeatAuthFailureInterval time.Duration
+	DataDir                      string
+	HealthAddr                   string
 	// AllowInsecureHTTP permits SaaSURL to use http:// instead of https://.
 	// It never weakens TLS verification for an https:// URL — see
 	// internal/transport. Development only; defaults to false.
@@ -156,7 +164,17 @@ const (
 	// server-side offline threshold is a multiple of the nominal interval.
 	MinHeartbeatInterval = 5 * time.Second
 	MaxHeartbeatInterval = 5 * time.Minute
-	DefaultDataDir       = "/var/lib/geocam-edge"
+	// MinHeartbeatAuthFailureInterval is deliberately very small: the lower
+	// bound only has to stop a nonsensical value (0 is "use the module
+	// default"), and an appliance operator may legitimately want the Edge to
+	// re-check a re-enabled credential more often than the five-minute
+	// default. The upper bound matches the default's order of magnitude -- a
+	// revocation is an administrative state, so polling it faster than the
+	// heartbeat itself would be pointless, and slower than a few minutes
+	// would leave the Edge DEGRADED long after the cause was gone.
+	MinHeartbeatAuthFailureInterval = 100 * time.Millisecond
+	MaxHeartbeatAuthFailureInterval = 30 * time.Minute
+	DefaultDataDir                  = "/var/lib/geocam-edge"
 	// DefaultHealthAddr binds the local health HTTP surface to localhost
 	// only: it is not meant to be exposed to the LAN.
 	DefaultHealthAddr = "127.0.0.1:8091"
@@ -384,6 +402,18 @@ func Load() (*Config, error) {
 				raw, MinHeartbeatInterval, MaxHeartbeatInterval)
 		}
 		cfg.HeartbeatInterval = d
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_HEARTBEAT_AUTH_FAILURE_INTERVAL")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid heartbeat auth-failure interval %q: %w", raw, err)
+		}
+		if d < MinHeartbeatAuthFailureInterval || d > MaxHeartbeatAuthFailureInterval {
+			return nil, fmt.Errorf("invalid heartbeat auth-failure interval %q: must be between %s and %s",
+				raw, MinHeartbeatAuthFailureInterval, MaxHeartbeatAuthFailureInterval)
+		}
+		cfg.HeartbeatAuthFailureInterval = d
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_DATA_DIR")); raw != "" {
