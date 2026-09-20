@@ -12,9 +12,12 @@ This document separates three states that must not be conflated:
 
 Hardware certification, real-camera validation, CUDA validation and the physical pilot are separate validation axes. Their absence constrains commercial/field claims, but does not silently reopen a software blocker that has been implemented and tested locally.
 
-## Current Hito Z integration state
+## Current Hito Z state
 
-On `integration/hito-z-final`, the accepted Hito Z software blockers are:
+PR #100 completed the final integration gate **7/7 PASS** and merged unchanged
+into `main @ 73b9f07fbab3a9a57f8bb652fdec9632a6cb38cc`.
+
+The accepted Hito Z software blockers are:
 
 | Blocker | Status | Evidence |
 | --- | --- | --- |
@@ -51,14 +54,14 @@ Hito Z additionally carries focal race/stress evidence for the concurrency-sensi
 
 ## Software 1.0 decision
 
-All identified functional blockers B1-B8 and B10 are closed on the integration branch. The remaining software action is the **final integration PR gate and merge into `main`**.
+All identified functional blockers B1-B8 and B10 are closed, the final integration
+gate passed 7/7, and PR #100 merged unchanged into `main`.
 
-Therefore:
+**SOFTWARE 1.0 = READY.**
 
-- before the final integration PR passes: **SOFTWARE 1.0 CANDIDATE**;
-- after that PR passes and is merged unchanged into `main`: **SOFTWARE 1.0 READY**.
-
-This does not imply that real cameras, a physical appliance, CUDA, a production WAN, the physical pilot, or hardware certification have been validated.
+This does not imply RELEASE 1.0 or DEPLOYED PROD, and it does not imply that
+real cameras, a physical appliance, CUDA, a production WAN, the physical pilot,
+or hardware certification have been validated.
 
 ## Release 1.0
 
