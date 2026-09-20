@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
 
@@ -377,9 +378,46 @@ func (d *FileDownloader) FetchAndStage(ctx context.Context, release *transport.O
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return fmt.Errorf("ota: create pending dir: %w", err)
 	}
-	_ = os.RemoveAll(dest) // stale partial dir from a crashed prior attempt, if any -- dest is always validateReleaseID-derived, never raw input
+
+	// Replace any prior directory at dest without ever leaving a half-deleted
+	// one behind. The previous code did `_ = os.RemoveAll(dest)` and then
+	// renamed over it, so on a filesystem where the removal failed partway
+	// (ENOSPC, EIO, a busy mount) the previously-verified staged release for
+	// this release_id was already destroyed and the new one never landed.
+	// Displacing it with a rename first, and putting it back if the staging
+	// rename fails, makes the whole operation either fully applied or a
+	// no-op — never a lost release.
+	//
+	// The backup name is reclaimed unconditionally, before deciding whether
+	// there is anything to displace: a crash between the rename below and its
+	// cleanup leaves a ".previous" with no matching dest, and the footprint
+	// stays bounded to at most one directory per release id only if the next
+	// attempt removes it even when dest does not currently exist.
+	backup := dest + ".previous"
+	_ = os.RemoveAll(backup)
+	if _, statErr := os.Lstat(dest); statErr == nil {
+		if err := os.Rename(dest, backup); err != nil {
+			return fmt.Errorf("ota: displace previous staged release: %w", err)
+		}
+	} else {
+		backup = ""
+	}
 	if err := os.Rename(scratch, dest); err != nil {
+		if backup != "" {
+			// Put the previous release back so the failure is a no-op rather
+			// than a lost staged release. If even that fails the old release
+			// is reported by path instead of being silently dropped.
+			if restoreErr := os.Rename(backup, dest); restoreErr != nil {
+				return fmt.Errorf("ota: stage release dir: %w (previous release preserved at %s)", err, backup)
+			}
+		}
 		return fmt.Errorf("ota: stage release dir: %w", err)
+	}
+	if backup != "" {
+		// The new release is in place; the displaced one is now garbage. A
+		// failed cleanup only leaves one bounded directory that the next
+		// attempt removes, so it is not worth failing a successful stage.
+		_ = os.RemoveAll(backup)
 	}
 
 	return d.writeApplyRequest(release.ReleaseID)
@@ -425,11 +463,16 @@ func (d *FileDownloader) download(ctx context.Context, rawURL, dest string) erro
 	}
 	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
-		return fmt.Errorf("ota: create %s: %w", dest, err)
+		return platform.WrapDiskError(fmt.Errorf("ota: create %s: %w", dest, err))
 	}
 	defer f.Close()
 	if _, err := io.Copy(f, resp.Body); err != nil {
-		return fmt.Errorf("ota: write %s: %w", dest, err)
+		// A download that runs the filesystem out of space is a classified
+		// condition, not a generic write failure: the operator fix (free
+		// space) is different from a network retry. The staging directory
+		// is already removed by the caller's defer, so the partial artifact
+		// never reaches the pending dir.
+		return platform.WrapDiskError(fmt.Errorf("ota: write %s: %w", dest, err))
 	}
 	return nil
 }

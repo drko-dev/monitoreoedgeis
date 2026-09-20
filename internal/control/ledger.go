@@ -208,6 +208,16 @@ func (l *Ledger) saveLocked() error {
 	return nil
 }
 
+// MaxEntries returns how many commands the ledger retains. Module uses it to
+// size its own in-memory idempotency map so that map can never be smaller than
+// the durable record set — forgetting a command the ledger still remembers
+// would let a re-delivered command execute twice.
+func (l *Ledger) MaxEntries() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.maxEntries
+}
+
 // Count returns the number of recorded commands in memory.
 func (l *Ledger) Count() int {
 	l.mu.Lock()

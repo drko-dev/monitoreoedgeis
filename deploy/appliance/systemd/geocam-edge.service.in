@@ -8,7 +8,12 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# Type=notify (Hito Y/Y9): the agent implements sd_notify and sends READY=1
+# once its modules have started, then WATCHDOG=1 while it is still able to
+# answer its own /healthz. Type=simple could not express either, so systemd had
+# no way to tell "still starting" from "started" and no way to detect a process
+# that is running but no longer serving.
+Type=notify
 WorkingDirectory=@GEOCAM_DATA_DIR_PLACEHOLDER@
 ExecStart=@GEOCAM_EXEC_PATH@ run
 @GEOCAM_FFMPEG_ENV_LINE@
@@ -16,11 +21,43 @@ EnvironmentFile=@GEOCAM_ENV_FILE@
 User=@GEOCAM_SERVICE_USER@
 Group=@GEOCAM_SERVICE_GROUP@
 
+# Only the main process may send notifications. NOTIFY_SOCKET is not exported
+# into the ffmpeg or vision-worker children, so they cannot complete startup or
+# feed the watchdog on the agent's behalf.
+NotifyAccess=main
+
+# Startup is local work only: read identity/credentials from disk, recover the
+# persisted backlog and cloud spool, bind the loopback health port. READY=1 is
+# sent as soon as that health surface answers, so 30s is already generous, and a
+# startup that never gets there should surface in half a minute rather than
+# after the 90s default.
+TimeoutStartSec=30
+
+# Restart=on-failure covers a process that EXITS. It does not cover a process
+# that is still running but wedged -- a deadlock, a stuck accept loop, a runtime
+# gone bad -- which is exactly what the agent's own restart loops cannot see
+# either, because the goroutine that would notice is part of the wedge.
+#
+# WatchdogSec=60 is the ceiling: the agent pings at a third of it (20s), so two
+# consecutive missed checks are still tolerated before systemd intervenes. That
+# margin is deliberate on an appliance that also runs ffmpeg decoders and a
+# YOLO worker; a momentary stall under load must not kill a working Edge.
+# 60s is also the longest a wedged agent can keep looking healthy, which is well
+# inside the interval at which an operator would notice it is not reporting.
+#
+# A killed watchdog is a failure as far as systemd is concerned, so the
+# StartLimit pair below bounds the recovery: at most five restarts per five
+# minutes, after which the unit is left failed for an operator to inspect rather
+# than restarting forever.
+WatchdogSec=60
+
 # The agent's own signal.NotifyContext(SIGINT, SIGTERM) in cmd/geocam-edge
 # does an in-process graceful shutdown (see main.go) — systemd only needs to
 # send the default TERM and give it time to unwind (module stop order,
-# in-flight HTTP requests, buffer flush). No SIGKILL escalation needed for
-# the common case, hence the generous TimeoutStopSec.
+# in-flight HTTP requests, buffer flush). The agent sends STOPPING=1 as soon as
+# shutdown begins, which also cancels the watchdog timer, so this window is
+# never raced by a watchdog kill. No SIGKILL escalation needed for the common
+# case, hence the generous TimeoutStopSec.
 KillSignal=SIGTERM
 TimeoutStopSec=30
 

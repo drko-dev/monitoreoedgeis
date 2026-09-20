@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 )
 
 // ErrBufferFull is returned by Buffer.Enqueue when adding a frame would
@@ -56,8 +58,12 @@ type BufferStats struct {
 	ReplayedFrames int64
 	DroppedFull    int64
 	CorruptEntries int64
-	Capacity       int
-	OldestPending  *time.Time
+	DroppedAge     int64
+	// DroppedOverCapacity counts entries evicted with their files while
+	// recovering a spool that was larger than the configured bound.
+	DroppedOverCapacity int64
+	Capacity            int
+	OldestPending       *time.Time
 }
 
 const (
@@ -90,14 +96,23 @@ type Buffer struct {
 	maxAge    time.Duration
 	now       func() time.Time
 
+	// writeFn is the filesystem seam, defaulting to writeAtomic. It exists so
+	// a test can inject a deterministic ENOSPC without root, without a fake
+	// filesystem and without filling a real disk — the same per-instance
+	// injection edgebacklog.Backlog uses for its own writes. Nothing outside
+	// this package can set it.
+	writeFn func(finalPath string, f BufferedFrame) error
+
 	mu      sync.Mutex
 	queue   []queuedEntry
 	bytes   int64
 	counter uint64
 
-	replayed       int64
-	droppedFull    atomic.Int64
-	corruptEntries atomic.Int64
+	replayed            int64
+	droppedFull         atomic.Int64
+	corruptEntries      atomic.Int64
+	droppedAge          atomic.Int64
+	droppedOverCapacity atomic.Int64
 }
 
 // OpenBuffer creates dir if needed and recovers any spool left by a
@@ -108,7 +123,7 @@ func OpenBuffer(dir string, maxBytes int64, maxFrames int, maxAge time.Duration)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("cloudsink: buffer dir: %w", err)
 	}
-	b := &Buffer{dir: dir, maxBytes: maxBytes, maxFrames: maxFrames, maxAge: maxAge, now: time.Now}
+	b := &Buffer{dir: dir, maxBytes: maxBytes, maxFrames: maxFrames, maxAge: maxAge, now: time.Now, writeFn: writeAtomic}
 	if err := b.recover(); err != nil {
 		return nil, err
 	}
@@ -164,7 +179,41 @@ func (b *Buffer) recover() error {
 		}
 	}
 	b.counter = maxCounter
-	return nil
+	return b.enforceRecoveredBoundLocked()
+}
+
+// enforceRecoveredBoundLocked trims a recovered spool that is larger than the
+// configured bound down to it, oldest-first.
+//
+// Enqueue's check only guards new writes, so a spool can already be over the
+// bound the moment it is loaded: maxFrames/maxBytes may have been lowered
+// between releases, or the process may have died right after a write the bound
+// would have refused on the next call. Replaying it at that footprint would
+// mean the configured bound was not really a bound.
+//
+// Drop-oldest is the right policy for this queue specifically, and it is the
+// policy the maxAge eviction in Peek already applies: these are best-effort
+// live JPEG frames whose upload already failed once, so the newest entries are
+// the ones most likely to still be worth sending. Every eviction is counted
+// (DroppedOverCapacity) — never silent. The evidence that actually matters
+// lives in the event/evidence stores, not here.
+func (b *Buffer) enforceRecoveredBoundLocked() error {
+	var firstErr error
+	for len(b.queue) > 0 && (len(b.queue) > b.maxFrames || b.bytes > b.maxBytes) {
+		e := b.queue[0]
+		if err := os.Remove(e.path); err != nil && !os.IsNotExist(err) {
+			// Keep the entry rather than forgetting a file that is still
+			// there, and stop instead of spinning on the same path.
+			if firstErr == nil {
+				firstErr = fmt.Errorf("cloudsink: buffer recover trim %s: %w", e.path, err)
+			}
+			break
+		}
+		b.queue = b.queue[1:]
+		b.bytes -= e.size
+		b.droppedOverCapacity.Add(1)
+	}
+	return firstErr
 }
 
 func counterFromName(name string) (uint64, bool) {
@@ -193,8 +242,13 @@ func (b *Buffer) Enqueue(f BufferedFrame) error {
 	b.counter++
 	name := fmt.Sprintf("%020d%s", b.counter, frameFileSuffix)
 	path := filepath.Join(b.dir, name)
-	if err := writeAtomic(path, f); err != nil {
-		return fmt.Errorf("cloudsink: buffer enqueue: %w", err)
+	if err := b.writeFn(path, f); err != nil {
+		// Classify an out-of-space failure so the caller can tell "the data
+		// partition is full" (free space) apart from a transient I/O error
+		// (retry). The frame is refused either way — the buffer never
+		// silently accepts a partial entry — but only one of the two is an
+		// operator problem.
+		return platform.WrapDiskError(fmt.Errorf("cloudsink: buffer enqueue: %w", err))
 	}
 
 	b.queue = append(b.queue, queuedEntry{
@@ -232,6 +286,12 @@ func (b *Buffer) Peek() (BufferedFrame, bool, error) {
 	for len(b.queue) > 0 {
 		e := b.queue[0]
 		if b.maxAge > 0 && b.now().Sub(e.timestamp) > b.maxAge {
+			// Stale frames are deliberately evicted, but the eviction has to
+			// be visible: this branch used to remove the entry with no
+			// counter at all, while the corrupt-entry branch right below it
+			// did count. A spool losing frames to age is exactly the signal
+			// an operator needs to size GEOCAM_CLOUD_BUFFER_MAX_AGE.
+			b.droppedAge.Add(1)
 			b.removeFrontLocked()
 			continue
 		}
@@ -284,12 +344,14 @@ func (b *Buffer) Stats() BufferStats {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	st := BufferStats{
-		BufferedFrames: len(b.queue),
-		BufferedBytes:  b.bytes,
-		ReplayedFrames: b.replayed,
-		DroppedFull:    b.droppedFull.Load(),
-		CorruptEntries: b.corruptEntries.Load(),
-		Capacity:       b.maxFrames,
+		BufferedFrames:      len(b.queue),
+		BufferedBytes:       b.bytes,
+		ReplayedFrames:      b.replayed,
+		DroppedFull:         b.droppedFull.Load(),
+		CorruptEntries:      b.corruptEntries.Load(),
+		DroppedAge:          b.droppedAge.Load(),
+		DroppedOverCapacity: b.droppedOverCapacity.Load(),
+		Capacity:            b.maxFrames,
 	}
 	if len(b.queue) > 0 {
 		t := b.queue[0].timestamp

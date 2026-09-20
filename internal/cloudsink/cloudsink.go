@@ -326,14 +326,16 @@ func (s *CloudSink) CloudBufferStats() processing.CloudBufferStats {
 	}
 	st := s.buffer.Stats()
 	return processing.CloudBufferStats{
-		BufferedFrames:  st.BufferedFrames,
-		BufferedBytes:   st.BufferedBytes,
-		ReplayedFrames:  st.ReplayedFrames,
-		DroppedFull:     st.DroppedFull,
-		CorruptEntries:  st.CorruptEntries,
-		DroppedOversize: int64(s.droppedOversize.Load()),
-		Capacity:        st.Capacity,
-		OldestPending:   st.OldestPending,
+		BufferedFrames:      st.BufferedFrames,
+		BufferedBytes:       st.BufferedBytes,
+		ReplayedFrames:      st.ReplayedFrames,
+		DroppedFull:         st.DroppedFull,
+		CorruptEntries:      st.CorruptEntries,
+		DroppedOversize:     int64(s.droppedOversize.Load()),
+		DroppedAge:          st.DroppedAge,
+		DroppedOverCapacity: st.DroppedOverCapacity,
+		Capacity:            st.Capacity,
+		OldestPending:       st.OldestPending,
 	}
 }
 

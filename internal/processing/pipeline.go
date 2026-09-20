@@ -77,6 +77,9 @@ type cameraPipeline struct {
 	decoderRestarts    atomic.Int64
 	depackIncomplete   atomic.Int64
 	depackErrors       atomic.Int64
+	depackUnsupported  atomic.Int64
+	depackOversized    atomic.Int64
+	ringDropped        atomic.Int64
 
 	// Milestone J hybrid-filter counters. Separate from framesDropped
 	// (errors/full queues): a frame the hybrid evaluator filters out is a
@@ -366,6 +369,11 @@ func (p *cameraPipeline) depacketizeLoop(ctx context.Context) {
 			// different goroutine) keeps it race-free without atomics.
 			p.depackIncomplete.Store(p.depack.IncompleteAUsDropped)
 			p.depackErrors.Store(p.depack.ReassemblyErrors)
+			// UnsupportedNALTypes and OversizedAUsDropped were counted by the
+			// depacketizer but never republished, so wire data the Edge could
+			// not use was dropped with no operator-visible signal at all.
+			p.depackUnsupported.Store(p.depack.UnsupportedNALTypes)
+			p.depackOversized.Store(p.depack.OversizedAUsDropped)
 			if au == nil {
 				continue
 			}
@@ -496,6 +504,12 @@ func (p *cameraPipeline) readLoop(ctx context.Context, dec VideoDecoder) {
 			// candidate filter only governs router.Dispatch below, so it
 			// is always pushed regardless of hybrid mode.
 			p.ring.Push(f)
+			// The ring buffer overwrites its oldest frame when full and has
+			// always counted that, but nothing ever read the counter, so
+			// history loss for clip/debug snapshots was invisible in /status
+			// and in logs. Publishing it here (same goroutine that pushes, so
+			// no cross-goroutine read) makes it observable.
+			p.ringDropped.Store(p.ring.Dropped())
 
 			p.mu.Lock()
 			router := p.router
@@ -615,6 +629,7 @@ func (p *cameraPipeline) Status() PipelineStatus {
 	p.statusMu.Unlock()
 
 	bufUsage, _ := p.ring.Usage()
+	p.ringDropped.Store(p.ring.Dropped())
 
 	var hybridStatus *HybridStatus
 	if p.motion != nil {
@@ -647,11 +662,16 @@ func (p *cameraPipeline) Status() PipelineStatus {
 		FramesDecoded:      decoded,
 		FramesSampled:      sampled,
 		FramesDropped: p.framesDropped.Load() + decoderDropped +
-			p.depackIncomplete.Load() + p.depackErrors.Load(),
-		QueueDepth:      len(p.packetCh) + len(p.auCh),
-		BufferUsage:     bufUsage,
-		DecodeLatencyMs: latencyMs,
-		LastFrameAt:     lastFrameAt,
-		Hybrid:          hybridStatus,
+			p.depackIncomplete.Load() + p.depackErrors.Load() +
+			p.depackUnsupported.Load() + p.depackOversized.Load() +
+			p.ringDropped.Load(),
+		QueueDepth:          len(p.packetCh) + len(p.auCh),
+		BufferUsage:         bufUsage,
+		RingBufferDropped:   p.ringDropped.Load(),
+		UnsupportedNALTypes: p.depackUnsupported.Load(),
+		OversizedAUsDropped: p.depackOversized.Load(),
+		DecodeLatencyMs:     latencyMs,
+		LastFrameAt:         lastFrameAt,
+		Hybrid:              hybridStatus,
 	}
 }

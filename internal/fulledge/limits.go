@@ -10,10 +10,20 @@ import (
 
 // LimitsConfig configures resource bounds for Full Edge operations.
 type LimitsConfig struct {
-	MaxConcurrentInference int     // Bounds concurrent inference workers (semaphore)
-	QueueDepth             int     // Bounds in-flight inference queue depth
-	MinFreeDiskBytes       uint64  // Minimum free disk bytes required to persist evidence
-	MaxMemoryPercent       float64 // If > 0, marks memory pressure when host memory exceeds this %
+	MaxConcurrentInference int // Bounds concurrent inference workers (semaphore)
+	// QueueDepth is the configured value of
+	// GEOCAM_EDGE_INFERENCE_QUEUE_DEPTH. It is deliberately reported as
+	// QueueDepth in LimitsStatus for config visibility, but it is NOT an
+	// enforced bound and must never be presented as one: the only admission
+	// gate on the inference path is the MaxConcurrentInference semaphore
+	// (TryAcquireInference), and the only real frame-level queue for the
+	// vision sink is processing.Router's per-sink channel, sized by
+	// GEOCAM_VIDEO_QUEUE_DEPTH. A future change should either wire this knob
+	// to a real queue or remove it; until then /status reports the semaphore's
+	// real capacity against InFlightInference (see internal/health).
+	QueueDepth       int     // Reported for config visibility only — not enforced
+	MinFreeDiskBytes uint64  // Minimum free disk bytes required to persist evidence
+	MaxMemoryPercent float64 // If > 0, marks memory pressure when host memory exceeds this %
 }
 
 // LimitsStatus exposes runtime resource limits and saturation metrics.
