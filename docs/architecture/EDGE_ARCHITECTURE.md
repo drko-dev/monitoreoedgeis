@@ -41,11 +41,14 @@ inventory TTL, multichannel handling) and the walkthrough in
 
 ## 3. Camera credentials
 
-`internal/credentials/` (device-level) and `internal/cameracreds/` (SaaS-synced,
-per the G1 doc) resolve which username/password a discovered device should try.
-Credentials are never logged or printed by any CLI command. See
-`docs/security/least-privilege.md` and `docs/security/threat-model.md` for the
-security posture, and the G1 doc for the exact precedence rules.
+**`internal/credentials/`** is the Edge↔SaaS *enrollment* credential (a
+rotatable secret from gateway enrollment, stored in `credentials.json`) — it
+is not related to cameras. **`internal/cameracreds/`** is the actual camera
+credential store, SaaS-synced and resolved by candidate key
+(`internal/agent/camera_target_reconciler.go`). Credentials are never logged
+or printed by any CLI command. See `docs/security/threat-model.md` for the
+security posture, and `docs/product/G1_CAMERA_TARGET_WIRING.md` for the exact
+resolution flow.
 
 ## 4. CameraTarget
 
@@ -59,13 +62,15 @@ alone. Full field-by-field wiring: `docs/product/G1_CAMERA_TARGET_WIRING.md`.
 
 ## 5. RTSP Manager / Supervisor
 
-One supervisor goroutine per camera (`internal/rtsp/supervisor.go`), states
-`connecting` → `online` / `degraded` / `auth_failed`, plus `offline` when the
-supervisor itself is stopped (`internal/rtsp/types.go`). Reconnect uses
-exponential backoff (`InitialBackoff` 1s → `MaxBackoff` 60s by default),
-`PacketTimeout` 5s marks a silent stream as `degraded`, `DialTimeout` 5s bounds
-the TCP connect. A `401`/digest failure moves the camera to `auth_failed` with
-no automatic retry (credentials must be corrected). Full detail and the exact
+One supervisor goroutine per camera (`internal/rtsp/supervisor.go`),
+`connecting` only once at startup, then `online` / `degraded` / `auth_failed`,
+plus `offline` when the supervisor itself is stopped (`internal/rtsp/types.go`).
+Every dial failure — refused, timeout, or `401`/digest (`auth_failed`) — retries
+automatically with exponential backoff (`InitialBackoff` 1s → `MaxBackoff` 60s)
+using the *same* `CameraTarget`; `auth_failed` is not a special "stop and wait"
+state, it just keeps failing the same way until `Manager.SetTargets()` replaces
+the target with corrected credentials. `PacketTimeout` 5s marks a silent
+stream as `degraded`, `DialTimeout` 5s bounds the TCP connect. Full detail and the exact
 error taxonomy: `docs/runbooks/CAMERA_FROM_SCRATCH_EDGE.md` §F/§G.
 
 ## 6. Decode (ffmpeg)

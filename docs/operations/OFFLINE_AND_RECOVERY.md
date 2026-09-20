@@ -29,10 +29,12 @@ trying. `offline` is reserved for a supervisor that Edge itself stopped
 
 ## Auth failures
 
-`auth_failed` does **not** self-heal — the supervisor stops retrying until a
-credential update arrives (via SaaS sync or manual reconfiguration). This is
-deliberate: retrying a known-bad credential indefinitely would be noise, not
-resilience.
+`auth_failed` **does** keep retrying automatically with exponential backoff,
+using the same credentials, just like any other dial failure
+(`internal/rtsp/supervisor.go`) — it does not stop and wait. A genuinely wrong
+credential will keep failing the same way on every retry until a SaaS
+credential sync produces a *new* `CameraTarget`, which replaces the running
+supervisor via `Manager.SetTargets()` rather than "unblocking" the old one.
 
 ## Durable backlog
 

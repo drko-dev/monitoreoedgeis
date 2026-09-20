@@ -15,14 +15,20 @@ Deep design reference for this flow: `docs/product/G1_CAMERA_TARGET_WIRING.md`.
 What the camera needs, before Edge can do anything with it:
 
 - **IP address reachable from the Edge host's LAN.** Discovery
-  (`internal/discovery/`) is WS-Discovery on the local network segment — it
-  does **not** cross routed subnets (`README.md`). A camera on a different
-  VLAN/subnet than the Edge host will not be found by discovery and must be
-  provisioned as a manual `CameraTarget` instead.
-- **ONVIF support**, if you want automatic discovery/credential-probing.
-  Cameras without ONVIF can still be used via manually configured RTSP
-  targets, but Edge does not document a manufacturer-specific manual flow
-  here — that would be inventing vendor behavior this repo doesn't own.
+  (`internal/discovery/`) is WS-Discovery on the local network segment. The
+  README states explicitly that "cross-subnet camera-target provisioning and
+  automatic discovery across subnets" are **not implemented**
+  (`README.md:377`), and there is no manual-provisioning code path either:
+  `CameraTarget`s are built exclusively from the discovery `Inventory`
+  (`internal/agent/camera_target_reconciler.go:reconcile`, which reads
+  `disc.Engine().Inventory().List()`). A camera outside the Edge host's LAN
+  segment is not reachable by this Edge today — full stop, no workaround.
+- **ONVIF support.** Production camera onboarding today depends entirely on
+  ONVIF discovery to populate the inventory that `CameraTarget`s are built
+  from. There is currently no CLI, env var, API or config surface to insert a
+  `CameraTarget` for an RTSP-only (non-ONVIF) camera — treat "RTSP without
+  ONVIF" as **not a supported onboarding path today**, not as something you
+  can work around manually.
 - **RTSP support**, since that's the only stream transport this repo speaks
   (`internal/rtsp/`).
 - **Username/password** for the camera (ONVIF + RTSP auth).
@@ -52,31 +58,42 @@ nc -zv <camera-ip> 554
 ffprobe -rtsp_transport tcp "rtsp://<user>:<pass>@<camera-ip>:554/<path>"
 ```
 
-What each failure actually means (mapped to Edge's own RTSP states,
-`internal/rtsp/types.go`):
+What each failure actually means, verified directly against
+`internal/rtsp/supervisor.go`'s `run()` loop: **every** `Dial(...)` error —
+refused, no route, timeout, or auth failure — is handled the same way:
+recorded via `recordError(err, state)`, then `sleepBackoff`, then the loop
+`continue`s and dials again with the *same* `CameraTarget` after an
+exponential backoff (`InitialBackoff` 1s → `MaxBackoff` 60s). `StateConnecting`
+is only ever set once, when the supervisor is first created
+(`internal/rtsp/supervisor.go:65`) — no error path ever sets it again, so a
+camera never "goes back to connecting" after a failed attempt; it goes to
+`degraded` or `auth_failed` and stays there, visibly, while backoff retries
+happen underneath:
 
-| Symptom | Edge state | Meaning |
+| Symptom | Edge state after the failed attempt | Meaning |
 |---|---|---|
-| `Connection refused` | never reaches `connecting` | Nothing listening on that TCP port — wrong port, camera off, firewall |
-| `Connection timed out` / no route | stays `connecting`, retries with backoff | Network path problem: wrong subnet, ACL, camera unreachable |
-| RTSP `401` / digest failure | `auth_failed` (`ErrAuthFailed`) | Wrong username/password. **No automatic retry** — must fix credentials |
+| `Connection refused` | `degraded`, retries with backoff | Nothing listening on that TCP port — wrong port, camera off, firewall |
+| `Connection timed out` / no route | `degraded`, retries with backoff (also increments `TimeoutCount`) | Network path problem: ACL, camera unreachable |
+| RTSP `401` / digest failure | `auth_failed` (`ErrAuthFailed`) | Wrong username/password. **The supervisor keeps retrying automatically with the same credentials** — it does not stop and wait. If the credential is genuinely wrong, every retry will fail the same way until a *new* `CameraTarget` (updated credentials) reaches this camera via `Manager.SetTargets` — that replaces the supervisor outright, it doesn't "unblock" the old one |
 | ONVIF "invalid credentials" | discovery/credential resolution fails for that device | Same root cause as RTSP 401, but at the ONVIF probe stage |
-| ONVIF unreachable | device does not appear in discovery inventory | Either not ONVIF-capable, on a different subnet, or ONVIF service disabled on the camera |
+| ONVIF unreachable | device does not appear in discovery inventory | Either not ONVIF-capable, outside the discovery LAN segment, or ONVIF service disabled on the camera |
 | Stream connects, no packets (silence) | `degraded` (`ErrTimeout`, `PacketTimeout` 5s default) | Camera accepted the connection but stopped sending — codec mismatch, camera-side stream failure |
 | Connection drops mid-stream | `degraded` (`ErrClosed`/EOF), retries with backoff | Camera closed the connection — reboot, resource limit on camera, network blip |
 | Supervisor not running for this camera at all | `offline` | This is Edge's own supervisor state, not "camera unreachable" — it means Edge stopped tracking this target (removed from `SetTargets`) |
-| Working normally | `connecting` → `online` | Steady state |
+| Working normally | `connecting` (once, at startup) → `online` | Steady state |
 
 Backoff parameters (`internal/rtsp/types.go`): `InitialBackoff` 1s,
 `MaxBackoff` 60s (exponential), `DialTimeout` 5s, `PacketTimeout` 5s. These are
 compiled defaults — check `internal/config/config.go` before assuming an env
-var overrides them; this document does not claim one exists unless the dossier
-grep found it.
+var overrides them; this document does not claim one exists unless it was
+found in the source.
 
 ## C. Discovery
 
-Real command: `geocam-edge discovery` (`cmd/geocam-edge/main.go`). It runs
-WS-Discovery on the LAN and reports found ONVIF devices.
+Real command: `geocam-edge discovery scan` (`cmd/geocam-edge/main.go` — the
+`discovery` subcommand dispatches to a `scan` action; there is no bare
+`geocam-edge discovery` with no verb). It runs WS-Discovery on the LAN and
+reports found ONVIF devices.
 
 - **What it discovers:** ONVIF devices announcing themselves on the local
   network segment.
@@ -94,19 +111,29 @@ WS-Discovery on the LAN and reports found ONVIF devices.
 
 ## D. Credentials
 
-Real flow (`docs/product/G1_CAMERA_TARGET_WIRING.md`, `internal/cameracreds/`):
+**Two separate credential concepts exist in this codebase — do not confuse
+them:**
+
+- **`internal/credentials/`** — the Edge↔SaaS *enrollment* credential: a
+  rotatable secret issued after a successful gateway enrollment, stored in
+  `credentials.json`. This has nothing to do with cameras; it is how the
+  Edge device itself authenticates to the SaaS.
+- **`internal/cameracreds/`** — *camera* credentials (username/password per
+  camera), synced from the SaaS and resolved by candidate key. This is the
+  one relevant to connecting a camera.
+
+Real flow (`docs/product/G1_CAMERA_TARGET_WIRING.md`,
+`internal/agent/camera_target_reconciler.go`):
 
 ```
 SaaS camera-credentials API
-    -> Edge sync (internal/cameracreds, synced from the SaaS)
-    -> discovery/ONVIF authentication probe
+    -> Edge sync (internal/cameracreds)
+    -> cameraTargetReconciler.resolve(candidateKey) against discovery Inventory
     -> CameraTarget (username/password attached)
     -> rtsp.Manager.SetTargets()
 ```
 
-Do not put real secrets in any document, config example, or log — credentials
-are per-device and per-group; see `docs/security/least-privilege.md` for the
-exact precedence rules between device-level and group-level credentials. This
+Do not put real secrets in any document, config example, or log. This
 document does not restate secret values or a specific customer's credential
 scheme.
 
@@ -118,8 +145,12 @@ so a camera with a rotating IP is still recognized — see the G1 doc), address,
 RTSP path, username/password, stream role (`main`/`sub`), codec, width,
 height, FPS.
 
-- **Built:** by discovery + credential resolution once a device is both
-  found and authenticated.
+- **Built:** by `buildCameraTargets` (`internal/agent/camera_target_builder.go`)
+  from a discovery `Inventory` snapshot plus resolved camera credentials —
+  driven by `cameraTargetReconciler.reconcile()`
+  (`internal/agent/camera_target_reconciler.go`), which reads
+  `disc.Engine().Inventory().List()` directly. There is no separate manual
+  construction path in production.
 - **Updated:** whenever discovery/credentials produce a new value for an
   existing candidate key (e.g. IP changed, credentials rotated) — reconciled
   through `rtsp.Manager.SetTargets()`, not mutated in place.
@@ -135,16 +166,23 @@ Covered in detail in §B above. Summary of the state machine
 (`internal/rtsp/types.go`):
 
 ```
-connecting --(TCP+RTSP handshake OK)--> online
+connecting (initial only) --(TCP+RTSP handshake OK)--> online
+connecting --(dial error, not auth)--> degraded --(backoff, retry same target)--> connecting attempt again
+connecting --(401/digest failure)--> auth_failed --(backoff, retry same target)--> connecting attempt again
 online --(packet silence > PacketTimeout)--> degraded
 online --(connection closed/EOF)--> degraded
 degraded --(handshake OK again)--> online
-connecting/degraded --(401/digest failure)--> auth_failed
 any state --(supervisor stopped: target removed)--> offline
 ```
 
-`auth_failed` does not self-heal — a human or a SaaS credential update has to
-supply a new credential before the supervisor retries.
+Verified directly in `internal/rtsp/supervisor.go`'s `run()` loop:
+**every** dial failure — including `auth_failed` — retries automatically with
+exponential backoff, using the *same* `CameraTarget` (same credentials). There
+is no special "stop and wait" behavior for auth failures. The only way to
+actually change the outcome of an `auth_failed` camera is for
+`rtsp.Manager.SetTargets()` to receive a *new* `CameraTarget` (i.e. corrected
+credentials) — that replaces the running supervisor outright, it does not
+"unblock" the old one.
 
 ## G. Validation
 
@@ -175,31 +213,45 @@ uptime:           <duration>
 ```
 
 Example `/status` shape (values sanitized, never real credentials or a real
-camera identity):
+camera identity) — `cameras` is an **array** of `rtsp.CameraStreamStatus`, and
+the per-camera field is `status`, not `state`
+(`internal/health/health.go:70`, `internal/rtsp/types.go`):
 
 ```json
 {
   "status": "READY",
-  "cameras": {
-    "cam-aaaa1111": { "state": "online" },
-    "cam-bbbb2222": { "state": "auth_failed" }
-  }
+  "cameras": [
+    {
+      "candidate_key": "<sanitized>",
+      "status": "online",
+      "stream_role": "sub",
+      "codec": "h264",
+      "reconnect_count": 0,
+      "timeout_count": 0
+    },
+    {
+      "candidate_key": "<sanitized>",
+      "status": "auth_failed",
+      "stream_role": "main",
+      "reconnect_count": 4
+    }
+  ]
 }
 ```
 
-(Field names shown here reflect the general `health.Snapshot` shape described
-in the dossier and `docs/ARCHITECTURE.md`; treat the exact JSON layout as
-"call `/status` yourself and read what comes back" rather than a frozen
-contract this document freezes independently of the code.)
+`CameraStreamStatus` also carries `width`, `height`, `fps`,
+`packets_received`, `bytes_received`, `last_packet_at`, `last_error_safe` and
+`stall_count` — not all shown above. Treat the exact JSON as "call `/status`
+yourself and read what comes back" for anything not listed here.
 
 ## H. Troubleshooting
 
 | Symptom | Meaning | Diagnostic command | Probable cause | Action |
 |---|---|---|---|---|
-| Edge doesn't see the camera at all | Not in discovery inventory | `geocam-edge discovery` | Different subnet, ONVIF disabled on camera, camera off | Verify LAN segment; confirm ONVIF is enabled on the device; check `nc -zv` on its ONVIF port |
+| Edge doesn't see the camera at all | Not in discovery inventory | `geocam-edge discovery scan` | Different subnet (not supported — no cross-subnet discovery/provisioning), ONVIF disabled on camera, camera off | Verify same LAN segment; confirm ONVIF is enabled on the device; check `nc -zv` on its ONVIF port |
 | ONVIF doesn't respond | ONVIF service unreachable | `nc -zv <ip> <onvif-port>` | Camera's ONVIF service down/disabled, wrong port, firewall | Check camera's own ONVIF settings; confirm the port the camera actually advertises |
-| Wrong credentials | `auth_failed` in `/status`, ONVIF "invalid credentials" | `curl .../status`, `geocam-edge discovery` | Password rotated on camera but not in Edge/SaaS | Update credential via SaaS camera-credentials flow (§D); it syncs into `internal/cameracreds` |
-| RTSP 401 | `auth_failed` on the RTSP supervisor specifically (ONVIF may have succeeded) | `/status` state per camera | RTSP-specific credential differs from ONVIF credential on that camera | Confirm the camera doesn't use separate RTSP vs ONVIF auth |
+| Wrong credentials | `auth_failed` in `/status`, ONVIF "invalid credentials" | `curl .../status`, `geocam-edge discovery scan` | Password rotated on camera but not in Edge/SaaS | Update credential via SaaS camera-credentials flow (§D); it syncs into `internal/cameracreds`. The old supervisor keeps retrying the wrong credential automatically until `SetTargets` replaces it with the corrected one |
+| RTSP 401 | `auth_failed` on the RTSP supervisor specifically (ONVIF may have succeeded); supervisor retries automatically, will keep failing until credentials are corrected | `/status` per-camera `status` field | RTSP-specific credential differs from ONVIF credential on that camera | Confirm the camera doesn't use separate RTSP vs ONVIF auth |
 | RTSP connects, no frames | `degraded`, `PacketTimeout` firing | `/status`, `ffprobe` against the same URL | Codec Edge/ffmpeg can't decode, camera-side stream stall | Check the stream's actual codec with `ffprobe`; confirm it's one ffmpeg (the static binary shipped) supports |
 | `ffmpeg` missing | Decode never starts | `geocam-edge check`, journal logs | Appliance package didn't ship/install `ffmpeg`, or `GEOCAM_VIDEO_FFMPEG_PATH` misconfigured | Re-run `install.sh` with the ffmpeg binary argument (`docs/runbooks/EDGE_INSTALL_FROM_SCRATCH.md`) |
 | Codec incompatible | ffmpeg exits/rejects the stream | journal logs for the ffmpeg subprocess | Camera stream uses a codec/profile ffmpeg build doesn't support | Confirm codec via `ffprobe`; this is a real limitation, not a config bug |
