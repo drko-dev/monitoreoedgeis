@@ -6,10 +6,10 @@ server). It runs on-site, next to the cameras, and talks to the GEO CAM SaaS.
 Through Hito Y, merged to `main`: agent core (config, persistent identity,
 platform detection, health, logging, module lifecycle), SaaS enrollment and
 credential rotation, SaaS heartbeat, ONVIF/WS-Discovery LAN autodiscovery,
-per-device camera credential management, RTSP camera connectivity with
-reconnection and health state, the ffmpeg video pipeline, Cloud frame push with
-offline buffering and bandwidth control, local motion gating, local YOLO
-inference through an **out-of-process Python Vision Worker**, local
+per-device camera credential management, the RTSP connectivity subsystem
+(reconnection and per-camera health state), the ffmpeg video pipeline, Cloud
+frame push with offline buffering and bandwidth control, local motion gating,
+local YOLO inference through an **out-of-process Python Vision Worker**, local
 events/evidence with durable sync, signed OTA, remote configuration, appliance
 packaging, and systemd watchdog integration.
 
@@ -19,9 +19,12 @@ products. Which one an Edge is actually running is reported on `/status` as
 `profile`; see [docs/product/COMMERCIAL_MODES.md](docs/product/COMMERCIAL_MODES.md)
 for the capability matrix, each profile's readiness, and the known gaps.
 
-**Not implemented in this repository**: a VPN or subnet-routing client (the
-tunnel is deliberately customer-side infrastructure), and cross-subnet
-camera-target provisioning.
+**Not operational yet, and not claimed**: per-camera RTSP connectivity. The
+subsystem is implemented and unit-tested, but no production code path
+provisions camera targets, so it supervises zero cameras today (gap G1 in the
+document above). Also not implemented in this repository: a VPN or
+subnet-routing client (the tunnel is deliberately customer-side
+infrastructure), and cross-subnet camera-target provisioning.
 
 ## Project documentation
 
@@ -111,7 +114,7 @@ All configuration comes from environment variables:
 | `GEOCAM_DISCOVERY_INTERVAL`| `5m`                    | Interval between periodic background discovery scans (1m–24h) |
 | `GEOCAM_DISCOVERY_TIMEOUT` | `4s`                    | Probe timeout per interface during WS-Discovery (1s–30s) |
 | `GEOCAM_DISCOVERY_INTERFACES` | *(empty)*            | Comma-separated interface names to scan (defaults to auto-private RFC 1918/3927) |
-| `GEOCAM_CONNECTIVITY_ENABLED` | `true`               | Enables RTSP camera connectivity (Milestone G) |
+| `GEOCAM_CONNECTIVITY_ENABLED` | `true`               | Enables the RTSP connectivity subsystem (Milestone G). Currently supervises zero cameras — no production path provisions targets (gap G1) |
 | `GEOCAM_STREAM_ROLE`       | `sub`                   | `sub` \| `main` — which ONVIF profile's stream to connect to |
 | `GEOCAM_STREAM_TIMEOUT`    | `5s`                    | RTSP packet silence threshold before reconnecting (1s–60s) |
 | `GEOCAM_VIDEO_PIPELINE_ENABLED` | `false`            | Enables the video pipeline (Milestone H). No effect unless `GEOCAM_CONNECTIVITY_ENABLED=true` too |

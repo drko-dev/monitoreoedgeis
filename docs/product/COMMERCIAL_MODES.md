@@ -58,20 +58,24 @@ disagreement is reported, never rejected: `GEOCAM_PROCESSING_MODE` and
 a Full Edge appliance before its Vision Worker is provisioned is legitimate.
 
 > **The shipped default is `gateway-no-media`, not `gateway`.** A default
-> appliance install (`cloud`, pipeline unset) does discovery, camera
-> connectivity, health, heartbeat, control and OTA — and uploads **no frames
-> at all**, so Cloud YOLO never sees an image. Choosing the `gateway` product
-> requires setting `GEOCAM_VIDEO_PIPELINE_ENABLED=true`. See the profile
-> examples in `deploy/appliance/config/`.
+> appliance install (`cloud`, pipeline unset) runs ONVIF discovery and
+> inventory, health, heartbeat, control and OTA, and constructs the RTSP
+> connectivity subsystem — but it uploads **no frames at all**, so Cloud YOLO
+> never sees an image. Do not read this as a working camera gateway: per-camera
+> RTSP connectivity is **blocked by gap G1** in every profile, because nothing
+> in production provisions camera targets. Choosing the `gateway` product
+> requires setting `GEOCAM_VIDEO_PIPELINE_ENABLED=true`, and even then G1 must
+> close before it supervises a real camera. See the profile examples in
+> `deploy/appliance/config/`.
 
 ## 2. Commercial capability matrix
 
 | Capability           | Gateway                              | Hybrid                                        | Full Edge                                     |
 | -------------------- | ------------------------------------ | --------------------------------------------- | --------------------------------------------- |
 | ONVIF discovery      | Yes — same module in all three       | Yes                                           | Yes                                           |
-| RTSP                 | Yes (manager built; see gap G1)      | Yes (same, plus decode)                       | Yes (same, plus decode)                       |
-| Local decode         | Optional — only with the pipeline on | Yes — ffmpeg subprocess per camera            | Yes — ffmpeg subprocess per camera            |
-| Local gating         | No                                   | Yes — block-luma motion diff, no model         | Yes (same evaluator, then real inference)     |
+| RTSP                 | Subsystem constructed; per-camera operation **BLOCKED by G1** | Same, plus the decode that consumes it | Same |
+| Local decode         | **Yes** — ffmpeg decode/resize/sample | Yes — ffmpeg subprocess per camera           | Yes — ffmpeg subprocess per camera            |
+| Local gating         | No                                   | **Yes** — block-luma motion diff, no model    | **No** — sampled frames go straight to local inference |
 | Local YOLO           | **No**                               | **No**                                        | **Yes** — Python Vision Worker, out of process |
 | Cloud YOLO           | Yes — sole inference engine          | Yes — sole inference engine                   | No — local inference replaces frame upload     |
 | Offline queue        | Frames only, **off by default**       | Frames only, **off by default**                | Events/evidence: **on by default** (backlog)  |
@@ -80,24 +84,47 @@ a Full Edge appliance before its Vision Worker is provisioned is legitimate.
 | GPU optional         | N/A (no local inference)             | N/A (no local inference)                      | Parameterized: `cpu` / `cuda` / `auto` — **no GPU is certified or validated** |
 | Internet requirement | Required for any Cloud inference or control; local health/status work offline | Same | Same for sync/control/OTA; **inference is fully local** |
 
+**The `Local gating` row is not a quality ranking.** Gateway and Full Edge do
+not run the motion evaluator *at all*, and that is by design, not by omission:
+its enablement is tied to the mode (`internal/agent/agent.go` sets
+`Hybrid.Enabled = cfg.ProcessingMode == config.ModeHybrid`). Full Edge replaces
+the gating step with real inference instead of adding to it.
+
+**`Local decode` is not optional in the Gateway profile.** In the taxonomy this
+document introduces, `gateway` *is* `cloud` with the pipeline enabled — so
+decode/resize/sample always run. The profile that has no decode is
+`gateway-no-media`, which is **not** the Gateway and **not** a fourth
+processing mode; it is an effective profile derived from the pipeline flag.
+
 Reading of each row, with its evidence:
 
 - **ONVIF discovery** — `internal/discovery` runs in every profile and needs
   nothing from the media path (it imports neither `internal/rtsp` nor
   `internal/processing`). It only *reads* a stream URI as metadata; it never
-  opens an RTSP connection.
-- **RTSP** — `internal/rtsp.Manager` is built whenever
-  `GEOCAM_CONNECTIVITY_ENABLED=true` (default), independently of the mode and
-  of the pipeline. See gap **G1**: no production code path ever populates it
-  with camera targets, so in every profile it currently supervises zero
-  cameras and `/status` omits `cameras`.
+  opens an RTSP connection. It is also the only one of these capabilities that
+  is functional end to end today.
+- **RTSP** — be precise about two different things. The **subsystem** is
+  constructed whenever `GEOCAM_CONNECTIVITY_ENABLED=true` (default),
+  independently of the mode and of the pipeline, and so is the decode that
+  consumes its packets. But **operational per-camera RTSP connectivity is
+  currently blocked by gap G1**: no production code path ever calls
+  `rtsp.Manager.SetTargets`, and the discovery inventory does not feed it, so
+  the manager supervises **zero** cameras in every profile and `/status` omits
+  `cameras`. Do not describe an appliance as having working camera connectivity.
+- **Local decode** — the ffmpeg decode/resize/sample stages are built if and
+  only if `GEOCAM_VIDEO_PIPELINE_ENABLED=true`; in every profile documented
+  here that flag is on by definition.
 - **Local gating** — `internal/processing.MotionDetector` is pure Go block
-  luma diffing ("no OpenCV, no model"), and it is constructed only when
-  `Hybrid.Enabled`, which the agent sets solely for `hybrid` mode. Hybrid
-  cannot reach any model.
-- **Local YOLO** — `newVisionSink` returns nil outside `edge` mode, and the
-  Cloud sink is nil inside it, so the two are mutually exclusive by
-  construction and no profile runs both.
+  luma diffing ("no OpenCV, no model"). It is constructed only when
+  `cfg.Hybrid.Enabled`, which is true **only** for `hybrid` mode, so:
+  `cloud` has no evaluator, `hybrid` has one, and `edge` has **none**. All the
+  candidate/filtering logic in the pipeline is gated on `p.motion != nil`, so
+  in Full Edge every sampled frame proceeds to local inference unfiltered.
+  Hybrid cannot reach any model.
+- **Local YOLO** — `newVisionSink` returns nil outside `edge` mode, and
+  `newCloudSink` returns nil outside `cloud`/`hybrid`, so the Cloud frame sink
+  and the local-inference sink are **mutually exclusive by construction** and
+  no profile runs both. Switching mode at runtime replaces the whole sink set.
 - **Offline queue** — two independent mechanisms, deliberately not merged:
   `internal/cloudsink.Buffer` for Cloud/Hybrid frames and
   `internal/edgebacklog.Backlog` for Full Edge events. The frame buffer has
@@ -116,18 +143,19 @@ Labels are used exactly as `AGENTS.md` defines them. **No mode is called
 "commercial-ready", because all three are missing at least one criterion that
 this repository cannot satisfy on its own.**
 
-### Gateway — IMPLEMENTED, TESTED, NOT VALIDATED, BLOCKED on Z7
+### Gateway — IMPLEMENTED, TESTED, NOT VALIDATED, BLOCKED (G1 + Z7)
 
 | | |
 | --- | --- |
 | **IMPLEMENTED** | Yes. Profile is `cloud` + `GEOCAM_VIDEO_PIPELINE_ENABLED=true`. The default-profile derivation, the operator config example and the packaging documentation exist on this branch. |
-| **TESTED** | Yes. `internal/config/profile_test.go` pins the profile mapping and the "never claim a local stage you cannot run" invariant; `internal/health/profile_gate_test.go` pins the `/status` value; the existing suite covers discovery, RTSP, heartbeat, control and OTA independently of the media path. |
-| **VALIDATED LOCAL** | Partially. The Gateway profile's own claim — frames reach the SaaS and Cloud runs YOLO on them — is exercised only by `internal/cameratest` integration tests, which use **synthetic** local RTSP servers and a **fake** SaaS. No real camera, no real SaaS, no real network path was used. |
+| **TESTED** | Yes. `internal/config/profile_test.go` pins the profile mapping and the "never claim a local stage you cannot run" invariant; `internal/health/profile_gate_test.go` pins the `/status` value; the existing suite covers discovery, heartbeat, control and OTA independently of the media path, plus the RTSP manager and the video pipeline as units. |
+| **VALIDATED LOCAL** | Partially, and only with G1 bypassed. The Gateway profile's own claim — frames reach the SaaS and Cloud runs YOLO on them — is exercised only by `internal/cameratest` integration tests, which call `rtsp.Manager.SetTargets` **directly**, against **synthetic** local RTSP servers and a **fake** SaaS. That is the same call production never makes, so these tests prove the pipeline works when handed a camera; they do not prove an appliance gets one. No real camera, no real SaaS, no real network path was used. |
 | **NOT_VALIDATED** | Real ONVIF cameras; real per-camera RTSP and camera health; real bandwidth on a real uplink; the Cloud YOLO leg end to end. |
-| **BLOCKED** | **Two blockers, and they are not the same kind.** (1) Camera-target provisioning does not exist in production (gap **G1**) — this is a code gap, not a hardware one. (2) Hardware certification is Z7 and is untouched: no board is certified, and `docs/deployment/hardware.md` states the RAM/storage minimums are **NOT ESTABLISHED** and the only bandwidth figure (~9.12 Mbps, one camera) is a **synthetic local benchmark**, not a production measurement. |
+| **BLOCKED** | **Two blockers, and they are not the same kind.** (1) Camera-target provisioning does not exist in production (gap **G1**) — this is a code gap, not a hardware one, and it is what stops "camera connectivity" from being an operational capability today. (2) Hardware certification is Z7 and is untouched: no board is certified, and `docs/deployment/hardware.md` states the RAM/storage minimums are **NOT ESTABLISHED** and the only bandwidth figure (~9.12 Mbps, one camera) is a **synthetic local benchmark**, not a production measurement. |
 
 **If the only blocker were hardware certification, this would be Z7's
-call.** It is not: G1 is a functional gap.
+call.** It is not: G1 is a functional gap, and it is deliberately **not** fixed
+in this PR — see §6.
 
 ### Hybrid — IMPLEMENTED, TESTED, NOT VALIDATED, BLOCKED
 
@@ -146,7 +174,7 @@ call.** It is not: G1 is a functional gap.
 | **IMPLEMENTED** | Yes. Local inference is genuinely out of process: the Go agent `exec`s the Python worker and speaks newline-delimited JSON over a single Unix socket. **PyTorch is never inside the Go process** — `go.mod` has zero third-party dependencies, no `import "C"` exists anywhere, and the build is `CGO_ENABLED=0` on every target. The Go agent plus Python Vision Worker split is preserved. |
 | **TESTED** | Yes for the Go side (worker lifecycle, handshake, restart/backoff, device fields, events, evidence, backlog, sync, quarantine, OTA) and for the Python `resolve_device` contract. The Python worker's own test suite exists but **CI never runs it** — there is no Python job in `.github/workflows/ci.yml`. |
 | **VALIDATED LOCAL** | Only through a **fake** worker. The real `deploy/vision-worker/worker.py` under the Go agent is touched exclusively by `internal/perf`, behind both a `localbench` build tag and a `GEOCAM_PERF=1` environment gate. CI never runs it. |
-| **NOT_VALIDATED** | Real model loading; real inference; real CUDA; the packaging path (§5); OTA restart interaction with a live worker; retention of events and evidence. |
+| **NOT_VALIDATED** | Real model loading; real inference; real CUDA; the packaging path; OTA restart interaction with a live worker; retention of events and evidence. |
 | **BLOCKED** | **Full Edge cannot be deployed by the appliance packaging today.** `deploy/appliance/scripts/package.sh` stages the Go binary, static ffmpeg, the systemd units, the scripts and the env example — it does **not** ship `deploy/vision-worker/`, install Python, create a virtualenv, install `ultralytics`, or place the YOLO weights. `GEOCAM_EDGE_YOLO_WORKER_CMD` correspondingly has no production default (deliberately — inventing an interpreter path would hide a missing installation). An operator must provision the entire Python runtime by hand. This is a packaging slice, not a hardware question. |
 
 ## 4. Full Edge product requirements (no certified hardware)
@@ -200,34 +228,86 @@ Go side and can disagree with it.
 
 ## 5. What each mode does and does not do locally
 
-**Gateway (`cloud` + pipeline)** — locally: RTSP ingest, H.264 depacketize,
-ffmpeg decode, resize, fixed-FPS sample, JPEG encode, upload. In the Cloud:
-everything else, including YOLO. It runs no local model. It requires outbound
-connectivity to the SaaS for any inference to happen at all.
+The three pipelines are **not** nested. Hybrid adds gating to Gateway's path;
+Full Edge *diverges* from it — it keeps decode and sampling, drops gating
+entirely, and replaces the Cloud upload with local inference.
 
-**Hybrid** — locally: everything Gateway does, **plus** a block-average luma
-diff against the previous frame with optional normalized ROIs, a candidate
-decision, and candidate metadata stamping. Frames below the threshold are
-never dispatched. In the Cloud: unchanged — the same JPEG quality, the same
-endpoint, the same limiter, the same offline buffer, and YOLO. The adaptive
-idle sampler (`GEOCAM_VIDEO_HYBRID_IDLE_FPS`) is **off by default** and, as of
-this branch, can no longer leak into Cloud mode (see the defect list, D2).
+**Gateway (`cloud` + pipeline)** — locally:
 
-**Full Edge** — locally: everything Hybrid does, except the frames are not
-uploaded for inference; instead each sampled frame is JPEG-encoded, sent over
-the Unix socket to the Python worker, and the detections become local events
-and evidence (`events/<uuid>.json`, `evidence/captures/<uuid>.jpg`,
+```
+RTSP ingest → H.264 depacketize → ffmpeg decode → resize → fixed-FPS sample
+            → JPEG encode → Cloud upload → Cloud YOLO
+```
+
+In the Cloud: everything else, including YOLO. It runs no local model and no
+motion evaluator. It requires outbound connectivity to the SaaS for any
+inference to happen at all.
+
+**Hybrid** — locally:
+
+```
+RTSP ingest → H.264 depacketize → ffmpeg decode → resize → fixed-FPS sample
+            → MotionDetector (block-luma diff, no model)
+            → candidate selection
+            → Cloud upload (candidates only) → Cloud YOLO
+```
+
+That is Gateway's path **plus** a block-average luma diff against the previous
+frame with optional normalized ROIs, a candidate decision, and candidate
+metadata stamping. Frames below the threshold are never dispatched. In the
+Cloud: unchanged — the same JPEG quality, the same endpoint, the same limiter,
+the same offline buffer, and YOLO. The adaptive idle sampler
+(`GEOCAM_VIDEO_HYBRID_IDLE_FPS`) is **off by default** and, as of this branch,
+can no longer leak into Cloud mode (see the defect list, D2).
+
+**Full Edge** — locally:
+
+```
+RTSP ingest → H.264 depacketize → ffmpeg decode → resize → fixed-FPS sample
+            → Vision Worker (local YOLO) → detections
+            → local events/evidence
+            → durable event/evidence backlog
+            → SaaS sync
+```
+
+Note what is **absent**: there is no `MotionDetector` in this path. Full Edge
+does not use Hybrid's gating, because `Hybrid.Enabled` is true only for
+`hybrid` mode, and the pipeline builds the evaluator only when it is. Every
+sampled frame therefore goes to local inference unfiltered. Gating is not a
+prerequisite for inference, and Full Edge does not sample *less* than Gateway —
+it just decides what is interesting with a model instead of a luma diff.
+
+Each sampled frame is JPEG-encoded and sent over the Unix socket to the Python
+worker; the detections become local events and evidence
+(`events/<uuid>.json`, `evidence/captures/<uuid>.jpg`,
 `evidence/clips/<event_uuid>.mp4`). Those are queued in the durable backlog and
 synced to the SaaS in strict order. In the Cloud: nothing inference-related.
 
+The Cloud frame sink and the local-inference sink are mutually exclusive by
+construction — `newCloudSink` returns nil outside `cloud`/`hybrid` and
+`newVisionSink` returns nil outside `edge` — so no profile uploads frames for
+Cloud inference *and* runs local inference.
+
 ### Internet requirement, precisely
 
-The local health surface (`/healthz`, `/readyz`, `/status`), discovery, RTSP
-and local inference (Full Edge) do not require the SaaS. Heartbeat, enrollment,
-the control channel, remote configuration, discovery-run claims and OTA do.
-`/readyz` is local-only in every mode. Full Edge continues to infer and to
-persist events with the SaaS unreachable; it cannot deliver them until it
-returns.
+The local health surface (`/healthz`, `/readyz`, `/status`) and discovery do not
+require the SaaS. Heartbeat, enrollment, the control channel, remote
+configuration, discovery-run claims and OTA do. `/readyz` is local-only in
+every mode. For RTSP and Full Edge local inference, see the qualification
+immediately below — the capability is local, but the current wiring cannot
+reach it.
+
+On Full Edge offline behaviour, keep three different statements apart:
+
+- **Architectural / local capability:** once a camera stream is actually
+  provisioned into the RTSP/video pipeline, Full Edge inference and local
+  event/evidence persistence do not require SaaS reachability — the backlog
+  simply accumulates and drains when the SaaS returns.
+- **Current product wiring:** that path is **blocked by G1**, because no
+  production code path provisions those camera targets. So this is a property
+  of the code, not an end-to-end operational statement about the shipped
+  product today.
+- **Real validation:** none. No camera, no real model, no real tenant.
 
 ### VPN and subnet routing
 
@@ -243,8 +323,15 @@ implemented** — see `docs/ROADMAP.md` (R5) and
 ## 6. Defects found by this audit, and what was done
 
 Each item is a concrete gap between what the repository says and what it does.
-Fixes are limited to real resilience/correctness defects in profile and
-configuration handling; no new subsystem was built.
+Fixes are limited to real correctness defects in profile and configuration
+handling, plus precision in this document; no new subsystem was built.
+
+The `G` items are **not** fixed and are **not** in scope for this PR. They are
+kept here, with G1 repeated in §1, §2 and §3, specifically so that the Hito Z
+integration/close does not read a merged documentation pass as a closed
+capability. G1 (camera-target provisioning), the Vision Worker packaging gap,
+hardware certification (Z7), CUDA validation, a real pilot, storage retention
+and production bandwidth limits all remain open.
 
 | ID | Defect | Action |
 | -- | ------ | ------ |
@@ -253,7 +340,8 @@ configuration handling; no new subsystem was built.
 | **D3** | `Sampler.SetTargetFPS` never recomputed the idle interval, so a remote-config TargetFPS reduction below the configured IdleFPS left the sampler emitting *faster* while idle than the new ceiling — breaking the documented "TargetFPS remains the ceiling" invariant. | **Fixed** (`internal/processing/sampler.go`): the interval is recomputed and adaptive sampling switches off when idle is no longer below the ceiling; regression-guarded. |
 | **D4** | `hybrid`/`edge` with the video pipeline disabled were accepted silently, and `edge` additionally pinned `/readyz` to **503 forever** (the vision gate waited for a worker that can never be constructed) while `/status` said READY — which made the appliance's `update.sh` roll a healthy release back. | **Fixed** for the readiness trap (`internal/health/health.go`): with the pipeline disabled there is no worker to gate on. **Reported** for the mode mismatch: the agent now logs a warning naming the effective profile. Not rejected, because the two knobs have always been independent. |
 | **D5** | Full Edge could not start on a fresh appliance: the default socket is `$GEOCAM_DATA_DIR/run/vision-worker.sock`, and **nothing** created `run/` — `install.sh` creates `DATA_DIR`, `DATA_DIR/ota` and `DATA_DIR/ota/pending`; the Python worker only `bind()`s the path; the Go side only removed a stale socket. First spawn failed with `ENOENT` and the worker looped in `error`. Hidden because every test pointed the socket at an existing temp directory. | **Fixed** (`internal/vision/worker.go`): the Go side provisions the socket's parent directory; regression-guarded end-to-end. |
-| **G1** | **No production code path ever populates camera targets.** `rtsp.Manager.SetTargets` is called only from `internal/perf` and tests; the discovery inventory never feeds it. So the RTSP manager supervises zero cameras in every profile, `/status` omits `cameras`, and heartbeats carry an empty list. The "RTSP connectivity" and "camera health" capabilities are implemented but not wired to any camera. | **Not fixed — reported.** Bridging discovery→RTSP (and cross-subnet provisioning) is a functional slice, not a configuration fix; building it here would be building a new system. This is the single largest gap in the Gateway product. |
+| **D6** | This document itself misdescribed two profiles. It claimed Full Edge uses Hybrid's motion evaluator ("same evaluator, then real inference") and that Full Edge does "everything Hybrid does, except…". Both are false: `Hybrid.Enabled` is set only for `hybrid` mode, so an `edge` pipeline builds **no** `MotionDetector` and every sampled frame reaches local inference unfiltered. It also called Gateway's local decode "optional", when in this document's own taxonomy `gateway` *is* cloud with the pipeline enabled, so decode is never optional in it. | **Fixed in this document** (matrix rows, §2 rationale, §5 pipelines). No code change was needed or made: the code was already correct and unambiguous. Recorded because a capability matrix that overstates a profile is exactly the kind of claim this document exists to prevent. |
+| **G1** | **No production code path ever populates camera targets.** `rtsp.Manager.SetTargets` is called only from `internal/perf` and tests; the discovery inventory never feeds it. So the RTSP manager supervises zero cameras in every profile, `/status` omits `cameras`, and heartbeats carry an empty list. The RTSP connectivity subsystem and the per-camera health reporting are implemented, but they are wired to no camera in production. | **STILL BLOCKED — NOT IMPLEMENTED, and deliberately out of scope for this PR.** Bridging discovery→RTSP (and cross-subnet target provisioning) is a functional slice, not a documentation or configuration fix; implementing it here would be building a new system inside a documentation-precision pass. It is kept visible here, in §1, §2 and §3, so the Hito Z integration/close cannot mistake it for done. This remains the single largest gap in the Gateway product. |
 | **G2** | An operator-facing config file told operators **not** to use the two implemented modes: `deploy/appliance/config/geocam-edge.env.example` said "only 'cloud' has a working implementation today… do not select them in production", and `docs/deployment/appliance.md` and `README.md` said Hybrid/Edge "have no functional implementation yet". All three were false at this branch's base. | **Fixed.** The stale claims are corrected and the profiles are documented. |
 | **G3** | The env example claimed to be "the full, commented list of every `GEOCAM_*` variable" but omitted **26** variables actually read by `config.Load()`: every `GEOCAM_EDGE_YOLO_*` and `GEOCAM_VIDEO_HYBRID_*` key, the local-event backlog bounds, the clip ceiling, the inference concurrency, the resource guards and `GEOCAM_HEARTBEAT_AUTH_FAILURE_INTERVAL`. | **Fixed.** All are now documented with their real defaults and ranges, and per-profile examples were added. |
 | **G4** | The remote-config runtime applier does not exist when the video pipeline is disabled, so the module substitutes a no-op adapter that accepts everything, and the engine records and ACKs `applied` to the SaaS for tuning that changed nothing. | **Not fixed — reported.** Correcting it changes remote-config outcome semantics and the SaaS contract; it is recorded so it is not mistaken for working tuning. |
