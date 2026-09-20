@@ -38,7 +38,7 @@ cameras: `/status.cameras` is absent and heartbeats carry an empty list.
 - **Discovery already produces per-profile `StreamURI` and `Role`**
   (`internal/discovery/engine.go:307-329`), sanitized on ingest.
 - **`cameracreds`** is complete and unused: `LoadOrCreateMasterKey`,
-  `OpenStore`, `NewProvider`→`Resolve(stableIdentity, groupID) (Credential, bool)`,
+  `OpenStore`, `NewProvider`→`Resolve(candidateKey) (Credential, bool)`,
   `NewSyncer` (`*transport.Client` satisfies its `Fetcher`), `NewModule`.
 - **Test fixtures**: `rtsptest.NewSimulator` (real RTSP/RTP, Digest auth,
   `CutStream`), `onviftest.NewSimulator` + `Device{RequireAuth, Username,
@@ -54,8 +54,8 @@ This is not a choice:
 - `cameracreds.Credential.CandidateKeys` is documented as "the
   stable_identity/group-id strings this credential applies to — never an IP
   address" (`internal/cameracreds/types.go:30-34`).
-- `Provider.Resolve(stableIdentity, groupID)` keys credentials on exactly that
-  string (`provider.go:24-38`).
+- `Provider.Resolve(candidateKey)` keys credentials on exactly that string, in
+  both scopes (`provider.go`).
 - `CandidateKey` is simultaneously the RTSP supervisor map key
   (`manager.go:22,155`), the processing pipeline map key
   (`processing/manager.go:172,196`), the `PacketSink.OnPacket` first argument
@@ -108,15 +108,12 @@ candidate keys for both scopes. `Provider.Resolve` therefore takes only a
 candidate key and tries DEVICE first, then GROUP. There is no group identifier
 for the Edge to supply, and none is invented.
 
-**GROUP credentials are unreachable.** `Resolve` matches `ScopeGroup` by
-`groupID`, and discovery carries no group assignment for a device. G1 therefore
-resolves **DEVICE scope only** — call `Resolve(stableIdentity, "")`. This must be
-documented, not papered over with a fabricated group id.
 
-## 4. Four real defects G1 must fix (beyond the wiring itself)
+## 4. Defects found by the audit, and their disposition
 
-These were found during the audit and each one breaks a hard requirement in the
-slice brief.
+Each was found during the audit. D-A was initially flagged and then reclassified
+as NOT A DEFECT once the SaaS contract was read; D-B, D-C and D-D were real and
+are fixed in G1-A.
 
 **D-A — NOT A DEFECT. Reclassified after auditing the SaaS contract.**
 `Store.Apply` drops any cached entry absent from `incoming`
@@ -218,8 +215,9 @@ NOT_VALIDATED.
 
 1. `internal/discovery`: `ListActive()` (D-B); optional scan-success callback;
    optional credential resolver + authenticated enrichment.
-2. `internal/cameracreds`: non-destructive `Apply` policy (D-A); sync-success
-   callback.
+2. `internal/cameracreds`: sync-success callback. (D-A is closed — the
+   snapshot semantics are correct as they stand; do NOT add empty-snapshot
+   protection.)
 3. `internal/rtsp`: preserve the query string in `ParseTarget` (D-C) with a test.
 4. `internal/processing`: log/count the admission cap (D-D).
 5. `internal/agent`: `buildCameraTargets` + reconciler; retain the
@@ -299,6 +297,7 @@ the wiring, and G1 is still BLOCKED.**
 | D-D admission-ceiling observability | **FIXED** — bounded `skipped_limit` + keys + `pipeline_limit` |
 | GROUP resolution by candidate key | **FIXED** — `Resolve(candidateKey)`, DEVICE over GROUP |
 | `rtsp.Manager.SetTargets` lock cycle | **FIXED** — diff under `mu`, blocking stop/start outside it, `reconcileMu` serializes |
+| `rtsp.Manager.Stop` lock cycle | **FIXED** — marks `stopping` under `mu`, detaches supervisors, then stops them outside `mu`; serialized against `SetTargets` by `reconcileMu`; shutdown is terminal |
 | `discovery` → `rtsp.Manager.SetTargets` production wiring | **NOT IMPLEMENTED** — this is G1-B |
 | Authenticated ONVIF enrichment | **NOT IMPLEMENTED** — G1-B |
 | Scan/sync success callbacks | **NOT IMPLEMENTED** — G1-B |

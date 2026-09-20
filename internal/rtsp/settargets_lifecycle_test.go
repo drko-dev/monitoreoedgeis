@@ -188,6 +188,184 @@ func TestSetTargets_MetadataOnlyChangeDoesNotRestart(t *testing.T) {
 	}
 }
 
+// TestStop_ConcurrentWithPacketFlowAndReconciliation is the guard for the
+// STOP-side lock cycle. The previous version only ran Stop AFTER quiescing the
+// churn, so it never actually exercised Stop racing a reconciliation and a live
+// packet path. Here Stop runs genuinely in parallel with all of them.
+//
+// It must demonstrate: no deadlock; Stop returns bounded; reconciliation cannot
+// resurrect a supervisor; KnownCameras is empty afterwards; a SetTargets issued
+// after shutdown does not create an active camera; and a second Stop is safe.
+func TestStop_ConcurrentWithPacketFlowAndReconciliation(t *testing.T) {
+	sim, err := rtsptest.NewSimulator(rtsptest.Options{
+		AutoPacketCount: 100000, AutoPacketInterval: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sim.Close()
+
+	mgr := NewManager(DefaultConfig(), nil, nil)
+	mgr.SetPacketSink(newCountingSink())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	addr := sim.Addr()
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Reconciler: add / rotate / remove continuously.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			tgt := simTarget("cam-1", addr)
+			tgt.Username, tgt.Password = "admin", "pw"
+			switch i % 3 {
+			case 0:
+				mgr.SetTargets([]CameraTarget{tgt})
+			case 1:
+				tgt.Password = "rotated"
+				mgr.SetTargets([]CameraTarget{tgt})
+			case 2:
+				mgr.SetTargets([]CameraTarget{tgt, simTarget("cam-2", addr)})
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	// Readers hammer the paths that need mu.
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_ = mgr.Snapshot()
+				_ = mgr.KnownCameras()
+				_ = mgr.HasCamera("cam-1")
+				_, _ = mgr.DescriptorFor("cam-1")
+			}
+		}()
+	}
+
+	// Let packets flow and reconciliation churn for a while.
+	time.Sleep(200 * time.Millisecond)
+
+	// Stop WHILE all of that is still running. Bounded: it must return well
+	// inside the deadline rather than deadlocking on mu.
+	stopDone := make(chan error, 1)
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer stopCancel()
+	go func() { stopDone <- mgr.Stop(stopCtx) }()
+
+	select {
+	case err := <-stopDone:
+		if err != nil {
+			t.Fatalf("Stop returned an error while racing live traffic: %v", err)
+		}
+	case <-time.After(25 * time.Second):
+		t.Fatal("Stop deadlocked while reconciliation and packet flow were live")
+	}
+
+	// Now let the churn goroutines exit.
+	close(stop)
+	wg.Wait()
+
+	// Reconciliation must not have resurrected anything, and no supervisor may
+	// survive shutdown.
+	if got := mgr.KnownCameras(); len(got) != 0 {
+		t.Fatalf("KnownCameras = %v after Stop, want empty", got)
+	}
+	if got := mgr.Snapshot(); len(got) != 0 {
+		t.Fatalf("Snapshot = %d entries after Stop, want 0", len(got))
+	}
+
+	// A SetTargets issued after shutdown must not create an active camera.
+	mgr.SetTargets([]CameraTarget{simTarget("cam-after-stop", addr)})
+	if got := mgr.KnownCameras(); len(got) != 0 {
+		t.Fatalf("SetTargets after Stop registered %v — shutdown must be terminal", got)
+	}
+	select {
+	case <-stopDone:
+	default:
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := mgr.KnownCameras(); len(got) != 0 {
+		t.Fatalf("a supervisor was resurrected after Stop: %v", got)
+	}
+
+	// A second Stop is safe and returns promptly.
+	secondCtx, secondCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer secondCancel()
+	if err := mgr.Stop(secondCtx); err != nil {
+		t.Fatalf("second Stop: %v", err)
+	}
+}
+
+// TestStop_BeforeStartIsSafeAndStopsRegisteredSupervisors covers the
+// targets-before-Start ordering the manager explicitly supports.
+func TestStop_BeforeStartIsSafeAndStopsRegisteredSupervisors(t *testing.T) {
+	mgr := NewManager(DefaultConfig(), nil, nil)
+
+	// Register targets before Start (production ordering), then Stop without
+	// ever starting the manager.
+	mgr.SetTargets([]CameraTarget{{
+		CandidateKey: "cam-1", Addr: "127.0.0.1:8554", RTSPPath: "/live",
+		StreamRole: "sub", Codec: "H264",
+	}})
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := mgr.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop before Start: %v", err)
+	}
+	if got := mgr.KnownCameras(); len(got) != 0 {
+		t.Fatalf("KnownCameras = %v after Stop, want empty", got)
+	}
+	// And it is still idempotent.
+	if err := mgr.Stop(stopCtx); err != nil {
+		t.Fatalf("second Stop before Start: %v", err)
+	}
+}
+
+// TestStart_AfterStopIsANoOp pins that a stopped manager cannot be revived.
+func TestStart_AfterStopIsANoOp(t *testing.T) {
+	mgr := NewManager(DefaultConfig(), nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+	if err := mgr.Stop(stopCtx); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start after Stop must be a no-op, got %v", err)
+	}
+	mgr.SetTargets([]CameraTarget{{
+		CandidateKey: "cam-revived", Addr: "127.0.0.1:8554", RTSPPath: "/live",
+	}})
+	if got := mgr.KnownCameras(); len(got) != 0 {
+		t.Fatalf("a stopped manager accepted a target: %v", got)
+	}
+}
+
 // TestSetTargets_ConcurrentWithPacketFlowAndStop is the race/stress guard for
 // the lock refactor: reconciliation, packet delivery and shutdown all at once.
 func TestSetTargets_ConcurrentWithPacketFlowAndStop(t *testing.T) {

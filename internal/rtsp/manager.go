@@ -25,12 +25,18 @@ type Manager struct {
 	cancel      context.CancelFunc
 	stopped     chan struct{}
 
-	// reconcileMu serializes whole SetTargets reconciliations without holding
-	// mu across the blocking supervisor Stop/Start phase. Holding mu there was
-	// a lock-cycle hazard: a supervisor's own goroutine can be inside
+	// reconcileMu serializes whole SetTargets reconciliations AND Stop, without
+	// holding mu across the blocking supervisor Stop/Start phase. Holding mu
+	// there was a lock-cycle hazard: a supervisor's own goroutine can be inside
 	// PacketSink.OnPacket, which takes processing.mu and then calls back into
 	// DescriptorFor -> mu.
 	reconcileMu sync.Mutex
+
+	// stopping is set (under mu) as the first thing Stop does, before any
+	// ownership lock is released, so SetTargets can never register a new
+	// supervisor or start a goroutine against a cancelled context during or
+	// after shutdown.
+	stopping bool
 }
 
 // NewManager creates a manager with the given config and status sink.
@@ -87,26 +93,53 @@ func (m *Manager) Start(ctx context.Context) error {
 
 // Stop terminates all supervisors and halts the manager.
 //
+// Locking discipline, matching SetTargets: reconcileMu serializes shutdown
+// against reconciliation, and mu is held ONLY to mark the manager stopping and
+// to detach the supervisors. mu is never held across Supervisor.Stop(), which
+// blocks until a supervisor goroutine unwinds.
+//
+// That second point matters for the same reason it does in SetTargets. A
+// supervisor goroutine may be inside processing.Manager.OnPacket, which holds
+// processing.mu and calls back into rtsp.Manager.DescriptorFor, which needs mu.
+// Holding mu here would close that cycle — Stop waiting on a goroutine that is
+// waiting on mu.
+//
 // Stop on a manager that was never started returns immediately instead of
 // waiting on a coordination goroutine that does not exist. Calling Stop twice
 // is safe.
 func (m *Manager) Stop(ctx context.Context) error {
+	// Serialize against SetTargets: a reconciliation already in flight finishes
+	// before we detach, and one starting afterwards observes stopping=true.
+	m.reconcileMu.Lock()
+	defer m.reconcileMu.Unlock()
+
 	m.mu.Lock()
-	if m.cancel == nil {
-		for key, sup := range m.supervisors {
-			sup.Stop()
-			delete(m.supervisors, key)
-		}
-		m.mu.Unlock()
-		return nil
-	}
-	m.cancel()
-	// Stop all supervisors
+	// Mark stopping BEFORE releasing any ownership, so no new supervisor can be
+	// registered and no goroutine can be started against a cancelled context.
+	m.stopping = true
+	cancel := m.cancel
+	detached := make([]*Supervisor, 0, len(m.supervisors))
 	for key, sup := range m.supervisors {
-		sup.Stop()
+		detached = append(detached, sup)
 		delete(m.supervisors, key)
 	}
+	wasStarted := cancel != nil
 	m.mu.Unlock()
+
+	if wasStarted {
+		cancel()
+	}
+
+	// Blocking phase, deliberately outside mu.
+	for _, sup := range detached {
+		sup.Stop()
+	}
+
+	// Never started: nothing to wait for. Any supervisors registered by a
+	// targets-before-Start sequence have still been stopped above.
+	if !wasStarted {
+		return nil
+	}
 
 	select {
 	case <-m.stopped:
@@ -191,6 +224,12 @@ func (m *Manager) SetTargets(targets []CameraTarget) {
 	defer m.reconcileMu.Unlock()
 
 	m.mu.Lock()
+	if m.stopping {
+		// Shutdown has begun: never register a supervisor or start a goroutine
+		// against a cancelled context, and never resurrect a stopped camera.
+		m.mu.Unlock()
+		return
+	}
 	var toStop []*Supervisor
 	for key, sup := range m.supervisors {
 		target, want := desired[key]
