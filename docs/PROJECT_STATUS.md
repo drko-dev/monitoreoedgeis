@@ -996,7 +996,6 @@ not available here):
 - Real CUDA/NPU hardware.
 - Physical benchmark.
 
-<<<<<<< HEAD
 ## HITO L1–L4 — Transporte seguro Edge ↔ SaaS — CODE DONE
 
 **Hardening pass over transport already built in prior hitos (C, D, E, I, J, K) — no rearchitecture, no new endpoints.**
