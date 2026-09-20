@@ -10,13 +10,14 @@
 | **PROJECT** | GEO CAM Edge |
 | **CURRENT HITO** | Z — Producción/evolución |
 | **STATE** | **HITO Z SOFTWARE CLOSED** — final integration merged |
-| **MAIN** | `73b9f07fbab3a9a57f8bb652fdec9632a6cb38cc` (PR #100) |
+| **MAIN** | `b007c88be578487d43a1f0d673567abdd469a37b` (Hito Z closeout; PR #100 merged at `73b9f07`) |
 | **SOFTWARE 1.0** | **READY** — final integration CI 7/7 PASS and merged unchanged into `main` |
 | **RELEASE 1.0** | **NOT_VALIDATED** — B11: no real signed `v1.0.0` run yet |
 | **DEPLOYED PROD** | **NO / NO TARGET REGISTERED** |
 | **REAL CAMERA / PILOT** | **NOT_VALIDATED / NOT EXECUTED** |
 | **HARDWARE CERTIFIED** | **NO** |
 | **CUDA / REAL PYTORCH** | **NOT_VALIDATED** |
+| **FIELD / HARDWARE VALIDATION** | **PENDING** — see `docs/product/PHYSICAL_VALIDATION_REGISTER.md` |
 | **Go version** | 1.26.2 |
 
 ### Hito Z blocker state
@@ -28,6 +29,13 @@
 
 PR #100 is the canonical Hito Z integration: CI 7/7 PASS, merged to `main`.
 See `docs/product/RELEASE_1_0_READINESS.md` for the authoritative distinction between SOFTWARE 1.0, RELEASE 1.0 and DEPLOYED PROD.
+
+The single itemized matrix of everything that still requires the physical world is
+`docs/product/PHYSICAL_VALIDATION_REGISTER.md` (real camera/field, physical ARM64,
+CUDA/GPU, the 5–10 camera pilot, hardware certification, and Y2/Y9). Every
+physical row there is `NOT_VALIDATED`: none of them is a software blocker, none
+may be recorded as `FAILED`, and "the software exists" never converts a physical
+row into a passing one.
 
 ## Hito A — what was implemented (MERGED)
 

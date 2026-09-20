@@ -29,7 +29,7 @@ The accepted Hito Z software blockers are:
 | **B6** Python Vision Worker CI | **CLOSED** | `python-vision-worker` job runs the worker unittest suite on Python 3.12 without torch/ultralytics/model downloads |
 | **B7** bandwidth defaults | **CLOSED BY EXPLICIT 1.0 DECISION** | byte/sec and FPS controls exist; no universal production Mbps/FPS value is invented |
 | **B8** Hybrid saving claim | **CLOSED BY EXPLICIT 1.0 DECISION** | no quantitative saving claim is published without integrated/field measurement |
-| **B9** physical validation | **SEPARATE / NOT_VALIDATED** | pilot + hardware certification not executed; this blocks field/commercial validation, not SOFTWARE 1.0 |
+| **B9** physical validation | **SEPARATE / NOT_VALIDATED** | tracked item by item in `docs/product/PHYSICAL_VALIDATION_REGISTER.md`; pilot + hardware certification not executed; this blocks field/commercial validation, not SOFTWARE 1.0 |
 | **B10** release ffmpeg | **CLOSED** | release workflow builds static ffmpeg for amd64/arm64 and packaging is fail-closed if ffmpeg is absent |
 | **B11** real tagged release | **NOT_VALIDATED** | no real signed `v1.0.0` release has been executed yet; this gates RELEASE 1.0, not SOFTWARE 1.0 |
 | **B12** documentation drift | **CLOSED** | stale release/status documentation corrected during Hito Z integration |
@@ -90,14 +90,11 @@ Until such a target is supplied and a deployment is executed:
 
 ## Validation boundaries carried into 1.0
 
-The following remain explicitly **NOT_VALIDATED** and must not be converted into commercial claims:
+The authoritative, itemized matrix of everything that still requires the physical
+world is **`docs/product/PHYSICAL_VALIDATION_REGISTER.md`**: real camera/field
+behaviour, physical ARM64, CUDA/GPU, the 5–10 camera pilot, hardware
+certification, and the Y2 (power loss) / Y9 (PID-1 watchdog) gaps.
 
-- physical cameras and DVR/NVR behavior;
-- physical 5–10 camera pilot;
-- certified hardware;
-- real ARM64 appliance runtime;
-- real PyTorch/Ultralytics inference;
-- CUDA/GPU runtime;
-- real Hybrid bandwidth reduction;
-- sustained production disk pressure/power-loss behavior;
-- real SaaS + appliance field end-to-end operation.
+None of those items is a software blocker, and none may be converted into a
+commercial claim while it remains `NOT_VALIDATED`. This document deliberately
+does not restate the list; the register is the single place where it is tracked.

@@ -697,6 +697,10 @@ Final canonical CI on PR #100: **7/7 PASS**.
 - **Z9. Hybrid comercial — PROFILE DEFINED / IMPLEMENTED, FIELD VALIDATION PENDING.** No quantitative bandwidth-saving claim.
 - **Z10. Full Edge comercial — PROFILE DEFINED / IMPLEMENTED, FIELD VALIDATION PENDING.** Real PyTorch/CUDA/hardware remain NOT_VALIDATED.
 
+The single itemized matrix of what still requires the physical world (real
+camera/field, physical ARM64, CUDA/GPU, the 5–10 camera pilot, hardware
+certification, Y2/Y9) is `docs/product/PHYSICAL_VALIDATION_REGISTER.md`.
+
 Release/deployment are separate from Software 1.0:
 - **B11 / RELEASE 1.0:** NOT_VALIDATED until a real signed `v1.0.0` tag workflow runs.
 - **DEPLOYED PROD:** NO / NO TARGET REGISTERED.

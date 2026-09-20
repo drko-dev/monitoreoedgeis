@@ -56,13 +56,17 @@ Verified facts, each of which blocks a purely software certification:
 - **CI's ARM64 is emulated.** The multi-arch image jobs build under QEMU, not on
   a physical ARM64 board (`.github/workflows/ci.yml`). Emulated build success
   says nothing about CPU cost or thermal behaviour.
-- **The Python Vision Worker is not exercised by CI at all.** There is no Python
-  job in `.github/workflows/ci.yml`, and the repository's Python test suite
-  (`deploy/vision-worker/tests/`) is never invoked. The real worker under the Go
-  agent is reached only through the double-gated `localbench` path.
-- **The appliance package does not ship the Vision Worker**, so a Full Edge
-  certification run cannot even start from the released artefact — it needs
-  hand-provisioned Python, `ultralytics` and weights.
+- **No CI run exercises a real model load or inference.** The
+  `python-vision-worker` job (`.github/workflows/ci.yml:132`) runs the worker
+  suite with `FakeBackend` and deliberately excludes torch, ultralytics, CUDA and
+  model downloads; the real worker under the Go agent is reached only through the
+  double-gated `localbench` path.
+- **The appliance package ships the worker sources but not a Python runtime.**
+  B2 installs `vision-worker/*.py` into the release and
+  `deploy/appliance/scripts/check-vision-runtime.sh` fails closed when they are
+  absent, but `torch`, `ultralytics` and the weights do not travel with it, so a
+  Full Edge certification run still needs a hand-provisioned Python runtime and
+  externally supplied weights.
 - **The only committed result artifacts were produced on the development
   machine.** Both files under `docs/performance/results/` record
   `"goos": "darwin"`, `"goarch": "arm64"`, `"cpu_model": "Apple M4"`,
@@ -255,10 +259,11 @@ everywhere in this repository today (Hito Y recorded that no test ran on a host
 where systemd is PID 1).
 
 **Step 8 — Retention and disk.** Drive the evidence store to its configured
-limits and confirm deterministic, non-destructive behaviour at capacity. **This
-step cannot currently be completed**: there is no retention or eviction policy
-for `events/` or `evidence/`, and the free-disk gate covers JPEG captures but
-not MP4 clips. Record the outcome, not a pass.
+limits and confirm deterministic, non-destructive behaviour at capacity. The
+policy now exists (B3: count/bytes/age bounds for `events/`, `evidence/captures/`
+and `evidence/clips/`, with the free-disk gate covering clips as well), so this
+step is executable. **It has not been executed on a physical unit**, and it
+cannot be closed from the test suite: record the outcome, not a pass.
 
 ## 6. Certification record format
 
@@ -358,7 +363,7 @@ what this record does NOT certify
 | CUDA / GPU inference | NOT_VALIDATED — never executed; no bespoke backend exists |
 | Camera-count capacity | NOT_VALIDATED — no maximum is enforced in code, so any figure must come from a run |
 | Real systemd watchdog / `StartLimitBurst` on a PID-1 systemd host | NOT_VALIDATED (Hito Y) |
-| Retention behaviour at capacity | NOT_VALIDATED — no retention policy exists for events/evidence |
+| Retention behaviour at capacity | **NOT_VALIDATED** — the policy exists (B3: events/captures/clips); no physical at-capacity run has been executed |
 | QEMU ARM64 build success as ARM64 evidence | INVALID as evidence — emulation, not physical |
 
 ## 10. How to close Z7
