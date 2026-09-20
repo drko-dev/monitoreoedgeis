@@ -39,9 +39,15 @@ DOCKER_BUILDKIT=1 docker build \
     --output "type=local,dest=$OUT" \
     "$REPO_ROOT"
 
-[ -f "$OUT/usr/local/bin/ffmpeg" ] || die "ffmpeg-build stage did not produce usr/local/bin/ffmpeg — Dockerfile output layout changed?"
+# The ffmpeg-build stage installs via `make install DESTDIR=/out`, so
+# inside that stage's own filesystem the binary lives at
+# /out/usr/local/bin/ffmpeg. `--output type=local,dest=$OUT` exports that
+# whole stage filesystem, so it lands here as $OUT/out/usr/local/bin/ffmpeg
+# (note the extra "out/" from DESTDIR) — not $OUT/usr/local/bin/ffmpeg.
+FFMPEG_OUT="$OUT/out/usr/local/bin/ffmpeg"
+[ -f "$FFMPEG_OUT" ] || die "ffmpeg-build stage did not produce out/usr/local/bin/ffmpeg — Dockerfile output layout changed?"
 
-cp "$OUT/usr/local/bin/ffmpeg" "$DIST_DIR/ffmpeg-linux-$ARCH"
+cp "$FFMPEG_OUT" "$DIST_DIR/ffmpeg-linux-$ARCH"
 chmod 0755 "$DIST_DIR/ffmpeg-linux-$ARCH"
 rm -rf "$OUT"
 log "wrote $DIST_DIR/ffmpeg-linux-$ARCH"
