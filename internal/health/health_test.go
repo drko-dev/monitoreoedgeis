@@ -136,7 +136,8 @@ func TestReporterDiscoveryStatus(t *testing.T) {
 }
 
 func TestReporterFullEdgeStatus(t *testing.T) {
-	r := newTestReporter()
+	cfg := &config.Config{ProcessingMode: config.ModeEdge, VideoPipelineEnabled: true}
+	r := New("0.1.0-test", cfg, identity.Identity{}, platform.Info{})
 	if r.Snapshot().FullEdge != nil {
 		t.Errorf("FullEdge should be nil initially")
 	}
