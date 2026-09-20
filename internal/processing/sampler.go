@@ -21,9 +21,14 @@ type Sampler struct {
 	// exactly as it did before Milestone J5, using interval alone. Set
 	// only by NewAdaptiveSampler, never by NewSampler.
 	idleInterval time.Duration
-	idleAfter    time.Duration
-	lastMotion   time.Time
-	hasMotion    bool
+	// idleFPS is the requested idle rate that idleInterval is derived from.
+	// It is retained so SetTargetFPS can recompute idleInterval and keep the
+	// "idle is never above the active ceiling" invariant (see
+	// recomputeIdleIntervalLocked).
+	idleFPS    float64
+	idleAfter  time.Duration
+	lastMotion time.Time
+	hasMotion  bool
 
 	lastEmit time.Time
 	hasEmit  bool
@@ -51,11 +56,29 @@ func NewSampler(targetFPS float64) *Sampler {
 // behavior change.
 func NewAdaptiveSampler(activeFPS, idleFPS float64, idleAfter time.Duration) *Sampler {
 	s := NewSampler(activeFPS)
-	if idleFPS > 0 && idleFPS < activeFPS {
-		s.idleInterval = time.Duration(float64(time.Second) / idleFPS)
-		s.idleAfter = idleAfter
-	}
+	s.idleFPS = idleFPS
+	s.idleAfter = idleAfter
+	s.recomputeIdleIntervalLocked()
 	return s
+}
+
+// recomputeIdleIntervalLocked enforces the documented invariant that the idle
+// rate is never above the active ceiling: adaptive sampling is enabled only
+// while 0 < idleFPS < targetFPS. Must be called with s.mu held (or before the
+// Sampler is shared).
+//
+// It exists because SetTargetFPS moves the ceiling after construction. Before,
+// idleInterval was computed once and never revisited, so a remote-config
+// TargetFPS reduction below the configured IdleFPS left the idle interval
+// *shorter* than the new active interval — the sampler then emitted faster
+// while idle than the newly configured ceiling allowed, which is exactly the
+// "TargetFPS remains the ceiling" contract in processing.HybridConfig.
+func (s *Sampler) recomputeIdleIntervalLocked() {
+	if s.idleFPS > 0 && s.idleFPS < s.targetFPS {
+		s.idleInterval = time.Duration(float64(time.Second) / s.idleFPS)
+		return
+	}
+	s.idleInterval = 0
 }
 
 // SetTargetFPS dynamically updates the sampling target FPS. Safe for concurrent use.
@@ -68,6 +91,7 @@ func (s *Sampler) SetTargetFPS(targetFPS float64) {
 	} else {
 		s.interval = 0
 	}
+	s.recomputeIdleIntervalLocked()
 }
 
 // TargetFPS returns the currently configured target FPS ceiling.
