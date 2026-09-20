@@ -266,3 +266,16 @@ func (inv *Inventory) Get(key string) *DiscoveredDevice {
 	}
 	return nil
 }
+
+// SetLastSeenForTests backdates an already-inventoried device's LastSeen,
+// for deterministic TTL-expiry tests in other packages (e.g.
+// internal/agent's reconciler suite) that cannot wait out the real
+// DeviceTTL and have no access to this package's unexported fields. It is a
+// no-op if key is not present. Production code has no reason to call this.
+func (inv *Inventory) SetLastSeenForTests(key string, when time.Time) {
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	if d, ok := inv.devices[key]; ok {
+		d.LastSeen = when
+	}
+}

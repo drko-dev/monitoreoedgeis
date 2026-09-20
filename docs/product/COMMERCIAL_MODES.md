@@ -1,16 +1,14 @@
 # GEO CAM Edge — Commercial Modes (Hito Z: Z8 / Z9 / Z10)
 
-> **G1 update (Hito Z G1-B):** every "blocked by gap G1" / "camera-target
-> provisioning does not exist in production" statement below predates
-> `feature/hito-z-camera-target-wiring-g1b`. G1 is now **IMPLEMENTED /
-> TESTED LOCAL** — see `docs/product/G1_CAMERA_TARGET_WIRING.md` §11: the
-> production Agent calls `rtsp.Manager.SetTargets` with real discovered,
-> credentialed cameras. This closes the *code-gap* blocker specifically.
-> Every capability row's other blocker — **Z7 hardware certification** — is
-> untouched, and "VALIDATED LOCAL" below still means fakes/simulators, not a
-> real camera or a real appliance. The paragraphs below were not rewritten
-> to keep G1-A's original audit trail intact; read them as history, and read
-> this note as the current status.
+> **G1 status (Hito Z G1-B):** production camera-target provisioning —
+> discovery + cameracreds + authenticated ONVIF → `CameraTarget` →
+> `rtsp.Manager.SetTargets` — is **IMPLEMENTED / TESTED LOCAL**. Every
+> section below has been updated to reflect this; none of them describe G1
+> as an open code gap anymore. What remains open, everywhere below, is the
+> same as ever: **REAL CAMERA / REAL SaaS E2E: NOT_VALIDATED** (every test
+> runs against fakes/simulators), **DVR/NVR: NOT_VALIDATED** (single-source
+> only), **HARDWARE CERTIFICATION (Z7): NO**, **COMMERCIAL READY: NO**. Full
+> wiring/test detail: [G1_CAMERA_TARGET_WIRING.md](G1_CAMERA_TARGET_WIRING.md) §11.
 
 This document defines what the **Gateway**, **Hybrid** and **Full Edge**
 products are, using only capabilities that exist in this repository, and
@@ -73,19 +71,21 @@ a Full Edge appliance before its Vision Worker is provisioned is legitimate.
 > appliance install (`cloud`, pipeline unset) runs ONVIF discovery and
 > inventory, health, heartbeat, control and OTA, and constructs the RTSP
 > connectivity subsystem — but it uploads **no frames at all**, so Cloud YOLO
-> never sees an image. Do not read this as a working camera gateway: per-camera
-> RTSP connectivity is **blocked by gap G1** in every profile, because nothing
-> in production provisions camera targets. Choosing the `gateway` product
-> requires setting `GEOCAM_VIDEO_PIPELINE_ENABLED=true`, and even then G1 must
-> close before it supervises a real camera. See the profile examples in
-> `deploy/appliance/config/`.
+> never sees an image regardless of camera wiring. Choosing the `gateway`
+> product requires setting `GEOCAM_VIDEO_PIPELINE_ENABLED=true`. Production
+> camera-target provisioning (discovery + cameracreds + authenticated ONVIF
+> → `CameraTarget` → `rtsp.Manager.SetTargets`) is now **IMPLEMENTED /
+> TESTED LOCAL** (Hito Z G1-B) — see
+> [G1_CAMERA_TARGET_WIRING.md](G1_CAMERA_TARGET_WIRING.md) §11. What remains
+> open for this profile is hardware certification (Z7), not a code gap. See
+> the profile examples in `deploy/appliance/config/`.
 
 ## 2. Commercial capability matrix
 
 | Capability           | Gateway                              | Hybrid                                        | Full Edge                                     |
 | -------------------- | ------------------------------------ | --------------------------------------------- | --------------------------------------------- |
 | ONVIF discovery      | Yes — same module in all three       | Yes                                           | Yes                                           |
-| RTSP                 | Subsystem constructed; per-camera operation **BLOCKED by G1** | Same, plus the decode that consumes it | Same |
+| RTSP                 | Subsystem constructed; per-camera operation wired (Hito Z G1-B), validated only against fakes/simulators | Same, plus the decode that consumes it | Same |
 | Local decode         | **Yes** — ffmpeg decode/resize/sample | Yes — ffmpeg subprocess per camera           | Yes — ffmpeg subprocess per camera            |
 | Local gating         | No                                   | **Yes** — block-luma motion diff, no model    | **No** — sampled frames go straight to local inference |
 | Local YOLO           | **No**                               | **No**                                        | **Yes** — Python Vision Worker, out of process |
@@ -115,14 +115,18 @@ Reading of each row, with its evidence:
   `internal/processing`). It only *reads* a stream URI as metadata; it never
   opens an RTSP connection. It is also the only one of these capabilities that
   is functional end to end today.
-- **RTSP** — be precise about two different things. The **subsystem** is
-  constructed whenever `GEOCAM_CONNECTIVITY_ENABLED=true` (default),
-  independently of the mode and of the pipeline, and so is the decode that
-  consumes its packets. But **operational per-camera RTSP connectivity is
-  currently blocked by gap G1**: no production code path ever calls
-  `rtsp.Manager.SetTargets`, and the discovery inventory does not feed it, so
-  the manager supervises **zero** cameras in every profile and `/status` omits
-  `cameras`. Do not describe an appliance as having working camera connectivity.
+- **RTSP** — the **subsystem** is constructed whenever
+  `GEOCAM_CONNECTIVITY_ENABLED=true` (default), independently of the mode and
+  of the pipeline, and so is the decode that consumes its packets.
+  **Operational per-camera RTSP connectivity is now wired in production**
+  (Hito Z G1-B): discovery + cameracreds + authenticated ONVIF feed a
+  deterministic target builder that calls `rtsp.Manager.SetTargets` for every
+  single-source camera it can resolve credentials for — see
+  [G1_CAMERA_TARGET_WIRING.md](G1_CAMERA_TARGET_WIRING.md) §11 for the
+  tested wiring and its test coverage. This has been verified against fakes
+  and simulators only: **no real camera, no real appliance, no real SaaS
+  end-to-end run has validated it.** DVR/NVR (multi-source) devices remain
+  unsupported and NOT_VALIDATED — they are skipped, not collapsed.
 - **Local decode** — the ffmpeg decode/resize/sample stages are built if and
   only if `GEOCAM_VIDEO_PIPELINE_ENABLED=true`; in every profile documented
   here that flag is on by definition.
@@ -155,19 +159,15 @@ Labels are used exactly as `AGENTS.md` defines them. **No mode is called
 "commercial-ready", because all three are missing at least one criterion that
 this repository cannot satisfy on its own.**
 
-### Gateway — IMPLEMENTED, TESTED, NOT VALIDATED, BLOCKED (G1 + Z7)
+### Gateway — IMPLEMENTED, TESTED, NOT VALIDATED, BLOCKED (Z7 only)
 
 | | |
 | --- | --- |
-| **IMPLEMENTED** | Yes. Profile is `cloud` + `GEOCAM_VIDEO_PIPELINE_ENABLED=true`. The default-profile derivation, the operator config example and the packaging documentation exist on this branch. |
-| **TESTED** | Yes. `internal/config/profile_test.go` pins the profile mapping and the "never claim a local stage you cannot run" invariant; `internal/health/profile_gate_test.go` pins the `/status` value; the existing suite covers discovery, heartbeat, control and OTA independently of the media path, plus the RTSP manager and the video pipeline as units. |
-| **VALIDATED LOCAL** | Partially, and only with G1 bypassed. The Gateway profile's own claim — frames reach the SaaS and Cloud runs YOLO on them — is exercised only by `internal/cameratest` integration tests, which call `rtsp.Manager.SetTargets` **directly**, against **synthetic** local RTSP servers and a **fake** SaaS. That is the same call production never makes, so these tests prove the pipeline works when handed a camera; they do not prove an appliance gets one. No real camera, no real SaaS, no real network path was used. |
-| **NOT_VALIDATED** | Real ONVIF cameras; real per-camera RTSP and camera health; real bandwidth on a real uplink; the Cloud YOLO leg end to end. |
-| **BLOCKED** | **Two blockers, and they are not the same kind.** (1) Camera-target provisioning does not exist in production (gap **G1**) — this is a code gap, not a hardware one, and it is what stops "camera connectivity" from being an operational capability today. (2) Hardware certification is Z7 and is untouched: no board is certified, and `docs/deployment/hardware.md` states the RAM/storage minimums are **NOT ESTABLISHED** and the only bandwidth figure (~9.12 Mbps, one camera) is a **synthetic local benchmark**, not a production measurement. |
-
-**If the only blocker were hardware certification, this would be Z7's
-call.** It is not: G1 is a functional gap, and it is deliberately **not** fixed
-in this PR — see §6.
+| **IMPLEMENTED** | Yes. Profile is `cloud` + `GEOCAM_VIDEO_PIPELINE_ENABLED=true`. The default-profile derivation, the operator config example and the packaging documentation exist on this branch. As of Hito Z G1-B, production camera-target provisioning is also implemented: discovery + cameracreds + authenticated ONVIF → `CameraTarget` → `rtsp.Manager.SetTargets`, converging even when a credential arrives after the camera was already discovered — see [G1_CAMERA_TARGET_WIRING.md](G1_CAMERA_TARGET_WIRING.md) §11. |
+| **TESTED** | Yes. `internal/config/profile_test.go` pins the profile mapping and the "never claim a local stage you cannot run" invariant; `internal/health/profile_gate_test.go` pins the `/status` value; the existing suite covers discovery, heartbeat, control and OTA independently of the media path, plus the RTSP manager and the video pipeline as units. G1-B adds an end-to-end test (fake WS-Discovery + fake ONVIF WS-Security + a real `internal/rtsptest.Simulator`) proving discovery → builder → `SetTargets` → Supervisor → RTSP → `processing.Manager` for add, late-credential convergence, rotation, revoke, and TTL-based removal. |
+| **VALIDATED LOCAL** | Partially. G1-B's own test above exercises the *production* `SetTargets` call site, not a direct test-only call — closing the gap the previous wording described — but still against **fakes and a simulator**, never a real camera, a real SaaS, or a real network path. `internal/cameratest`'s pre-existing integration tests (calling `SetTargets` directly, against synthetic local RTSP servers and a fake SaaS) independently validate that the pipeline works once handed a camera. |
+| **NOT_VALIDATED** | Real ONVIF cameras; real per-camera RTSP and camera health; real bandwidth on a real uplink; the Cloud YOLO leg end to end; DVR/NVR (multi-source) devices, which G1 does not support and simply skips. |
+| **BLOCKED** | **Hardware certification (Z7) only.** No board is certified, and `docs/deployment/hardware.md` states the RAM/storage minimums are **NOT ESTABLISHED** and the only bandwidth figure (~9.12 Mbps, one camera) is a **synthetic local benchmark**, not a production measurement. The camera-target provisioning code gap this row used to also list (G1) is closed — see above. |
 
 ### Hybrid — IMPLEMENTED, TESTED, NOT VALIDATED, BLOCKED
 
@@ -315,10 +315,11 @@ On Full Edge offline behaviour, keep three different statements apart:
   provisioned into the RTSP/video pipeline, Full Edge inference and local
   event/evidence persistence do not require SaaS reachability — the backlog
   simply accumulates and drains when the SaaS returns.
-- **Current product wiring:** that path is **blocked by G1**, because no
-  production code path provisions those camera targets. So this is a property
-  of the code, not an end-to-end operational statement about the shipped
-  product today.
+- **Current product wiring:** camera targets are now provisioned in
+  production (Hito Z G1-B). So the architectural property above is no
+  longer gated on a missing wiring step — it still is not an end-to-end
+  operational statement about a shipped product, since nothing here has run
+  against real hardware.
 - **Real validation:** none. No camera, no real model, no real tenant.
 
 ### VPN and subnet routing
@@ -338,12 +339,13 @@ Each item is a concrete gap between what the repository says and what it does.
 Fixes are limited to real correctness defects in profile and configuration
 handling, plus precision in this document; no new subsystem was built.
 
-The `G` items are **not** fixed and are **not** in scope for this PR. They are
-kept here, with G1 repeated in §1, §2 and §3, specifically so that the Hito Z
-integration/close does not read a merged documentation pass as a closed
-capability. G1 (camera-target provisioning), the Vision Worker packaging gap,
-hardware certification (Z7), CUDA validation, a real pilot, storage retention
-and production bandwidth limits all remain open.
+The `G` items other than G1 are **not** fixed and are **not** in scope for
+this PR (or for Hito Z G1-B). **G1 itself was closed by Hito Z G1-B** — see
+its updated row below and [G1_CAMERA_TARGET_WIRING.md](G1_CAMERA_TARGET_WIRING.md)
+§11 — and is kept in this table, marked as such, so its history stays
+visible. The Vision Worker packaging gap, hardware certification (Z7), CUDA
+validation, a real pilot, storage retention and production bandwidth limits
+all remain open.
 
 | ID | Defect | Action |
 | -- | ------ | ------ |
@@ -353,7 +355,7 @@ and production bandwidth limits all remain open.
 | **D4** | `hybrid`/`edge` with the video pipeline disabled were accepted silently, and `edge` additionally pinned `/readyz` to **503 forever** (the vision gate waited for a worker that can never be constructed) while `/status` said READY — which made the appliance's `update.sh` roll a healthy release back. | **Fixed** for the readiness trap (`internal/health/health.go`): with the pipeline disabled there is no worker to gate on. **Reported** for the mode mismatch: the agent now logs a warning naming the effective profile. Not rejected, because the two knobs have always been independent. |
 | **D5** | Full Edge could not start on a fresh appliance: the default socket is `$GEOCAM_DATA_DIR/run/vision-worker.sock`, and **nothing** created `run/` — `install.sh` creates `DATA_DIR`, `DATA_DIR/ota` and `DATA_DIR/ota/pending`; the Python worker only `bind()`s the path; the Go side only removed a stale socket. First spawn failed with `ENOENT` and the worker looped in `error`. Hidden because every test pointed the socket at an existing temp directory. | **Fixed** (`internal/vision/worker.go`): the Go side provisions the socket's parent directory; regression-guarded end-to-end. |
 | **D6** | This document itself misdescribed two profiles. It claimed Full Edge uses Hybrid's motion evaluator ("same evaluator, then real inference") and that Full Edge does "everything Hybrid does, except…". Both are false: `Hybrid.Enabled` is set only for `hybrid` mode, so an `edge` pipeline builds **no** `MotionDetector` and every sampled frame reaches local inference unfiltered. It also called Gateway's local decode "optional", when in this document's own taxonomy `gateway` *is* cloud with the pipeline enabled, so decode is never optional in it. | **Fixed in this document** (matrix rows, §2 rationale, §5 pipelines). No code change was needed or made: the code was already correct and unambiguous. Recorded because a capability matrix that overstates a profile is exactly the kind of claim this document exists to prevent. |
-| **G1** | **No production code path ever populates camera targets.** `rtsp.Manager.SetTargets` is called only from `internal/perf` and tests; the discovery inventory never feeds it. So the RTSP manager supervises zero cameras in every profile, `/status` omits `cameras`, and heartbeats carry an empty list. The RTSP connectivity subsystem and the per-camera health reporting are implemented, but they are wired to no camera in production. | **STILL BLOCKED — NOT IMPLEMENTED, and deliberately out of scope for this PR.** Bridging discovery→RTSP (and cross-subnet target provisioning) is a functional slice, not a documentation or configuration fix; implementing it here would be building a new system inside a documentation-precision pass. It is kept visible here, in §1, §2 and §3, so the Hito Z integration/close cannot mistake it for done. This remains the single largest gap in the Gateway product. |
+| **G1** | **CLOSED by Hito Z G1-B.** Discovery + cameracreds + authenticated ONVIF now feed a deterministic target builder that calls `rtsp.Manager.SetTargets` for every single-source camera it can resolve credentials for, converging even when a credential arrives after the camera was already discovered. See [G1_CAMERA_TARGET_WIRING.md](G1_CAMERA_TARGET_WIRING.md) §11 for the full wiring and its tests. | **IMPLEMENTED / TESTED LOCAL.** Validated only against fakes and a `rtsptest.Simulator` — no real camera, no real appliance. DVR/NVR (multi-source) devices remain unsupported and NOT_VALIDATED; they are skipped, never collapsed under one target. |
 | **G2** | An operator-facing config file told operators **not** to use the two implemented modes: `deploy/appliance/config/geocam-edge.env.example` said "only 'cloud' has a working implementation today… do not select them in production", and `docs/deployment/appliance.md` and `README.md` said Hybrid/Edge "have no functional implementation yet". All three were false at this branch's base. | **Fixed.** The stale claims are corrected and the profiles are documented. |
 | **G3** | The env example claimed to be "the full, commented list of every `GEOCAM_*` variable" but omitted **26** variables actually read by `config.Load()`: every `GEOCAM_EDGE_YOLO_*` and `GEOCAM_VIDEO_HYBRID_*` key, the local-event backlog bounds, the clip ceiling, the inference concurrency, the resource guards and `GEOCAM_HEARTBEAT_AUTH_FAILURE_INTERVAL`. | **Fixed.** All are now documented with their real defaults and ranges, and per-profile examples were added. |
 | **G4** | The remote-config runtime applier does not exist when the video pipeline is disabled, so the module substitutes a no-op adapter that accepts everything, and the engine records and ACKs `applied` to the SaaS for tuning that changed nothing. | **Not fixed — reported.** Correcting it changes remote-config outcome semantics and the SaaS contract; it is recorded so it is not mistaken for working tuning. |

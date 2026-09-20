@@ -328,6 +328,7 @@ func TestG1B_FullPipeline_LateCredentialConvergence(t *testing.T) {
 	}
 
 	// --- Phase 4 (section 14.H): credential ROTATION ----------------------
+	packetsBeforeRotation := finalSnap.PacketsReceived
 	if _, err := store.Apply([]cameracreds.Credential{{
 		ID:            "1",
 		Scope:         cameracreds.ScopeDevice,
@@ -340,9 +341,33 @@ func TestG1B_FullPipeline_LateCredentialConvergence(t *testing.T) {
 	}
 	reconciler.onCredentialsSynced()
 
+	// Proof the supervisor actually RESTARTED with the new credential, not
+	// just that Store/Provider changed underneath an untouched connection:
+	// a fresh Supervisor's PacketsReceived starts over from 0, so it must
+	// dip below the pre-rotation peak before climbing again. Asserting only
+	// KnownCameras/Provider (as an earlier version of this test did) cannot
+	// tell "reconcile ran" apart from "nothing happened but the store
+	// changed" — this is why the rotation sensitivity check in
+	// G1_CAMERA_TARGET_WIRING.md §11 needed this strengthened.
+	g1bWaitFor(t, "supervisor to restart with a reset packet counter after rotation", 3*time.Second, func() bool {
+		for _, s := range rtspMgr.Snapshot() {
+			if s.CandidateKey == candidateKey && s.PacketsReceived < packetsBeforeRotation {
+				return true
+			}
+		}
+		return false
+	})
+	g1bWaitFor(t, "rotated supervisor to reconnect and reach ONLINE again", 3*time.Second, func() bool {
+		for _, s := range rtspMgr.Snapshot() {
+			if s.CandidateKey == candidateKey && s.Status == rtsp.StateOnline && s.PacketsReceived > 0 {
+				return true
+			}
+		}
+		return false
+	})
+
 	// Rotation must replace the one supervisor in place, never duplicate
 	// or remove it.
-	time.Sleep(100 * time.Millisecond) // let SetTargets/restart settle
 	if got := rtspMgr.KnownCameras(); len(got) != 1 || got[0] != candidateKey {
 		t.Fatalf("after rotation, KnownCameras = %v, want exactly [%s]", got, candidateKey)
 	}

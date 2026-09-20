@@ -420,26 +420,50 @@ Base: `feature/hito-z-camera-target-wiring` @ `4894316d4b63104e72b234801784672ca
 | D. Auth ONVIF (anon 401 → resolve → WS-Security success → sanitized StreamURI → target) | TESTED | `TestG1B_FullPipeline_LateCredentialConvergence` |
 | E. Late credential (no restart) | TESTED | `TestG1B_FullPipeline_LateCredentialConvergence`, phase 2 |
 | F. Add | TESTED | same, phase 3 (`KnownCameras` goes 0 → 1) |
-| G. Remove (inventory expiry → scan success → reconcile) | IMPLEMENTED, NOT_VALIDATED by a dedicated TTL test | `Inventory.PruneExpired` is pre-existing and unit-tested in `internal/discovery`; this PR did not add a new expiry-driven removal test on top of the reconciler specifically |
-| H. Rotation (same key, new secret → one restart, others untouched) | TESTED | `TestG1B_FullPipeline_LateCredentialConvergence`, phase 4 |
+| G. Remove (inventory expiry/disappearance → scan success → reconcile → Supervisor stopped) | TESTED | `TestG1B_RemoveByInventoryTTL`: a camera goes silent (not a credential problem), is backdated past `discovery.DeviceTTL` via the new `Inventory.SetLastSeenForTests` test hook, a scan from a second "silent" Engine sharing the same Inventory finds nothing, `PruneExpired` removes it, `OnScanSuccess` reconciles, and `KnownCameras`/the Supervisor both go to zero. Also proves a single miss *before* TTL does NOT remove the camera. |
+| H. Rotation (same key, new secret → one restart, others untouched) | TESTED | `TestG1B_FullPipeline_LateCredentialConvergence`, phase 4 — strengthened after the first pass: it now waits for the Supervisor's `PacketsReceived` to actually reset below its pre-rotation value and for it to reconnect to ONLINE again, not just for `KnownCameras`/`Provider.Resolve` to look right (those alone could pass even if `reconcile()` were never called again — see the sensitivity report below). |
 | I. Revoke | TESTED | same, phase 5 (`KnownCameras` goes 1 → 0) |
-| J. RTSP → processing | TESTED at the RTSP/Supervisor layer | same test, via a real `internal/rtsptest.Simulator` (`StateOnline`, `PacketsReceived > 0`). **Not** re-verified through `processing.Manager`/YOLO in this PR — that wiring (`rtsp.SetPacketSink(processing.Manager)`, `OnPacket → DescriptorFor → lazy pipeline`) is unmodified by G1-B and already covered by `internal/processing`'s own suite; this PR did not add a new test threading a G1-B-built target all the way through the vision pipeline. |
+| J. RTSP → processing.Manager | TESTED through the real production call site | `TestG1B_RealRTSPToProcessingManager`: builds a real `rtsp.Manager` **and** a real `processing.Manager`, calls `procMgr.Start(ctx)` with no manual `SetPacketSink` anywhere in the test, and lets `processing.Manager.Start()` itself wire `rtsp.Manager.SetPacketSink(m)`. Drives a G1-B-built `CameraTarget` through discovery → builder → `SetTargets` → Supervisor → RTP, against a real `internal/rtsptest.Simulator`, and asserts `processing.Manager.ActivePipelines()` contains the candidate, `VideoPipelineSummary.CameraCount >= 1`, and the per-camera `PipelineStatus` shows real depacketizer-level activity (`RTPPacketsReceived`/`FramesReceived` > 0 — see caveat below). This supersedes the previous version of this test, which only asserted `rtsp.CameraStreamStatus.PacketsReceived > 0` and therefore never actually exercised `processing.Manager` at all. |
 | K. Multichannel | TESTED | `TestBuildCameraTargets_MultichannelSkipped` |
 | L. Secret leak | TESTED for the paths this PR touches | `TestGetDeviceInformationAuth_*` (`onvif` package, pre-existing, unchanged) covers the WS-Security request; `TestG1B_Corrupt*` assert the sanitized `cameraCredsErr` never contains the enrollment credential. No new assertion was added scanning `/status`/heartbeat payloads specifically for a *camera* credential, since neither surface serializes `CameraTarget` or `cameracreds.Credential` anywhere (verified by reading, not by a new test). |
 | M. Shutdown/race | TESTED | `go test -race` clean across `internal/agent`, `internal/discovery` (+ `onvif`, `wsdiscovery`), `internal/cameracreds`, `internal/rtsp`, `internal/processing`; `-race -count=10` clean on `internal/agent`, `internal/rtsp`, `internal/processing` |
 
-### Sensitivity (§15)
+**Caveat on row J's frame metrics:** the test's synthetic RTP payload is a
+single properly-framed NAL unit whose bytes are *not* a real, decodable H.264
+bitstream (no valid SPS/PPS), so `RTPPacketsReceived` and `FramesReceived`
+(the real depacketizer's completed-access-unit count) go non-zero, but
+`FramesDecoded` correctly stays 0 — `ffmpeg` cannot decode fabricated slice
+data, and this test does not claim it can. Proving `FramesDecoded > 0`
+requires a genuinely valid H.264 elementary stream, which in turn requires a
+real camera (or a real encode step neither this repo nor this correction
+pass had an existing fixture for) — that gap is real-camera validation, not
+a G1-B wiring gap, and stays under REAL CAMERA: NOT_VALIDATED below.
 
-One representative, executed sensitivity check: temporarily disabling the
-authenticated-retry branch in `enrichSingleDevice` (§5) makes
-`TestG1B_FullPipeline_LateCredentialConvergence` fail exactly as expected
-(times out waiting for the target to appear, phase 2) — confirmed, then the
-change was reverted. The remaining guards listed in §15 were not each
-individually revert-tested; the full-pipeline test's five phases each
-depend on a different piece of the wiring (scan callback, sync callback,
-authenticated ONVIF, rotation, revoke), so breaking any one of them is very
-likely to fail that same test, but that likelihood was not empirically
-confirmed guard-by-guard the way the one executed check above was.
+### Sensitivity (§15) — corrected: all 7 requested guards executed
+
+Every guard below was checked the same way: apply a minimal local mutation
+that removes exactly the protected behavior, confirm the named test fails,
+then revert (no commit ever carried a broken mutation).
+
+| GUARD | TEST | MUTATION | EXPECTED FAILURE OBSERVED |
+| --- | --- | --- | --- |
+| Authenticated ONVIF + late credential convergence | `TestG1B_FullPipeline_LateCredentialConvergence` | Removed the `tryAuthenticatedEnrich` call in `internal/discovery/engine.go`'s `enrichSingleDevice` (kept `AuthRequired = true`, dropped the retry) | **yes** — times out waiting for the target to appear (phase 2) |
+| Target builder (StableIdentity / target creation) | All 13 `TestBuildCameraTargets_*` | Changed `candidateKey := dev.StableIdentity` to `dev.IP` in `internal/agent/camera_target_builder.go` | **yes** — all 13 fail (the test fixtures never set `IP`, so every candidate key collapses to `""`) |
+| Scan callback (`OnScanSuccess`) | `TestG1B_FullPipeline_LateCredentialConvergence`, `TestG1B_RemoveByInventoryTTL`, `TestG1B_RealRTSPToProcessingManager` | Removed the `OnScanSuccess` invocation in `internal/discovery/module.go`'s `executeScanAndNotify` | **yes** — all 3 fail (convergence, TTL removal, and the processing pipeline all depend on it) |
+| Sync callback (`OnSuccess`) | `TestSyncer_OnSuccessFiresAfterApply` | Removed the `OnSuccess` invocation in `internal/cameracreds/sync.go`'s `Sync` | **yes** — "OnSuccess fired 0 times, want 1" |
+| Rotation (reconcile after credential update) | `TestG1B_FullPipeline_LateCredentialConvergence`, phase 4 | Removed the `reconcile()` call in `internal/agent/camera_target_reconciler.go`'s `onCredentialsSynced` (kept only `maybeTriggerRediscovery()`) | **yes** — fails exactly at the rotation phase ("timed out waiting for: supervisor to restart with a reset packet counter after rotation"), after the phase-4 assertion was strengthened specifically because the original version of this check (comparing only `KnownCameras` length and `Provider.Resolve`) did *not* fail here — it only caught the same mutation later, at revoke |
+| Removal (TTL/disappearance) | `TestG1B_RemoveByInventoryTTL` | Same mutation as the scan-callback guard above (they share the one call site) | **yes** |
+| RTSP → processing.Manager wiring | `TestG1B_RealRTSPToProcessingManager` | Removed the `m.rtsp.SetPacketSink(m)` call in `internal/processing/manager.go`'s `Start` | **yes** — times out waiting for `processing.Manager` to create a pipeline for the camera |
+
+One finding from this pass: the first version of the rotation test (submitted
+before this correction) would have kept passing under the "no reconcile on
+credential sync" mutation, because it only checked `KnownCameras` length and
+`Provider.Resolve` — neither of which actually requires `reconcile()` to have
+run again. It has been rewritten (see row H above) to wait for the Supervisor
+to visibly restart (`PacketsReceived` resets, then climbs again after
+reconnecting), which the mutation does break. That is not accepted as a
+guard if it also passes without the protected behavior, so it was fixed
+before being reported here.
 
 ### Tests (§16)
 
