@@ -122,6 +122,104 @@ jobs:
             rm -rf "$stage"
           done
 
+  # Hito Z B6: worker.py's request-handling protocol (health/infer/shutdown),
+  # the Unix-socket transport, and resolve_device's cpu/cuda/auto contract,
+  # all against backend.FakeBackend -- never real Ultralytics/torch/CUDA/a
+  # model file. requirements.txt (ultralytics, pillow) is deliberately NOT
+  # installed here: backend.py imports torch/ultralytics lazily, only
+  # inside the methods a real YOLOBackend.load()/infer() call would reach,
+  # so these tests need nothing beyond the standard library.
+  python-vision-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Vision worker unit tests (FakeBackend, no torch/ultralytics/CUDA)
+        working-directory: deploy/vision-worker
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+
+  # Hito Z B10: automated evidence that package.sh's --require-ffmpeg mode
+  # is genuinely fail-closed, that a package built with ffmpeg present
+  # really bundles it, and that release.yml actually calls the ffmpeg
+  # builder for both architectures before packaging. Deliberately does not
+  # cross-compile a real ffmpeg on every PR -- build-ffmpeg-static.sh needs
+  # Docker+QEMU and is comparatively slow, and release.yml's own use of it
+  # is checked structurally here rather than re-run; a stub binary is
+  # enough to prove the packaging mechanics.
+  package-ffmpeg-fail-closed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.2'
+
+      - name: --require-ffmpeg fails closed when ffmpeg is missing
+        run: |
+          set -euo pipefail
+          DIST_FAIL="$PWD/dist-fail"
+          rm -rf "$DIST_FAIL"
+          mkdir -p "$DIST_FAIL"
+          if ./deploy/appliance/scripts/package.sh --require-ffmpeg fail-check "$DIST_FAIL"; then
+            echo "::error::package.sh --require-ffmpeg succeeded without ffmpeg present -- it must fail closed."
+            exit 1
+          fi
+          echo "confirmed: --require-ffmpeg refuses to package without ffmpeg"
+
+      - name: --require-ffmpeg succeeds and bundles ffmpeg when it is present
+        run: |
+          set -euo pipefail
+          DIST_OK="$PWD/dist-ok"
+          rm -rf "$DIST_OK"
+          mkdir -p "$DIST_OK"
+          for arch in amd64 arm64; do
+            printf '#!/bin/sh\necho stub-ffmpeg\n' > "$DIST_OK/ffmpeg-linux-$arch"
+            chmod +x "$DIST_OK/ffmpeg-linux-$arch"
+          done
+          # package.sh needs an absolute dist-dir: it stages the tarball
+          # contents from a different working directory internally, so a
+          # relative path here would resolve against the wrong cwd (see
+          # the multiarch-artifacts job above, which uses "$PWD/dist" for
+          # the same reason).
+          ./deploy/appliance/scripts/package.sh --require-ffmpeg ok-check "$DIST_OK"
+
+          for arch in amd64 arm64; do
+            artifact="geocam-edge-ok-check-linux-$arch.tar.gz"
+            stage="$(mktemp -d)"
+            tar xzf "$DIST_OK/$artifact" -C "$stage"
+            test -f "$stage/ffmpeg"
+            test -x "$stage/ffmpeg"
+            test -f "$stage/geocam-edge"
+            test -f "$stage/VERSION"
+            test -f "$stage/ARCH"
+            test -d "$stage/scripts"
+            test -d "$stage/systemd"
+            test -d "$stage/config"
+            rm -rf "$stage"
+          done
+          echo "confirmed: a package built with ffmpeg present really includes it"
+
+      - name: release.yml builds static ffmpeg for both architectures before packaging
+        run: |
+          set -euo pipefail
+          f=.github/workflows/release.yml
+          grep -q "build-ffmpeg-static.sh amd64" "$f" || { echo "::error::release.yml does not call build-ffmpeg-static.sh for amd64"; exit 1; }
+          grep -q "build-ffmpeg-static.sh arm64" "$f" || { echo "::error::release.yml does not call build-ffmpeg-static.sh for arm64"; exit 1; }
+          grep -q -- "--require-ffmpeg" "$f" || { echo "::error::release.yml does not run package.sh with --require-ffmpeg"; exit 1; }
+          amd64_line=$(grep -n "build-ffmpeg-static.sh amd64" "$f" | head -1 | cut -d: -f1)
+          arm64_line=$(grep -n "build-ffmpeg-static.sh arm64" "$f" | head -1 | cut -d: -f1)
+          package_line=$(grep -n -- "--require-ffmpeg" "$f" | head -1 | cut -d: -f1)
+          if [ "$amd64_line" -ge "$package_line" ] || [ "$arm64_line" -ge "$package_line" ]; then
+            echo "::error::release.yml must build ffmpeg for both architectures BEFORE calling package.sh"
+            exit 1
+          fi
+          echo "confirmed: release.yml builds ffmpeg for amd64 and arm64 before running package.sh --require-ffmpeg"
+
   # Exercise the Dockerfile's Go build stage for both deployment
   # architectures. arm64 runs through QEMU/Buildx and is explicitly not
   # treated as physical ARM64 runtime validation.

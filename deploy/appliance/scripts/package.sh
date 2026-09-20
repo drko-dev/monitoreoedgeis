@@ -5,7 +5,14 @@
 # systemd unit template, install/update/rollback/uninstall scripts, example
 # config, VERSION and ARCH marker files, and a .sha256 checksum.
 #
-# Usage: package.sh [version] [dist-dir]
+# Usage: package.sh [--require-ffmpeg] [version] [dist-dir]
+#
+# --require-ffmpeg (Hito Z B10): fail closed instead of packaging without
+# ffmpeg. A real release must never publish an appliance that silently
+# lacks ffmpeg — GEOCAM_VIDEO_PIPELINE_ENABLED would then fail at runtime
+# with no warning anyone saw at build time. Local/dev packaging that
+# deliberately skips ffmpeg keeps working exactly as before: this flag is
+# opt-in, so omitting it preserves the previous warn-and-continue behavior.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APPLIANCE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -13,13 +20,29 @@ REPO_ROOT="$(cd "$APPLIANCE_DIR/../.." && pwd)"
 # shellcheck source=lib.sh
 . "$SCRIPT_DIR/lib.sh"
 
-VERSION="${1:-$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo dev)}"
-DIST_DIR="${2:-$REPO_ROOT/dist}"
+REQUIRE_FFMPEG=0
+ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --require-ffmpeg) REQUIRE_FFMPEG=1 ;;
+        *) ARGS+=("$arg") ;;
+    esac
+done
+
+VERSION="${ARGS[0]:-$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo dev)}"
+DIST_DIR="${ARGS[1]:-$REPO_ROOT/dist}"
+
+# Normalize to an absolute path. Packaging below runs `( cd "$STAGE" && tar
+# czf "$ARTIFACT" . )`, so a relative $DIST_DIR/$ARTIFACT would resolve
+# against $STAGE (a throwaway mktemp dir), not against the caller's actual
+# working directory -- silently writing (or failing to write) the tarball
+# somewhere the caller never looks. release.yml called this with a plain
+# "dist" and would have hit exactly that.
+mkdir -p "$DIST_DIR"
+DIST_DIR="$(cd "$DIST_DIR" && pwd)"
 
 log "building geocam-edge $VERSION for linux/amd64 and linux/arm64"
 ( cd "$REPO_ROOT" && make build-linux VERSION="$VERSION" )
-
-mkdir -p "$DIST_DIR"
 
 for arch in amd64 arm64; do
     STAGE="$(mktemp -d)"
@@ -35,6 +58,11 @@ for arch in amd64 arm64; do
         cp "$FFMPEG_BIN" "$STAGE/ffmpeg"
         chmod 0755 "$STAGE/ffmpeg"
         log "bundling static ffmpeg for $arch"
+    elif [ "$REQUIRE_FFMPEG" = "1" ]; then
+        log "ERROR: --require-ffmpeg was set but no static ffmpeg found at $FFMPEG_BIN." \
+            "Run scripts/build-ffmpeg-static.sh $arch first. Refusing to publish an" \
+            "appliance artifact where GEOCAM_VIDEO_PIPELINE_ENABLED would fail at runtime."
+        exit 1
     else
         log "warning: no static ffmpeg found at $FFMPEG_BIN — packaging without it." \
             "Run scripts/build-ffmpeg-static.sh $arch first (requires Docker as a BUILD-time" \
