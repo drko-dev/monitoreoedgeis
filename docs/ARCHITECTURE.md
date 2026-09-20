@@ -1,5 +1,12 @@
 # GEO CAM Edge — Architecture
 
+> **For the current, end-to-end system view, start at
+> `docs/architecture/EDGE_ARCHITECTURE.md`.** This document is preserved as
+> the engineering decision log for the Go core through Hito I (module
+> boundaries, ffmpeg build decisions, measured decode latency, RTSP corpus
+> results) — it is historical detail, not superseded, just not the entry
+> point anymore.
+
 ## Scope of this document
 
 Describes the Go core as it exists today (Hito A) and the target architecture it

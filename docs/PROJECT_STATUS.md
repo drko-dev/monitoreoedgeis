@@ -10,7 +10,7 @@
 | **PROJECT** | GEO CAM Edge |
 | **CURRENT HITO** | Z — Producción/evolución |
 | **STATE** | **HITO Z SOFTWARE CLOSED** — final integration merged |
-| **MAIN** | `b007c88be578487d43a1f0d673567abdd469a37b` (Hito Z closeout; PR #100 merged at `73b9f07`) |
+| **MAIN** | `6617322549e4d9ac815317a0724b92d3e4613045` (verified against `origin/main` for Hito 2A). Hito Z closeout at `b007c88` (PR #100); commits since then are documentation only — no functional code changed (`docs(product): add the physical validation register`, `docs(deploy): clarify GEOCAM_EDGE_RETENTION_EVICT_PENDING scope`) |
 | **SOFTWARE 1.0** | **READY** — final integration CI 7/7 PASS and merged unchanged into `main` |
 | **RELEASE 1.0** | **NOT_VALIDATED** — B11: no real signed `v1.0.0` run yet |
 | **DEPLOYED PROD** | **NO / NO TARGET REGISTERED** |

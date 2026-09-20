@@ -38,6 +38,7 @@ these documents — read them in this order:
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)         | Architecture and technical decisions |
 | [docs/product/COMMERCIAL_MODES.md](docs/product/COMMERCIAL_MODES.md) | What Gateway / Hybrid / Full Edge are, and how far each is verified |
 | [docs/ROADMAP.md](docs/ROADMAP.md)                   | Master backlog A–Z and block status |
+| [docs/README.md](docs/README.md)                     | Full documentation index: runbooks, operations, security, release, physical validation |
 
 ## Why Go
 
