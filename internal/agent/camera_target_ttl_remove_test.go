@@ -99,12 +99,18 @@ func TestG1B_RemoveByInventoryTTL(t *testing.T) {
 	})
 	reconciler = newCameraTargetReconciler(discMod, provider, rtspMgr, "sub", nil)
 
-	// --- Establish a working, targeted camera (same convergence as the
-	// full-pipeline test, condensed) -------------------------------------
+	// --- Setup: reach the precondition (a live, targeted camera)
+	// deterministically, via manual reconcile() calls after each setup
+	// scan — never via onCredentialsSynced's catch-up-rediscovery path,
+	// which is late-credential convergence, a different guard already
+	// covered by TestG1B_FullPipeline_LateCredentialConvergence. Doing it
+	// that way here would make this test's setup itself depend on
+	// OnScanSuccess, which is exactly what must NOT be true before the
+	// removal phase below. -------------------------------------------
 	if err := discMod.Rediscover(context.Background()); err != nil {
-		t.Fatalf("Rediscover (initial): %v", err)
+		t.Fatalf("Rediscover (learn candidate key, no credential yet): %v", err)
 	}
-	reconciler.reconcile()
+	reconciler.reconcile() // no-op: still auth-required, no credential
 	candidateKey := discMod.Engine().Inventory().List()[0].StableIdentity
 
 	if _, err := store.Apply([]cameracreds.Credential{{
@@ -117,11 +123,18 @@ func TestG1B_RemoveByInventoryTTL(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("Store.Apply: %v", err)
 	}
-	reconciler.onCredentialsSynced()
+	// An ordinary scan, now that a credential resolves: enrichSingleDevice
+	// succeeds over WS-Security within this single scan (no catch-up
+	// rediscovery needed), so the manual reconcile() right after it is
+	// enough to deterministically populate the target.
+	if err := discMod.Rediscover(context.Background()); err != nil {
+		t.Fatalf("Rediscover (with credential): %v", err)
+	}
+	reconciler.reconcile()
 
-	g1bWaitFor(t, "camera target to appear", 3*time.Second, func() bool {
-		return len(rtspMgr.KnownCameras()) == 1
-	})
+	if got := rtspMgr.KnownCameras(); len(got) != 1 || got[0] != candidateKey {
+		t.Fatalf("setup failed: KnownCameras = %v, want exactly [%s]", got, candidateKey)
+	}
 
 	// A single miss before TTL must NOT remove the camera: back-date it by
 	// less than DeviceTTL, run a normal (still-responding) scan, and
@@ -145,12 +158,24 @@ func TestG1B_RemoveByInventoryTTL(t *testing.T) {
 	discModSilent := newDiscModFor(silentEngine)
 	reconciler = newCameraTargetReconciler(discModSilent, provider, rtspMgr, "sub", nil)
 
+	// Precondition for the removal phase under test: the camera is still
+	// live in rtsp.Manager right before the silent scan runs.
+	if got := rtspMgr.KnownCameras(); len(got) != 1 || got[0] != candidateKey {
+		t.Fatalf("precondition failed: KnownCameras = %v before the silent scan, want exactly [%s]", got, candidateKey)
+	}
+
+	// Deliberately no manual reconciler.reconcile() call here. The only
+	// thing that may remove the camera from this point on is the real
+	// production path: PruneExpired (inside RunScan) -> OnScanSuccess ->
+	// reconcile -> SetTargets -> Supervisor stopped. A manual reconcile
+	// call after Rediscover would make this pass even if OnScanSuccess
+	// were silently broken — see the sensitivity check below, which
+	// exists specifically to catch that.
 	if err := discModSilent.Rediscover(context.Background()); err != nil {
 		t.Fatalf("Rediscover (silent, past TTL): %v", err)
 	}
-	reconciler.reconcile()
 
-	g1bWaitFor(t, "camera target to be removed after TTL expiry", 3*time.Second, func() bool {
+	g1bWaitFor(t, "camera target to be removed after TTL expiry via OnScanSuccess alone", 3*time.Second, func() bool {
 		return len(rtspMgr.KnownCameras()) == 0
 	})
 	if d := inv.Get(candidateKey); d != nil {
