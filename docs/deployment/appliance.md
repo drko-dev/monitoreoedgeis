@@ -206,9 +206,13 @@ layer on top of standard base Linux distributions (Debian 12 minimal, Ubuntu
      > [!NOTE]
      > El appliance tarball completo (que incluye el binario `geocam-edge`,
      > `scripts/`, `systemd/`, `config/`, `VERSION` y `ARCH`) es el generado por
-     > `deploy/appliance/scripts/package.sh`. No debe confundirse con el tarball de
-     > GitHub Release P6 actual (`.github/workflows/release.yml`), que hoy empaqueta
-     > únicamente el binario suelto.
+     > `deploy/appliance/scripts/package.sh`. El GitHub Release actual
+     > (`.github/workflows/release.yml`) **invoca ese mismo `package.sh`**, así que
+     > publica el tarball completo de appliance — no un binario suelto. Lo que
+     > **no** incluye es el `ffmpeg` estático: `release.yml` no ejecuta
+     > `build-ffmpeg-static.sh`, de modo que hay que provisionar `ffmpeg` aparte
+     > o el pipeline de video no arrancará (`package.sh` avisa de esto al
+     > empaquetar). Ver `docs/product/RELEASE_1_0_READINESS.md`.
    - Execute installation: `sudo GEOCAM_VERSION=<version> ./scripts/install.sh ./geocam-edge ./ffmpeg`.
    - This writes:
      - Versioned binaries and helper scripts in `/opt/geocam-edge/releases/<version>/`.
