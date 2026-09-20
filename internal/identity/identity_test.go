@@ -151,6 +151,50 @@ func TestLoadValidFileRoundTrip(t *testing.T) {
 	}
 }
 
+// TestLoad_SurvivesLeftoverTmpFromAbruptKill (Y2): a process killed between
+// os.CreateTemp and the final os.Rename in save() leaves a randomly-named
+// ".identity-*.json.tmp" file behind -- the deterministic proxy this task
+// asks for in place of a real power cut. Load must never pick it up, and
+// the last durably-committed identity.json must load exactly as before.
+func TestLoad_SurvivesLeftoverTmpFromAbruptKill(t *testing.T) {
+	dir := t.TempDir()
+
+	first, err := Load(dir, "")
+	if err != nil {
+		t.Fatalf("initial Load() error = %v", err)
+	}
+	before, err := os.ReadFile(identityPath(dir))
+	if err != nil {
+		t.Fatalf("reading identity.json after first Load: %v", err)
+	}
+
+	// Simulate the abrupt kill: a partial temp file survives, the rename
+	// that would have replaced identity.json never happened.
+	leftover, err := os.CreateTemp(dir, ".identity-*.json.tmp")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	if _, err := leftover.WriteString(`{"edge_id":"garbage`); err != nil {
+		t.Fatal(err)
+	}
+	leftover.Close()
+
+	second, err := Load(dir, "")
+	if err != nil {
+		t.Fatalf("Load() after leftover tmp file: %v", err)
+	}
+	if second.EdgeID != first.EdgeID {
+		t.Errorf("EdgeID changed after a leftover tmp file: %q -> %q", first.EdgeID, second.EdgeID)
+	}
+	after, err := os.ReadFile(identityPath(dir))
+	if err != nil {
+		t.Fatalf("reading identity.json after second Load: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("identity.json content changed:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
 func TestUUIDGenerationIsUnique(t *testing.T) {
 	a, err := newUUIDv4()
 	if err != nil {

@@ -26,6 +26,10 @@ func writeFileAtomic(dataDir, name string, data []byte) error {
 		tmp.Close()
 		return fmt.Errorf("cameracreds: write temp file: %w", err)
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("cameracreds: sync temp file: %w", err)
+	}
 	if err := tmp.Chmod(0o600); err != nil {
 		tmp.Close()
 		return fmt.Errorf("cameracreds: chmod temp file: %w", err)

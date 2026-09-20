@@ -107,6 +107,10 @@ func writeAtomic(dataDir string, rec fileRecord) error {
 		tmp.Close()
 		return fmt.Errorf("identity: write temp file: %w", err)
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("identity: sync temp file: %w", err)
+	}
 	if err := tmp.Chmod(0o600); err != nil {
 		tmp.Close()
 		return fmt.Errorf("identity: chmod temp file: %w", err)

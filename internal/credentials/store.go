@@ -119,6 +119,10 @@ func Save(dataDir string, creds Credentials) error {
 		tmp.Close()
 		return fmt.Errorf("credentials: write temp file: %w", err)
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("credentials: sync temp file: %w", err)
+	}
 	if err := tmp.Chmod(0o600); err != nil {
 		tmp.Close()
 		return fmt.Errorf("credentials: chmod temp file: %w", err)
