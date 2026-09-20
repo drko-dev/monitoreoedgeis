@@ -681,15 +681,22 @@ work from PRs #69 (camera scale + CPU/RAM), #70 (decode + inference) and #72
   physically.
 - Edge PROD: **N/A** — no real production Edge target exists. SaaS PROD: **NOT TOUCHED**.
 
-## Z — Producción/evolución
+## Z — Producción/evolución — SOFTWARE CLOSED / FIELD VALIDATION PENDING
 
-- Z1. MVP residencial.
-- Z2. MVP corporativo.
-- Z3. Piloto 5-10 cámaras.
-- Z4. Multi-site.
-- Z5. Soporte.
-- Z6. 1.0.
-- Z7. Hardware certificado.
-- Z8. Gateway comercial.
-- Z9. Hybrid comercial.
-- Z10. Full Edge comercial.
+Integrated through PR #100 and merged to `main @ 73b9f07fbab3a9a57f8bb652fdec9632a6cb38cc`.
+Final canonical CI on PR #100: **7/7 PASS**.
+
+- **Z1. MVP residencial — DEFINED.** Product profile and deployment assumptions documented; no field claim implied.
+- **Z2. MVP corporativo — DEFINED.** Corporate profile/networking assumptions documented; DVR/NVR and routed-subnet field behaviour remain NOT_VALIDATED.
+- **Z3. Piloto 5–10 cámaras — PLAN READY / NOT EXECUTED.** The executable pilot plan exists; no physical pilot result is claimed.
+- **Z4. Multi-site — DEFINED.** Multi-site boundary and SaaS/Edge responsibilities documented.
+- **Z5. Soporte — DEFINED.** Support model and operational boundaries documented.
+- **Z6. Software 1.0 — READY.** Functional blockers B1/G1, B2, B3, B4, B5, B6, B7, B8, B10 and B12 are closed on `main`.
+- **Z7. Hardware certificado — NO HARDWARE CERTIFIED.** Certification protocol/framework exists; physical certification remains a separate field-validation task.
+- **Z8. Gateway comercial — PROFILE DEFINED / IMPLEMENTED, FIELD VALIDATION PENDING.**
+- **Z9. Hybrid comercial — PROFILE DEFINED / IMPLEMENTED, FIELD VALIDATION PENDING.** No quantitative bandwidth-saving claim.
+- **Z10. Full Edge comercial — PROFILE DEFINED / IMPLEMENTED, FIELD VALIDATION PENDING.** Real PyTorch/CUDA/hardware remain NOT_VALIDATED.
+
+Release/deployment are separate from Software 1.0:
+- **B11 / RELEASE 1.0:** NOT_VALIDATED until a real signed `v1.0.0` tag workflow runs.
+- **DEPLOYED PROD:** NO / NO TARGET REGISTERED.
