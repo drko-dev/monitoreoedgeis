@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync/atomic"
+	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
@@ -19,6 +20,10 @@ type ServiceConfig struct {
 	DeviceMode  DeviceMode
 	Limits      LimitsConfig
 	JPEGQuality int
+	// Retention, when non-nil, bounds the local event metadata and JPEG
+	// evidence trees (Hito Z B3-A). Nil means no retention, which is exactly
+	// the behaviour before retention existed.
+	Retention *RetentionManager
 }
 
 // Service coordinates Full Edge local event creation, hardware management, limits, and evidence storage.
@@ -29,6 +34,7 @@ type Service struct {
 	store      *EventStore
 	evidence   *EvidenceManager
 	healthSink HealthSink
+	retention  *RetentionManager
 	logger     *slog.Logger
 
 	localDetections    atomic.Int64
@@ -58,11 +64,33 @@ func NewService(cfg ServiceConfig, store *EventStore, evidence *EvidenceManager,
 		store:      store,
 		evidence:   evidence,
 		healthSink: hs,
+		retention:  cfg.Retention,
 		logger:     logger,
+	}
+	// Bound pre-existing growth once at startup. Deliberately non-fatal: a
+	// retention problem must never stop the agent from starting, and the
+	// failing tree reports itself instead.
+	if s.retention != nil && s.retention.RetentionEnabled() {
+		// logger is optional on this constructor (existing callers pass nil),
+		// so every log here is guarded rather than dereferencing it.
+		rep, sweepErr := s.retention.Sweep(time.Now().UTC())
+		if logger != nil {
+			if sweepErr != nil {
+				logger.Warn("fulledge retention: startup sweep reported a failure", "error", sweepErr)
+			} else if rep.EventsEvicted > 0 || rep.CapturesEvicted > 0 {
+				logger.Info("fulledge retention: startup sweep reclaimed storage",
+					"events_evicted", rep.EventsEvicted,
+					"captures_evicted", rep.CapturesEvicted,
+					"bytes_reclaimed", rep.BytesReclaimed)
+			}
+		}
 	}
 	s.publishStatus()
 	return s
 }
+
+// Retention exposes the retention manager (nil when retention is unconfigured).
+func (s *Service) Retention() *RetentionManager { return s.retention }
 
 // Hardware returns the hardware manager.
 func (s *Service) Hardware() *HardwareManager {

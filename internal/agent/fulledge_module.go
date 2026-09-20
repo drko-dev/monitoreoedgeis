@@ -56,6 +56,30 @@ func newFullEdgeService(cfg *config.Config, ident identity.Identity, creds crede
 		siteID = creds.SiteID
 	}
 
+	// Local retention (Hito Z B3-A): bounds the event metadata and JPEG
+	// evidence trees. Every bound is 0 = disabled, so an appliance that
+	// configures nothing retains everything exactly as before. A construction
+	// failure is non-fatal: retention must never prevent Full Edge from running.
+	var retentionMgr *fulledge.RetentionManager
+	if rm, rmErr := fulledge.NewRetentionManager(fulledge.RetentionConfig{
+		DataDir: cfg.DataDir,
+		Events: fulledge.RetentionBounds{
+			MaxCount: cfg.RetentionMaxEvents,
+			MaxBytes: cfg.RetentionMaxEventBytes,
+			MaxAge:   cfg.RetentionMaxEventAge,
+		},
+		Captures: fulledge.RetentionBounds{
+			MaxCount: cfg.RetentionMaxCaptures,
+			MaxBytes: cfg.RetentionMaxCaptureBytes,
+			MaxAge:   cfg.RetentionMaxCaptureAge,
+		},
+		Logger: log,
+	}); rmErr != nil {
+		log.Warn("full edge: local retention disabled", slog.Any("error", rmErr))
+	} else {
+		retentionMgr = rm
+	}
+
 	svcCfg := fulledge.ServiceConfig{
 		EdgeID:   ident.EdgeID,
 		TenantID: tenantID,
@@ -67,6 +91,7 @@ func newFullEdgeService(cfg *config.Config, ident identity.Identity, creds crede
 		DeviceMode:  devMode,
 		Limits:      limitsCfg,
 		JPEGQuality: cfg.CloudJPEGQuality,
+		Retention:   retentionMgr,
 	}
 
 	return fulledge.NewService(svcCfg, store, evidenceMgr, hwMgr, limitsMgr, reporter, log)

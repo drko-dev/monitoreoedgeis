@@ -1,6 +1,9 @@
 # B3 — Bounded Full Edge Retention: audit and implementation design
 
-> **STATUS: AUDIT COMPLETE · IMPLEMENTATION NOT STARTED · B3 STILL OPEN.**
+> **STATUS: B3-A IMPLEMENTED (events + captures) · B3 STILL OPEN (clips).**
+> Events and JPEG evidence are now bounded and evictable; MP4 clips are not yet
+> (B3-B), and the free-disk gate still does not cover clips. B3 is therefore
+> **not** closed.
 > This document is the persisted audit for B3. It contains **no implemented
 > retention**, and nothing here may be read as B3 being closed. It exists so
 > implementation can proceed from the repository alone.
@@ -133,6 +136,12 @@ omits `models/`, `run/`, `ota/`).
 
 ## 5. Design
 
+> **Implemented in B3-A** for the events and captures trees:
+> `internal/fulledge/retention.go` (`RetentionManager`), wired from
+> `internal/agent/fulledge_module.go` through `fulledge.ServiceConfig.Retention`,
+> with a startup sweep in `NewService` and a rate-limited `MaybeSweep` for the
+> write path. The clip tree and the clip free-disk gate remain open (B3-B).
+
 **One retention component, three owned trees, no new daemon.**
 
 A `RetentionManager` owning a validated root per tree, with:
@@ -186,19 +195,28 @@ Explicit knobs, `0 = disabled`, following the existing scalar convention
 (`strings.TrimSpace(os.Getenv(...))`, parse, range-check with an error naming
 the raw value) and using one word per group like `GEOCAM_VIDEO_RINGBUFFER_SIZE`:
 
+**Shipped in B3-A** (six knobs, all `>= 0` with `0 = disabled` — deliberately
+unlike `GEOCAM_EDGE_MAX_CLIP_SIZE_BYTES`, whose parse rejects 0 and so cannot
+express "disabled" from the environment):
+
 ```
-GEOCAM_EDGE_RETENTION_MAX_EVENTS            int64, 0 = disabled
-GEOCAM_EDGE_RETENTION_MAX_EVENT_BYTES       int64, 0 = disabled
+GEOCAM_EDGE_RETENTION_MAX_EVENTS            int64,    0 = disabled
+GEOCAM_EDGE_RETENTION_MAX_EVENT_BYTES       int64,    0 = disabled
 GEOCAM_EDGE_RETENTION_MAX_EVENT_AGE         duration, 0 = disabled
-GEOCAM_EDGE_RETENTION_MAX_CAPTURES          int64, 0 = disabled
-GEOCAM_EDGE_RETENTION_MAX_CAPTURE_BYTES     int64, 0 = disabled
+GEOCAM_EDGE_RETENTION_MAX_CAPTURES          int64,    0 = disabled
+GEOCAM_EDGE_RETENTION_MAX_CAPTURE_BYTES     int64,    0 = disabled
 GEOCAM_EDGE_RETENTION_MAX_CAPTURE_AGE       duration, 0 = disabled
-GEOCAM_EDGE_RETENTION_MAX_CLIPS             int64, 0 = disabled
-GEOCAM_EDGE_RETENTION_MAX_CLIP_BYTES        int64, 0 = disabled
-GEOCAM_EDGE_RETENTION_MAX_CLIP_AGE          duration, 0 = disabled
-GEOCAM_EDGE_RETENTION_EVICT_PENDING         bool, default false
-GEOCAM_EDGE_RETENTION_SWEEP_INTERVAL        duration, 0 = sweep on write only
 ```
+
+**Deliberately NOT shipped: an "evict pending" knob.** The design sketch offered
+one; the B3-A brief requires that metadata still pending sync is *never* evicted,
+so this is a safety rule rather than a configurable policy. The clip knobs are
+B3-B.
+
+A separately configurable sweep interval was also not needed: the manager
+exposes `MaybeSweep(now, minInterval)` so the caller controls cadence, and the
+sweep trigger is a startup sweep plus a rate-limited call on the write path —
+no new goroutine.
 
 **No `7 days`, no `30 days`, no GB figure, no per-tenant quota, no SLA is
 invented anywhere.** Every bound ships disabled until an operator sets it.

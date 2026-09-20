@@ -150,6 +150,25 @@ type Config struct {
 	// internal/agent. Zero means "not configured": no invented commercial
 	// default here, only a real one wired to match the SaaS's actual limit.
 	EdgeMaxClipSizeBytes int64
+	// Full Edge local retention bounds (Hito Z B3-A). These bound the two
+	// artifact kinds whose lifetime nothing else governs: the event metadata
+	// records and the JPEG evidence captures. MP4 clips are a separate slice.
+	//
+	// Every bound is 0 = DISABLED, and there is deliberately no production
+	// default: a retention period or byte quota is a business decision this
+	// package has no basis to invent (same rule as CloudBufferMaxBytes and
+	// EdgeMaxClipSizeBytes). An unconfigured appliance therefore retains
+	// everything, exactly as it did before retention existed.
+	//
+	// Retention never deletes evidence that is still referenced by a retained
+	// event record, nor event metadata still pending sync -- see
+	// internal/fulledge/retention.go.
+	RetentionMaxEvents       int64
+	RetentionMaxEventBytes   int64
+	RetentionMaxEventAge     time.Duration
+	RetentionMaxCaptures     int64
+	RetentionMaxCaptureBytes int64
+	RetentionMaxCaptureAge   time.Duration
 }
 
 // HybridROI is one normalized (0..1) region of interest parsed from
@@ -792,6 +811,48 @@ func Load() (*Config, error) {
 	// fixed path, so GEOCAM_DATA_DIR alone still relocates them.
 	cfg.EdgeYOLOModelsDir = filepath.Join(cfg.DataDir, DefaultEdgeYOLOModelsDirName)
 	cfg.EdgeYOLOSocketPath = filepath.Join(cfg.DataDir, "run", DefaultEdgeYOLOSocketName)
+
+	// Full Edge retention bounds (B3-A). All 0 = disabled. Unlike
+	// GEOCAM_EDGE_MAX_CLIP_SIZE_BYTES these must be able to express "disabled"
+	// from the environment, so the range is >= 0 rather than > 0.
+	for _, k := range []struct {
+		env string
+		dst *int64
+	}{
+		{"GEOCAM_EDGE_RETENTION_MAX_EVENTS", &cfg.RetentionMaxEvents},
+		{"GEOCAM_EDGE_RETENTION_MAX_EVENT_BYTES", &cfg.RetentionMaxEventBytes},
+		{"GEOCAM_EDGE_RETENTION_MAX_CAPTURES", &cfg.RetentionMaxCaptures},
+		{"GEOCAM_EDGE_RETENTION_MAX_CAPTURE_BYTES", &cfg.RetentionMaxCaptureBytes},
+	} {
+		if raw := strings.TrimSpace(os.Getenv(k.env)); raw != "" {
+			v, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid %s %q: %w", k.env, raw, err)
+			}
+			if v < 0 {
+				return nil, fmt.Errorf("invalid %s %q: must be >= 0 (0 disables retention)", k.env, raw)
+			}
+			*k.dst = v
+		}
+	}
+	for _, k := range []struct {
+		env string
+		dst *time.Duration
+	}{
+		{"GEOCAM_EDGE_RETENTION_MAX_EVENT_AGE", &cfg.RetentionMaxEventAge},
+		{"GEOCAM_EDGE_RETENTION_MAX_CAPTURE_AGE", &cfg.RetentionMaxCaptureAge},
+	} {
+		if raw := strings.TrimSpace(os.Getenv(k.env)); raw != "" {
+			v, err := time.ParseDuration(raw)
+			if err != nil {
+				return nil, fmt.Errorf("invalid %s %q: %w", k.env, raw, err)
+			}
+			if v < 0 {
+				return nil, fmt.Errorf("invalid %s %q: must be >= 0 (0 disables retention)", k.env, raw)
+			}
+			*k.dst = v
+		}
+	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_WORKER_CMD")); raw != "" {
 		cfg.EdgeYOLOWorkerCmd = raw
