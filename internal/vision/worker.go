@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -336,6 +337,9 @@ func (w *Worker) sleep(ctx context.Context, d time.Duration) bool {
 }
 
 func (w *Worker) spawnAndHandshake(ctx context.Context) error {
+	if err := ensureSocketDir(w.cfg.SocketPath); err != nil {
+		return err
+	}
 	_ = os.Remove(w.cfg.SocketPath) // stale socket from a prior crashed run
 
 	args := append([]string{}, w.cfg.WorkerArgs...)
@@ -387,6 +391,37 @@ func (w *Worker) spawnAndHandshake(ctx context.Context) error {
 	w.deviceRequested = resp.DeviceRequested
 	w.modelsLoaded = resp.ModelsLoaded
 	w.mu.Unlock()
+	return nil
+}
+
+// ensureSocketDir creates the parent directory of the vision worker's Unix
+// socket.
+//
+// The Go side owns the socket path, so it owns provisioning it. Before this
+// existed, nothing created the default directory: the socket defaults to
+// $GEOCAM_DATA_DIR/run/vision-worker.sock (internal/config), install.sh
+// provisions $DATA_DIR, $DATA_DIR/ota and $DATA_DIR/ota/pending but not run/,
+// the Python worker only bind()s the path (it does not makedirs), and this
+// package only removed a *stale* socket. On a fresh appliance the first spawn
+// therefore failed with ENOENT, the worker never reached ready, /readyz stayed
+// 503 forever, and update.sh's own readiness check would roll the release back.
+// Every test used t.TempDir() for models and sockets, so nothing exercised the
+// real default path.
+//
+// 0700 matches the other per-instance state the agent creates (the fulledge
+// event store's directory) and keeps the socket reachable only by the service
+// user. An already-existing directory is left exactly as it is.
+func ensureSocketDir(socketPath string) error {
+	if socketPath == "" {
+		return nil
+	}
+	dir := filepath.Dir(socketPath)
+	if dir == "" || dir == "." || dir == string(filepath.Separator) {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create vision worker socket directory %s: %w", dir, err)
+	}
 	return nil
 }
 
