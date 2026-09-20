@@ -11,9 +11,11 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/drko-dev/monitoreoedgeis/internal/cameracreds"
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/control"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
+	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
 	"github.com/drko-dev/monitoreoedgeis/internal/edgebacklog"
 	"github.com/drko-dev/monitoreoedgeis/internal/evidence"
 	"github.com/drko-dev/monitoreoedgeis/internal/fulledge"
@@ -40,23 +42,30 @@ type Agent struct {
 	healthGate     *agentHealthGate
 	// livenessProbe is the health HTTP surface itself, used by the systemd
 	// watchdog to decide whether the process may still be considered alive.
-	livenessProbe    livenessProbe
-	heartbeatErr     error
-	discoveryErr     error
-	controlErr       error
-	remoteConfigErr  error
-	localEventsErr   error
-	rtspManager      *rtsp.Manager
-	videoManager     *processing.Manager
-	visionSink       *vision.Sink
-	modelManager     *vision.ModelManager
-	runtimeApplier   remoteconfig.Applier
-	remoteConfig     *remoteconfig.Module
-	control          *control.Module
-	fullEdgeService  *fulledge.Service
-	fullEdgeConsumer *fullEdgeEventConsumer
-	localEvents      *edgebacklog.Backlog
-	modules          *moduleManager
+	livenessProbe   livenessProbe
+	heartbeatErr    error
+	discoveryErr    error
+	cameraCredsErr  error
+	controlErr      error
+	remoteConfigErr error
+	localEventsErr  error
+	rtspManager     *rtsp.Manager
+	videoManager    *processing.Manager
+	// discovery and cameraCredsProvider are Hito Z G1-B's lifecycle/test
+	// references (never exposed via /status): discovery is nil when
+	// GEOCAM_DISCOVERY_ENABLED is false, cameraCredsProvider is nil when
+	// the Edge is unenrolled or has no SaaS URL configured.
+	discovery           *discovery.Module
+	cameraCredsProvider *cameracreds.Provider
+	visionSink          *vision.Sink
+	modelManager        *vision.ModelManager
+	runtimeApplier      remoteconfig.Applier
+	remoteConfig        *remoteconfig.Module
+	control             *control.Module
+	fullEdgeService     *fulledge.Service
+	fullEdgeConsumer    *fullEdgeEventConsumer
+	localEvents         *edgebacklog.Backlog
+	modules             *moduleManager
 }
 
 // New wires the agent from configuration. It performs no network I/O beyond
@@ -104,11 +113,6 @@ func New(cfg *config.Config) *Agent {
 	hb, hbErr := newHeartbeatModule(cfg, ident, creds, reporter, a.healthGate, otaModule, logging.Component(log, "heartbeat"))
 	if hb != nil {
 		mods = append(mods, hb)
-	}
-
-	disc, discErr := newDiscoveryModule(cfg, creds, reporter, logging.Component(log, "discovery"))
-	if disc != nil {
-		mods = append(mods, disc)
 	}
 
 	localEvents, localEventsErr := newLocalEventsModule(cfg, creds, reporter, logging.Component(log, "local-events"))
@@ -288,6 +292,61 @@ func New(cfg *config.Config) *Agent {
 		}
 	}
 
+	// Hito Z G1-B: camera credentials, discovery, and the target reconciler
+	// that connects them to RTSP are all constructed here, deliberately
+	// after the RTSP/video pipeline block above. moduleManager starts
+	// modules in append order and stops them in reverse (see modules.go),
+	// so appending camCredsMod and disc to mods only now — instead of at
+	// their previous position near the top of this function — is what
+	// guarantees RTSP+processing are already running before either one can
+	// drive a reconciliation, and that both stop before RTSP tears down.
+	//
+	// reconciler is forward-declared because discovery/cameracreds need
+	// their success callbacks wired in at construction time, but the
+	// reconciler itself needs the constructed *discovery.Module and
+	// *cameracreds.Provider to read from. The closures below only ever run
+	// from background goroutines started by Start() (called later, from
+	// Run()), long after reconciler is assigned below — never during New()
+	// itself, so there is no race on this forward reference.
+	var reconciler *cameraTargetReconciler
+	resolveCameraCredential := func(candidateKey string) (string, string, bool) {
+		if reconciler == nil {
+			return "", "", false
+		}
+		return reconciler.resolve(candidateKey)
+	}
+	onCredentialsSynced := func() {
+		if reconciler != nil {
+			reconciler.onCredentialsSynced()
+		}
+	}
+	onDiscoverySuccess := func() {
+		if reconciler != nil {
+			reconciler.onDiscoverySuccess()
+		}
+	}
+
+	camCredsMod, camCredsProvider, camCredsErr := newCameraCredsModule(cfg, creds, logging.Component(log, "cameracreds"), onCredentialsSynced)
+	a.cameraCredsProvider = camCredsProvider
+
+	disc, discErr := newDiscoveryModule(cfg, creds, reporter, logging.Component(log, "discovery"), resolveCameraCredential, onDiscoverySuccess)
+	a.discovery = disc
+
+	reconciler = newCameraTargetReconciler(disc, camCredsProvider, a.rtspManager, cfg.StreamRole, logging.Component(log, "camera-target-reconciler"))
+
+	// Camera credentials must start after RTSP/video (see above) and, among
+	// themselves, before discovery: a late-arriving credential's own
+	// success callback can trigger a catch-up rediscovery (section 6), so
+	// the credential subsystem being already running when discovery starts
+	// its own loops avoids a startup-order edge case, though neither
+	// module actually depends on the other's Start having run yet.
+	if camCredsMod != nil {
+		mods = append(mods, camCredsMod)
+	}
+	if disc != nil {
+		mods = append(mods, disc)
+	}
+
 	remoteConfig, remoteConfigErr := newRemoteConfigModule(cfg, creds, reporter, a.runtimeApplier, logging.Component(log, "remote-config"))
 	a.remoteConfig = remoteConfig
 
@@ -299,6 +358,7 @@ func New(cfg *config.Config) *Agent {
 
 	a.heartbeatErr = hbErr
 	a.discoveryErr = discErr
+	a.cameraCredsErr = camCredsErr
 	a.controlErr = controlErr
 	a.remoteConfigErr = remoteConfigErr
 	a.localEventsErr = localEventsErr
@@ -328,6 +388,17 @@ func (a *Agent) Health() *health.Reporter { return a.health }
 
 // RTSPManager exposes the RTSP connectivity manager (nil if connectivity disabled).
 func (a *Agent) RTSPManager() *rtsp.Manager { return a.rtspManager }
+
+// Discovery exposes the discovery module (nil if GEOCAM_DISCOVERY_ENABLED
+// is false), for lifecycle/tests only (Hito Z G1-B).
+func (a *Agent) Discovery() *discovery.Module { return a.discovery }
+
+// CameraCredsProvider exposes the camera-credentials resolver (nil if the
+// Edge is unenrolled or has no SaaS URL configured), for lifecycle/tests
+// only (Hito Z G1-B). It is never serialized into /status: Provider.Resolve
+// returns plaintext passwords, and no accessor on Agent turns this into a
+// status/observability surface.
+func (a *Agent) CameraCredsProvider() *cameracreds.Provider { return a.cameraCredsProvider }
 
 // VideoManager exposes the video pipeline manager (nil if the video
 // pipeline or RTSP connectivity is disabled).
@@ -408,6 +479,14 @@ func (a *Agent) Run(ctx context.Context) error {
 	case a.discoveryErr != nil:
 		a.log.Error("agent will not become ready: discovery module could not be built",
 			slog.Any("error", a.discoveryErr))
+		a.healthGate.markStartupDegraded()
+	case a.cameraCredsErr != nil:
+		// A corrupt local master key or credentials cache (see
+		// cameracreds.LoadOrCreateMasterKey/OpenStore) surfaces here,
+		// fail-closed: never silently regenerated or deleted. The local
+		// health surface stays reachable for diagnosis either way.
+		a.log.Error("agent will not become ready: camera credentials could not be built",
+			slog.Any("error", a.cameraCredsErr))
 		a.healthGate.markStartupDegraded()
 	case a.controlErr != nil:
 		a.log.Error("agent will not become ready: control module could not be built",

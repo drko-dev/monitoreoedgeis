@@ -13,11 +13,20 @@ import (
 
 // newDiscoveryModule constructs the discovery agent module according to configuration.
 // If discovery is disabled via GEOCAM_DISCOVERY_ENABLED=false, it returns (nil, nil).
+//
+// resolve and onScanSuccess are Hito Z G1-B's camera-target wiring hooks:
+// resolve lets the engine retry an auth-required device over WS-Security
+// once a camera credential is available (nil preserves the previous
+// anonymous-only behavior), and onScanSuccess is called after every
+// successful scan so the caller's reconciler can apply fresh targets. Both
+// are optional; passing nil for either is safe.
 func newDiscoveryModule(
 	cfg *config.Config,
 	creds credentials.Credentials,
 	reporter *health.Reporter,
 	log *slog.Logger,
+	resolve discovery.CredentialResolver,
+	onScanSuccess func(),
 ) (*discovery.Module, error) {
 	if !cfg.DiscoveryEnabled {
 		log.Info("discovery disabled: GEOCAM_DISCOVERY_ENABLED is false")
@@ -32,6 +41,7 @@ func newDiscoveryModule(
 		cfg.DiscoveryTimeout,
 		log,
 	)
+	engine.SetCredentialResolver(resolve)
 
 	var client discovery.TransportClient
 	if cfg.SaaSURL != "" && creds.IsEnrolled() && creds.Credential != "" && creds.DeviceID != "" {
@@ -43,13 +53,14 @@ func newDiscoveryModule(
 	}
 
 	return discovery.NewModule(discovery.ModuleOptions{
-		Engine:       engine,
-		Client:       client,
-		DeviceID:     creds.DeviceID,
-		Credential:   creds.Credential,
-		Interval:     cfg.DiscoveryInterval,
-		PullInterval: discovery.DefaultPullInterval,
-		Log:          log,
-		OnStatus:     reporter.SetDiscoveryStatus,
+		Engine:        engine,
+		Client:        client,
+		DeviceID:      creds.DeviceID,
+		Credential:    creds.Credential,
+		Interval:      cfg.DiscoveryInterval,
+		PullInterval:  discovery.DefaultPullInterval,
+		Log:           log,
+		OnStatus:      reporter.SetDiscoveryStatus,
+		OnScanSuccess: onScanSuccess,
 	})
 }

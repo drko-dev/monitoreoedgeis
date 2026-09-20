@@ -275,7 +275,13 @@ func (c *Client) GetVideoSources(ctx context.Context, mediaXAddr string) ([]Vide
 	if err != nil {
 		return nil, err
 	}
+	return parseVideoSourcesResponse(respBytes), nil
+}
 
+// parseVideoSourcesResponse is the shared GetVideoSources(Response) parser
+// behind both the anonymous and WS-Security-authenticated variants, so the
+// two never drift.
+func parseVideoSourcesResponse(respBytes []byte) []VideoSource {
 	var sources []VideoSource
 	dec := xml.NewDecoder(bytes.NewReader(respBytes))
 	dec.Strict = false
@@ -306,7 +312,7 @@ func (c *Client) GetVideoSources(ctx context.Context, mediaXAddr string) ([]Vide
 		}
 	}
 
-	return sources, nil
+	return sources
 }
 
 // GetProfiles queries media profiles on the media service.

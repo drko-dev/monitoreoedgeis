@@ -13,6 +13,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -24,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/drko-dev/monitoreoedgeis/internal/cameracreds"
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
@@ -535,11 +537,48 @@ func TestW8_RestartReusesDurableIdentityAndResetsPerRunState(t *testing.T) {
 		t.Errorf("uptime_seconds after restart = %d, want it reset below process A's %d", uptimeB, uptimeA)
 	}
 
-	// Nothing invented durable camera-credential state: internal/cameracreds is
-	// not wired into the agent runtime, so a restart must not have created it.
+	// Hito Z G1-B: internal/cameracreds is now wired into the agent runtime
+	// for an enrolled Edge with a SaaS URL configured (see
+	// newCameraCredsModule) — which this test's config is, via w5Enroll.
+	// camera_master.key existing here is therefore expected product
+	// behavior, not an invented side effect: LoadOrCreateMasterKey creates
+	// it eagerly (never lazily on first successful sync), exactly like
+	// identity.json/credentials.json are durable local state.
+	//
+	// camera_credentials.json is deliberately NOT asserted here: w5SaaS
+	// (see newW5SaaS.handle) answers every request with 503, so the
+	// camera-credentials sync never succeeds and Store.Apply — the only
+	// thing that writes that file — never runs. That is Syncer.Sync's
+	// correct, documented contract (a transport failure leaves the cache
+	// exactly as it was), not a gap in this wiring.
+	//
+	// See TestW8_UnenrolledRestartNeverCreatesCameraCredentialState for the
+	// complementary case, where neither file must ever appear.
+	if _, err := os.Stat(filepath.Join(dataDir, "camera_master.key")); err != nil {
+		t.Errorf("camera_master.key does not exist after a restart of an enrolled agent with camera credentials enabled: %v", err)
+	}
+}
+
+// Hito Z G1-B: an unenrolled Edge, or one with no SaaS URL configured, must
+// still not fabricate any camera-credential state — the exact behavior
+// TestW8_RestartReusesDurableIdentityAndResetsPerRunState asserted for
+// every Edge before camera credentials existed, now scoped to the case
+// where it still applies.
+func TestW8_UnenrolledRestartNeverCreatesCameraCredentialState(t *testing.T) {
+	dataDir := t.TempDir()
+	cfg := w5Config(t, dataDir, "") // no SaaS URL configured, never enrolled
+
+	a := New(cfg)
+	stop := startAgent(t, a)
+	defer stop()
+	// Nothing about being unenrolled with no SaaS URL is itself a startup
+	// fault (heartbeat/discovery/camera-creds are all just skipped for it):
+	// the agent reaches Ready normally.
+	waitForState(t, a, health.StateReady)
+
 	for _, name := range []string{"camera_credentials.json", "camera_master.key"} {
 		if _, err := os.Stat(filepath.Join(dataDir, name)); err == nil {
-			t.Errorf("%s exists after a restart, but the agent runtime never creates it", name)
+			t.Errorf("%s exists for an unenrolled/offline agent, but camera credentials must not be fabricated for it", name)
 		}
 	}
 }
@@ -582,6 +621,105 @@ func TestW8_AgentRunReportsOneLifecycleAndStopsCleanly(t *testing.T) {
 	stop()
 	if got := a.Health().State(); got != health.StateStopping {
 		t.Errorf("final agent state = %q, want %q", got, health.StateStopping)
+	}
+}
+
+// Hito Z G1-B section 13: a corrupt camera_master.key is fatal for camera
+// credentials specifically, but must never be silently regenerated (that
+// would permanently orphan any already-encrypted camera_credentials.json),
+// and must never take down the rest of the Edge's local surface.
+func TestG1B_CorruptCameraMasterKeyNeverRegeneratedAndHealthStaysUp(t *testing.T) {
+	saas := newW5SaaS(t)
+	dataDir := t.TempDir()
+	cfg := w5Config(t, dataDir, saas.url())
+	enrolled := w5Enroll(t, dataDir)
+	cfg.EdgeID = enrolled.EdgeID
+
+	keyPath := filepath.Join(dataDir, "camera_master.key")
+	if err := os.WriteFile(keyPath, []byte("not-a-valid-32-byte-key"), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	corruptBefore := readFileOrFail(t, keyPath)
+
+	a := New(cfg)
+	stop := startAgent(t, a)
+	defer stop()
+
+	// A corrupt camera_master.key is a startup fault (fail-closed, per
+	// spec section 1): the agent reports DEGRADED, never READY, until a
+	// restart with a healthy key clears it. "health local debe seguir
+	// accesible" means the health HTTP surface itself keeps serving — not
+	// that the overall reported state is READY.
+	waitForState(t, a, health.StateDegraded)
+
+	if a.cameraCredsErr == nil {
+		t.Error("cameraCredsErr = nil, want a wrapped ErrCorruptMasterKey")
+	} else if !errors.Is(a.cameraCredsErr, cameracreds.ErrCorruptMasterKey) {
+		t.Errorf("cameraCredsErr = %v, want it to wrap cameracreds.ErrCorruptMasterKey", a.cameraCredsErr)
+	}
+	if a.cameraCredsErr != nil && strings.Contains(a.cameraCredsErr.Error(), w5Credential) {
+		t.Error("cameraCredsErr leaks the enrollment credential")
+	}
+	if a.CameraCredsProvider() != nil {
+		t.Error("CameraCredsProvider() is non-nil after a corrupt master key; camera credentials must fail closed entirely")
+	}
+
+	if got := readFileOrFail(t, keyPath); string(got) != string(corruptBefore) {
+		t.Errorf("camera_master.key was rewritten instead of left corrupt:\nbefore: %s\nafter:  %s", corruptBefore, got)
+	}
+
+	// Health/local surface stays reachable for diagnosis.
+	snap := a.Health().Snapshot()
+	if snap.Modules["health-http"] == "" {
+		t.Error("health-http module is not reported; local health surface must stay up")
+	}
+}
+
+// Hito Z G1-B section 13: a corrupt camera_credentials.json must never be
+// silently deleted and recreated — that would discard real assignments the
+// SaaS believes are still active until the next successful sync overwrites
+// them, and would hide a real integrity problem.
+func TestG1B_CorruptCameraCredentialsCacheNeverDeleted(t *testing.T) {
+	saas := newW5SaaS(t)
+	dataDir := t.TempDir()
+	cfg := w5Config(t, dataDir, saas.url())
+	enrolled := w5Enroll(t, dataDir)
+	cfg.EdgeID = enrolled.EdgeID
+
+	// A valid master key, but a cache file that is not valid JSON at all —
+	// OpenStore must reject it outright rather than guess a fallback shape.
+	if _, err := cameracreds.LoadOrCreateMasterKey(dataDir); err != nil {
+		t.Fatalf("setup: LoadOrCreateMasterKey: %v", err)
+	}
+	credsPath := filepath.Join(dataDir, "camera_credentials.json")
+	if err := os.WriteFile(credsPath, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	corruptBefore := readFileOrFail(t, credsPath)
+
+	a := New(cfg)
+	stop := startAgent(t, a)
+	defer stop()
+
+	// Same fail-closed contract as the corrupt-master-key case above.
+	waitForState(t, a, health.StateDegraded)
+
+	if a.cameraCredsErr == nil {
+		t.Error("cameraCredsErr = nil, want a wrapped ErrCorrupt")
+	} else if !errors.Is(a.cameraCredsErr, cameracreds.ErrCorrupt) {
+		t.Errorf("cameraCredsErr = %v, want it to wrap cameracreds.ErrCorrupt", a.cameraCredsErr)
+	}
+	if a.CameraCredsProvider() != nil {
+		t.Error("CameraCredsProvider() is non-nil after a corrupt credentials cache; camera credentials must fail closed entirely")
+	}
+
+	if got := readFileOrFail(t, credsPath); string(got) != string(corruptBefore) {
+		t.Errorf("camera_credentials.json was rewritten instead of left corrupt:\nbefore: %s\nafter:  %s", corruptBefore, got)
+	}
+
+	snap := a.Health().Snapshot()
+	if snap.Modules["health-http"] == "" {
+		t.Error("health-http module is not reported; local health surface must stay up")
 	}
 }
 

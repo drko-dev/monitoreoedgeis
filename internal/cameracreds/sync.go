@@ -23,6 +23,15 @@ type SyncOptions struct {
 	DeviceID   string
 	Credential string
 	Log        *slog.Logger
+
+	// OnSuccess, if set, is called at the end of every Sync that returns
+	// nil — after fetch, validation, and Store.Apply have already
+	// completed, never under Store's lock. It fires even when the applied
+	// snapshot did not change anything (the reconciler it drives, Hito Z
+	// G1-B, is idempotent), and it never fires on a transport failure,
+	// unauthorized response, malformed payload, or persist failure — those
+	// paths return early and keep the last-good cache untouched.
+	OnSuccess func()
 }
 
 // Syncer performs one fetch-decode-validate-apply cycle against the SaaS.
@@ -87,6 +96,9 @@ func (s *Syncer) Sync(ctx context.Context) error {
 			slog.Int("updated", stats.Updated),
 			slog.Int("removed", stats.Removed),
 			slog.Int("active", len(creds)))
+	}
+	if s.opts.OnSuccess != nil {
+		s.opts.OnSuccess()
 	}
 	return nil
 }

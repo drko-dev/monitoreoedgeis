@@ -1,14 +1,18 @@
 # G1 — Camera Target Wiring: audit, contracts and implementation design
 
-> **STATUS: PRECONDITIONS DONE (G1-A) · WIRING NOT IMPLEMENTED · G1 STILL BLOCKED.**
-> This document is the persisted audit for the G1 slice (blocker B1). It exists
-> so implementation can proceed from the repository alone. It contains **no
-> implemented wiring**, and nothing here may be read as G1 being closed. The G1
-> row in `docs/product/COMMERCIAL_MODES.md` stays `BLOCKED / NOT IMPLEMENTED`
-> until the production flow is implemented *and* tested.
+> **STATUS: G1-A (preconditions) + G1-B (wiring) IMPLEMENTED / TESTED LOCAL.**
+> G1 is closed at the code level: the production Agent now actually calls
+> `rtsp.Manager.SetTargets` with real, discovered, credentialed cameras. See
+> §11 for exactly what that does and does not mean — **REAL CAMERA and
+> DVR/NVR stay NOT_VALIDATED**, no physical pilot has run, and Software 1.0
+> readiness still depends on the other B2–B12 blockers. Sections 1–10 below
+> are G1-A's original audit and design; they are left as written because
+> every decision they made is still the one G1-B implemented.
 
 Branch: `feature/hito-z-camera-target-wiring`, stacked on
-`product/hito-z-commercial-modes` @ `16efdfe`.
+`product/hito-z-commercial-modes` @ `16efdfe`. G1-B itself is
+`feature/hito-z-camera-target-wiring-g1b`, stacked on G1-A
+@ `4894316d4b63104e72b234801784672cafb56417`.
 
 ## 1. The gap, restated with evidence
 
@@ -305,3 +309,159 @@ the wiring, and G1 is still BLOCKED.**
 
 Not claimed: G1 closed, camera wiring complete, real camera validated, pilot
 complete, hardware certified, commercial-ready, Software 1.0 READY.
+
+============================================================
+## 11. G1-B — implementation status (this PR)
+============================================================
+
+Branch: `feature/hito-z-camera-target-wiring-g1b`
+Base: `feature/hito-z-camera-target-wiring` @ `4894316d4b63104e72b234801784672cafb56417` (G1-A, PR #85)
+
+### What changed, by section of this document
+
+- **§1 Camera credential lifecycle in Agent** — `internal/agent/cameracreds_module.go`
+  (`newCameraCredsModule`) wires `cameracreds.LoadOrCreateMasterKey` /
+  `OpenStore` / `NewProvider` / `NewSyncer` / `NewModule` into the production
+  Agent, gated on SaaS URL configured + enrolled + DeviceID + credential
+  present. `New()` does no network I/O (`OpenStore` only reads the local
+  encrypted cache). A corrupt master key or cache is fail-closed: reported as
+  `Agent.cameraCredsErr`, never regenerated/deleted, health-http keeps
+  serving. Status: **IMPLEMENTED / TESTED**
+  (`TestG1B_CorruptCameraMasterKeyNeverRegeneratedAndHealthStaysUp`,
+  `TestG1B_CorruptCameraCredentialsCacheNeverDeleted`).
+- **§2 Module order** — `newCameraCredsModule`/`newDiscoveryModule` are still
+  *constructed* early (their variables are needed by later wiring), but are
+  only *appended* to `agent.go`'s `mods` slice after the RTSP/video pipeline
+  block, so `moduleManager` (start in order, stop in reverse — unchanged,
+  see `modules.go`) starts RTSP+processing before either can drive a
+  reconciliation, and stops both before RTSP tears down. Status:
+  **IMPLEMENTED** (structural; exercised indirectly by every test that runs
+  `Agent.Run` end to end without deadlocking).
+- **§3 Discovery scan-success callback** — `discovery.ModuleOptions.OnScanSuccess`
+  (`internal/discovery/module.go`), invoked only via the new
+  `executeScanAndNotify` wrapper that `Rediscover`, `periodicScanLoop`, and
+  `saasPullLoop` all call instead of `executeScan` directly — one
+  implementation, not three. Fires after `RunScan` succeeds (including 0
+  devices), outside `scanMu`/`m.mu`. Status: **IMPLEMENTED / TESTED**
+  (`TestG1B_FullPipeline_LateCredentialConvergence`; existing discovery
+  package tests unaffected).
+- **§4 Camera-creds sync-success callback** — `cameracreds.SyncOptions.OnSuccess`
+  (`internal/cameracreds/sync.go`), invoked at the end of a successful
+  `Sync` (after `Store.Apply`), never on a transport/auth/payload/persist
+  failure, never under Store's lock, and even when nothing changed. Status:
+  **IMPLEMENTED / TESTED** (`TestSyncer_OnSuccessFiresAfterApply`,
+  `TestSyncer_OnSuccessNeverFiresOnFailure`).
+- **§5 Authenticated ONVIF** — `internal/discovery/engine.go`'s
+  `enrichSingleDevice` now checks `errors.Is(err, onvif.ErrAuthRequired)`
+  (dropped the old `"401"`/`"403"` substring check now that the sentinel
+  exists) and, when a `CredentialResolver` is set
+  (`Engine.SetCredentialResolver`, wired from `internal/agent` over
+  `cameracreds.Provider.Resolve`), retries the full enrichment via
+  `tryAuthenticatedEnrich` using exclusively the existing
+  `GetDeviceInformationAuth` / `GetCapabilitiesAuth` / `GetProfilesAuth` /
+  `GetStreamUriAuth`. `GetVideoSourcesAuth` did not exist and was added
+  (`internal/discovery/onvif/wssecurity.go`), reusing `GetVideoSources`'s
+  own parser (factored out as `parseVideoSourcesResponse`) so establishing
+  single-source cardinality on an authenticated device needs no new
+  parsing. No credential, or the authenticated retry itself failing, leaves
+  `AuthRequired=true` with no profiles — same as before, never guesses
+  `admin`/`admin`, never fails the rest of the scan. Status:
+  **IMPLEMENTED / TESTED** (`TestG1B_FullPipeline_LateCredentialConvergence`
+  drives this against a fake ONVIF WS-Security responder; existing
+  `internal/discovery/onvif` and `internal/cameratest` WS-Security
+  coverage — digest correctness, no-secret-in-logs, wrong-password
+  rejection — is unchanged and still the authority for the *auth
+  primitive's* correctness. This PR's own coverage is the *wiring*: that
+  the passive scan path now reaches those primitives at all).
+- **§6 Eventual convergence creds ↔ discovery** — solved in
+  `internal/agent/camera_target_reconciler.go`
+  (`cameraTargetReconciler.onCredentialsSynced`): every credential sync
+  success reconciles immediately (cheap, handles rotation/revoke for
+  already-enriched devices) and additionally triggers a **one-shot**
+  background `disc.Rediscover(ctx)` — never a second discovery loop — but
+  only when Inventory holds an auth-required device with **zero**
+  VideoSources (never successfully authenticated-enriched) that a
+  credential now resolves for. Deliberately checked as "zero", not "not
+  exactly one": a genuinely multichannel authenticated device would never
+  satisfy "== 1" and would otherwise re-trigger rediscovery forever. An
+  `atomic.Bool` guard prevents stacking overlapping catch-up rediscoveries.
+  Status: **IMPLEMENTED / TESTED**
+  (`TestG1B_FullPipeline_LateCredentialConvergence`, phase 2: credential
+  arrives after the first scan already recorded the device as
+  auth-required with no profiles; convergence happens without any Agent
+  restart).
+- **§7–§9 Pure target builder** — `internal/agent/camera_target_builder.go`
+  (`buildCameraTargets` + `selectProfile`), exactly the pure/testable
+  function this document specified: `CandidateKey` is always
+  `DiscoveredDevice.StableIdentity`, output sorted deterministically,
+  single-source-only, profile selection prefers the configured
+  `StreamRole`, falls back to a lone usable profile, and refuses (skips
+  with a safe diagnostic) when multiple usable profiles disagree. Status:
+  **IMPLEMENTED / TESTED** — 13 unit tests in
+  `internal/agent/camera_target_builder_test.go` cover every branch
+  (single-source, main/sub selection, single-profile fallback, ambiguous
+  profiles, no usable profile, query-string preservation, invalid
+  `rtsps://`, multichannel, credential resolution, auth-required without a
+  credential, no-auth-required without a credential, never-hardcodes
+  defaults, deterministic ordering).
+- **§10 Reconciler** — `cameraTargetReconciler.reconcile()`: Inventory
+  snapshot → `Provider.Resolve` → `buildCameraTargets` →
+  `rtsp.Manager.SetTargets`. No second mutable copy of the targets, no lock
+  of its own around `SetTargets` (already idempotent/serialized/
+  shutdown-safe — unmodified). Status: **IMPLEMENTED / TESTED**.
+
+### Additional required coverage (§14)
+
+| Case | Status | Test |
+| --- | --- | --- |
+| A. Pure builder | TESTED | `camera_target_builder_test.go` (13 cases) |
+| B. Credentials (DEVICE/GROUP precedence, password in memory only) | TESTED | pre-existing `internal/cameracreds` suite (unchanged); DEVICE-wins precedence is G1-A's own contract, not reopened |
+| C. No creds → no target, others still reconcile | TESTED | `TestBuildCameraTargets_AuthRequiredNoCredentialSkipped`; multi-device case implicit in `buildCameraTargets`'s per-device loop (one skip never aborts the rest) |
+| D. Auth ONVIF (anon 401 → resolve → WS-Security success → sanitized StreamURI → target) | TESTED | `TestG1B_FullPipeline_LateCredentialConvergence` |
+| E. Late credential (no restart) | TESTED | `TestG1B_FullPipeline_LateCredentialConvergence`, phase 2 |
+| F. Add | TESTED | same, phase 3 (`KnownCameras` goes 0 → 1) |
+| G. Remove (inventory expiry → scan success → reconcile) | IMPLEMENTED, NOT_VALIDATED by a dedicated TTL test | `Inventory.PruneExpired` is pre-existing and unit-tested in `internal/discovery`; this PR did not add a new expiry-driven removal test on top of the reconciler specifically |
+| H. Rotation (same key, new secret → one restart, others untouched) | TESTED | `TestG1B_FullPipeline_LateCredentialConvergence`, phase 4 |
+| I. Revoke | TESTED | same, phase 5 (`KnownCameras` goes 1 → 0) |
+| J. RTSP → processing | TESTED at the RTSP/Supervisor layer | same test, via a real `internal/rtsptest.Simulator` (`StateOnline`, `PacketsReceived > 0`). **Not** re-verified through `processing.Manager`/YOLO in this PR — that wiring (`rtsp.SetPacketSink(processing.Manager)`, `OnPacket → DescriptorFor → lazy pipeline`) is unmodified by G1-B and already covered by `internal/processing`'s own suite; this PR did not add a new test threading a G1-B-built target all the way through the vision pipeline. |
+| K. Multichannel | TESTED | `TestBuildCameraTargets_MultichannelSkipped` |
+| L. Secret leak | TESTED for the paths this PR touches | `TestGetDeviceInformationAuth_*` (`onvif` package, pre-existing, unchanged) covers the WS-Security request; `TestG1B_Corrupt*` assert the sanitized `cameraCredsErr` never contains the enrollment credential. No new assertion was added scanning `/status`/heartbeat payloads specifically for a *camera* credential, since neither surface serializes `CameraTarget` or `cameracreds.Credential` anywhere (verified by reading, not by a new test). |
+| M. Shutdown/race | TESTED | `go test -race` clean across `internal/agent`, `internal/discovery` (+ `onvif`, `wsdiscovery`), `internal/cameracreds`, `internal/rtsp`, `internal/processing`; `-race -count=10` clean on `internal/agent`, `internal/rtsp`, `internal/processing` |
+
+### Sensitivity (§15)
+
+One representative, executed sensitivity check: temporarily disabling the
+authenticated-retry branch in `enrichSingleDevice` (§5) makes
+`TestG1B_FullPipeline_LateCredentialConvergence` fail exactly as expected
+(times out waiting for the target to appear, phase 2) — confirmed, then the
+change was reverted. The remaining guards listed in §15 were not each
+individually revert-tested; the full-pipeline test's five phases each
+depend on a different piece of the wiring (scan callback, sync callback,
+authenticated ONVIF, rotation, revoke), so breaking any one of them is very
+likely to fail that same test, but that likelihood was not empirically
+confirmed guard-by-guard the way the one executed check above was.
+
+### Tests (§16)
+
+```
+gofmt -l .                    → clean
+go vet ./...                  → clean
+go build ./...                → clean
+go test ./...                 → ok, 33/33 packages
+go test -race ./internal/agent ./internal/discovery ./internal/discovery/onvif \
+  ./internal/discovery/wsdiscovery ./internal/cameracreds ./internal/rtsp \
+  ./internal/processing        → ok, no data races
+go test -race ./internal/agent ./internal/rtsp ./internal/processing -count=10
+                               → ok
+```
+
+### G1 final status
+
+- **G1: IMPLEMENTED / TESTED** (local; not merged, not deployed).
+- **REAL CAMERA: NOT_VALIDATED** — every test above runs against fakes/simulators.
+- **DVR/NVR: NOT_VALIDATED** — unchanged from G1-A; still explicitly out of scope.
+- **PHYSICAL PILOT: NOT EXECUTED.**
+- **HARDWARE CERTIFIED: NO.**
+- **SOFTWARE 1.0: STILL BLOCKED** by the remaining non-G1 blockers (B2–B12).
+
+No merge, no deploy, no tag, no SaaS change.

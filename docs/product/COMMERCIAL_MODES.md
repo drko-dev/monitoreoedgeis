@@ -1,5 +1,17 @@
 # GEO CAM Edge — Commercial Modes (Hito Z: Z8 / Z9 / Z10)
 
+> **G1 update (Hito Z G1-B):** every "blocked by gap G1" / "camera-target
+> provisioning does not exist in production" statement below predates
+> `feature/hito-z-camera-target-wiring-g1b`. G1 is now **IMPLEMENTED /
+> TESTED LOCAL** — see `docs/product/G1_CAMERA_TARGET_WIRING.md` §11: the
+> production Agent calls `rtsp.Manager.SetTargets` with real discovered,
+> credentialed cameras. This closes the *code-gap* blocker specifically.
+> Every capability row's other blocker — **Z7 hardware certification** — is
+> untouched, and "VALIDATED LOCAL" below still means fakes/simulators, not a
+> real camera or a real appliance. The paragraphs below were not rewritten
+> to keep G1-A's original audit trail intact; read them as history, and read
+> this note as the current status.
+
 This document defines what the **Gateway**, **Hybrid** and **Full Edge**
 products are, using only capabilities that exist in this repository, and
 states for each one exactly how far it has been verified. It is the

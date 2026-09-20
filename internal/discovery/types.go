@@ -29,6 +29,18 @@ const (
 	StreamRoleUnknown    StreamRole = "unknown"
 )
 
+// CredentialResolver resolves the camera credential to use for an
+// authenticated ONVIF retry, keyed by a device's StableIdentity — never an
+// IP address. ok=false means no credential is available for that candidate;
+// the caller must keep treating the device as AuthRequired and move on to
+// the next one rather than guessing a default.
+//
+// This is a narrow function type, not an import of internal/cameracreds:
+// discovery stays usable without pulling in the credential cache/store, and
+// the real adapter (over cameracreds.Provider.Resolve) is built by
+// internal/agent, which already depends on both packages.
+type CredentialResolver func(candidateKey string) (username, password string, ok bool)
+
 // MediaProfile represents an ONVIF Media Profile exposed by a video source.
 type MediaProfile struct {
 	Token     string     `json:"token"`

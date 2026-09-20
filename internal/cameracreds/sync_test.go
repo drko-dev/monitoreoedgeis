@@ -366,3 +366,91 @@ func TestSyncer_DecodesCandidateKeysArray(t *testing.T) {
 		}
 	}
 }
+
+// TestSyncer_OnSuccessFiresAfterApply is Hito Z G1-B's guard for section 4:
+// OnSuccess must fire once Sync returns nil — after fetch, decode, and
+// Store.Apply have already run — and must never fire on any failure path
+// (transport error, malformed payload, persist failure all return before
+// reaching it).
+func TestSyncer_OnSuccessFiresAfterApply(t *testing.T) {
+	store := newTestStore(t)
+	var fired int
+	var sawResolvable bool
+	s, err := NewSyncer(SyncOptions{
+		Client:     &fakeFetcher{resp: transport.CameraCredentialsResponse{Credentials: []transport.CameraCredentialPayload{devCred(1, "dev-1", 1)}}},
+		Store:      store,
+		DeviceID:   "d1",
+		Credential: "cred",
+		OnSuccess: func() {
+			fired++
+			// By the time OnSuccess runs, Store.Apply must have already
+			// completed: the credential is resolvable right now, not on
+			// some later tick.
+			if _, ok := NewProvider(store).Resolve("dev-1"); ok {
+				sawResolvable = true
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	if err := s.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if fired != 1 {
+		t.Fatalf("OnSuccess fired %d times, want 1", fired)
+	}
+	if !sawResolvable {
+		t.Fatal("OnSuccess ran before Store.Apply took effect")
+	}
+
+	// A second sync with the SAME snapshot (nothing changed) must still
+	// fire OnSuccess: the reconciler it drives is idempotent, and the
+	// contract is "every successful sync", not "every sync that changed
+	// something".
+	if err := s.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync (second, unchanged): %v", err)
+	}
+	if fired != 2 {
+		t.Fatalf("OnSuccess fired %d times after a second unchanged sync, want 2", fired)
+	}
+}
+
+// TestSyncer_OnSuccessNeverFiresOnFailure covers every early-return path in
+// Sync: transport failure, unauthorized, and a malformed payload. None of
+// them may invoke OnSuccess — the last-good cache is left untouched and the
+// reconciler must not be told anything changed.
+func TestSyncer_OnSuccessNeverFiresOnFailure(t *testing.T) {
+	cases := []struct {
+		name    string
+		fetcher Fetcher
+	}{
+		{"transport error", &fakeFetcher{err: transport.ErrSaaSUnavailable}},
+		{"unauthorized", &fakeFetcher{err: transport.ErrUnauthorized}},
+		{"malformed scope", &fakeFetcher{resp: transport.CameraCredentialsResponse{
+			Credentials: []transport.CameraCredentialPayload{{ID: 1, Scope: "not-a-real-scope", CandidateKeys: []string{"dev-1"}, Username: "a", Password: "b", Revision: 1}},
+		}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t)
+			fired := false
+			s, err := NewSyncer(SyncOptions{
+				Client:     tc.fetcher,
+				Store:      store,
+				DeviceID:   "d1",
+				Credential: "cred",
+				OnSuccess:  func() { fired = true },
+			})
+			if err != nil {
+				t.Fatalf("NewSyncer: %v", err)
+			}
+			if err := s.Sync(context.Background()); err == nil {
+				t.Fatal("Sync succeeded, want an error for this case")
+			}
+			if fired {
+				t.Errorf("OnSuccess fired on a failed sync (%s)", tc.name)
+			}
+		})
+	}
+}
