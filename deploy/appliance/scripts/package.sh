@@ -5,13 +5,39 @@
 # systemd unit template, install/update/rollback/uninstall scripts, example
 # config, VERSION and ARCH marker files, and a .sha256 checksum.
 #
-# Usage: package.sh [version] [dist-dir]
+# Usage: package.sh [--require-ffmpeg] [version] [dist-dir]
+#
+# --require-ffmpeg makes the static ffmpeg binary MANDATORY: packaging fails if
+# $DIST_DIR/ffmpeg-linux-<arch> is absent, and the produced tarball is then
+# verified to actually contain ffmpeg plus the rest of the required layout.
+# Without the flag the historical dev/local behaviour is preserved and a missing
+# ffmpeg is only a warning — so a local `package.sh` run still works on a
+# machine without Docker, while a real release cannot silently ship an
+# appliance that cannot decode video.
+#
+# The ffmpeg binaries are NOT built here; build them first with
+# scripts/build-ffmpeg-static.sh <arch> <dist-dir>, which reuses the pinned
+# LGPL-only Dockerfile recipe (Docker is a BUILD-time tool only).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APPLIANCE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$APPLIANCE_DIR/../.." && pwd)"
 # shellcheck source=lib.sh
 . "$SCRIPT_DIR/lib.sh"
+
+REQUIRE_FFMPEG=0
+POSITIONAL=()
+for arg in "$@"; do
+    case "$arg" in
+        --require-ffmpeg) REQUIRE_FFMPEG=1 ;;
+        -h|--help)
+            sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+            exit 0
+            ;;
+        *) POSITIONAL+=("$arg") ;;
+    esac
+done
+set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
 
 VERSION="${1:-$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo dev)}"
 DIST_DIR="${2:-$REPO_ROOT/dist}"
@@ -20,6 +46,22 @@ log "building geocam-edge $VERSION for linux/amd64 and linux/arm64"
 ( cd "$REPO_ROOT" && make build-linux VERSION="$VERSION" )
 
 mkdir -p "$DIST_DIR"
+
+# require_artifact_entries fails the build unless the finished tarball really
+# carries every entry a released appliance needs. Checking the ARTIFACT (not
+# just its inputs) is what makes --require-ffmpeg meaningful: it would catch a
+# staging regression that dropped a file, not only a missing ffmpeg binary.
+require_artifact_entries() {
+    local artifact="$1" listing missing=""
+    listing="$(tar tzf "$artifact")"
+    for entry in ./geocam-edge ./ffmpeg ./VERSION ./ARCH; do
+        printf '%s\n' "$listing" | grep -qxF -- "$entry" || missing="$missing $entry"
+    done
+    for dir in ./scripts/ ./systemd/ ./config/; do
+        printf '%s\n' "$listing" | grep -qF -- "$dir" || missing="$missing $dir"
+    done
+    [ -z "$missing" ] || die "$artifact is missing required entries:$missing"
+}
 
 for arch in amd64 arm64; do
     STAGE="$(mktemp -d)"
@@ -35,11 +77,17 @@ for arch in amd64 arm64; do
         cp "$FFMPEG_BIN" "$STAGE/ffmpeg"
         chmod 0755 "$STAGE/ffmpeg"
         log "bundling static ffmpeg for $arch"
+    elif [ "$REQUIRE_FFMPEG" = "1" ]; then
+        die "--require-ffmpeg: no static ffmpeg at $FFMPEG_BIN." \
+            "Run scripts/build-ffmpeg-static.sh $arch \"$DIST_DIR\" first (requires Docker as a" \
+            "BUILD-time tool only — not a runtime dependency of the appliance). Refusing to" \
+            "publish an appliance artifact that cannot decode video."
     else
         log "warning: no static ffmpeg found at $FFMPEG_BIN — packaging without it." \
             "Run scripts/build-ffmpeg-static.sh $arch first (requires Docker as a BUILD-time" \
             "tool only — not a runtime dependency of the appliance). Without it," \
-            "GEOCAM_VIDEO_PIPELINE_ENABLED will fail unless ffmpeg is separately provisioned."
+            "GEOCAM_VIDEO_PIPELINE_ENABLED will fail unless ffmpeg is separately provisioned." \
+            "Pass --require-ffmpeg to make this a hard failure instead."
     fi
 
     # Mirrors deploy/appliance/'s own scripts/config/systemd layout exactly,
@@ -62,6 +110,10 @@ for arch in amd64 arm64; do
         ( cd "$DIST_DIR" && sha256sum "$(basename "$ARTIFACT")" > "$(basename "$ARTIFACT").sha256" )
     elif have_cmd shasum; then
         ( cd "$DIST_DIR" && shasum -a 256 "$(basename "$ARTIFACT")" > "$(basename "$ARTIFACT").sha256" )
+    fi
+    if [ "$REQUIRE_FFMPEG" = "1" ]; then
+        require_artifact_entries "$ARTIFACT"
+        log "verified required artifact layout for $arch (including ffmpeg)"
     fi
     log "packaged $ARTIFACT"
 

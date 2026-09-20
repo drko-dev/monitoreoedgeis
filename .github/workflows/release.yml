@@ -11,6 +11,11 @@ name: Release
 # Signing is FAIL CLOSED: if the OTA_SIGNING_KEY secret is not configured,
 # the job fails before anything is published. There is no unsigned or
 # checksum-only release path.
+#
+# Packaging is FAIL CLOSED on the static ffmpeg binary too (B10): it is built
+# for both architectures before packaging, and package.sh --require-ffmpeg
+# refuses to produce an artifact without it and then verifies the finished
+# tarball actually carries ffmpeg plus the rest of the required layout.
 on:
   push:
     tags:
@@ -36,8 +41,26 @@ jobs:
             exit 1
           fi
 
-      - name: Package full appliance artifacts (amd64 + arm64)
-        run: ./deploy/appliance/scripts/package.sh "${GITHUB_REF_NAME}" dist
+      # The appliance artifact is useless without a static ffmpeg: every
+      # profile decodes through it, so a release that shipped without one would
+      # look healthy and fail on the device. Build it for BOTH architectures
+      # first, reusing the existing pinned LGPL-only recipe — no second ffmpeg
+      # build exists.
+      #
+      # QEMU is required for the arm64 build on an amd64 runner. Docker is a
+      # BUILD-time tool only here; the appliance never needs it at runtime.
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build static ffmpeg (amd64)
+        run: ./deploy/appliance/scripts/build-ffmpeg-static.sh amd64 dist
+
+      - name: Build static ffmpeg (arm64)
+        run: ./deploy/appliance/scripts/build-ffmpeg-static.sh arm64 dist
+
+      - name: Package full appliance artifacts (amd64 + arm64, fail closed on ffmpeg)
+        run: ./deploy/appliance/scripts/package.sh --require-ffmpeg "${GITHUB_REF_NAME}" dist
 
       - name: Generate SHA256SUMS
         run: |
