@@ -33,7 +33,7 @@ loopback runs").
 | Processing modes allowed | `cloud` and `hybrid`. `edge` (local YOLO) is **not part of this profile** — no Vision Worker hardware sizing exists for a residential target. | IMPLEMENTED (mode enum); residential restriction is a product decision documented here, not a code gate |
 | Health | Local `/healthz`/`/readyz`/`/status`, `127.0.0.1` only. | IMPLEMENTED / TESTED (Hito B) |
 | OTA | Signed (Ed25519) + checksummed update, credential-less download, systemd-based rollback on failed health check. | IMPLEMENTED / TESTED / MERGED (Hito T1–T7) |
-| Without Internet | Local processing (cloud/hybrid capture and buffering) continues; heartbeat/backlog buffer locally and drain on reconnect; local health stays independent of SaaS reachability. | VALIDATED (Y3, Y4 — within the limits of the simulated transports used, no real ISP outage) |
+| Without Internet | The local Edge process and camera/video pipeline keep running. `internal/heartbeat` does not queue heartbeats — it retries with bounded exponential backoff and jitter, reports the module `DEGRADED`, and resumes sending on recovery; local health stays independent of SaaS reachability. Recoverable Cloud/Hybrid frame uploads may enter `internal/cloudsink.Buffer`'s existing bounded disk-backed spool and are replayed FIFO on reconnect; once that bounded spool is full, additional frames are dropped per its existing policy — this is not a "no loss during an arbitrarily long outage" guarantee. Full-Edge events/evidence use the separate `internal/edgebacklog` queue, not part of this Cloud/Hybrid residential profile. Heavy Cloud inference does not continue while SaaS/Internet is unreachable. | VALIDATED (Y3, Y4 — within the limits of the simulated transports used, no real ISP outage) |
 | If a camera drops | RTSP supervisor retries with backoff, distinguishes `auth_failed` from `degraded`, recovers without restart or duplicate supervisors. | VALIDATED (Y5, against RTSP simulators — not real-camera field conditions) |
 | Initial install | `package.sh` + `install.sh` + systemd unit + `bootstrap.sh`, zero-touch enrollment via a seed token file, non-root service user. | IMPLEMENTED / TESTED (Hito Q4, Q6) — real first-boot hardware validation NOT_VALIDATED |
 | Update | Same OTA path as above; `/readyz`-gated activation. | IMPLEMENTED / TESTED (Hito T5–T7) |
@@ -108,9 +108,10 @@ device level, without any new abstraction:
   (`GEOCAM_EDGE` polls its own "update available" via heartbeat / OTA
   endpoint and decides locally when to fetch/verify/apply) — there is no
   fleet-wide push, so upgrading one site's Edge already has zero effect on
-  any other site's Edge. Staged rollout/canary logic (T8–T10) lives on the
-  SaaS side and is **not merged there** (`monitoreoia` PR #124) — out of
-  this repo's scope to implement.
+  any other site's Edge. Staged OTA rollout / canary / compatibility logic
+  belongs to the SaaS control plane and is already merged there as part of
+  Hito T8–T10 (`monitoreoia` PR #124/#125/#126). This Edge repository does
+  not duplicate that fleet orchestration.
 - **Per-site health**: the existing `/healthz`/`/readyz`/`/status` per Edge
   instance is exactly the unit Hito U's SaaS-side per-site health view
   already consumes; no new health surface was needed.

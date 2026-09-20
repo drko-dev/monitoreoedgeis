@@ -19,7 +19,7 @@ tests). No new benchmark or simulator is introduced here.
 - [ ] Confirm processing mode for the pilot (`cloud` / `hybrid` / `edge`) and
       that any `edge`-mode hardware requirement (Vision Worker, CPU/GPU) is
       actually present on the pilot host — this repo does not certify that.
-- [ ] Confirm network reachability: pilot host → SaaS (HTTPS/WSS), pilot host
+- [ ] Confirm network reachability: pilot host → SaaS over HTTPS, pilot host
       → each camera (RTSP TCP 554, ONVIF HTTP/SOAP), and whether WS-Discovery
       multicast is required (same-subnet cameras) or targets are pre-provisioned
       (routed/cross-subnet cameras — see the R5/R7 gap in `MVP_PROFILES.md`).
