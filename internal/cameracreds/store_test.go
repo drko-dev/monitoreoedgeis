@@ -50,7 +50,7 @@ func TestStore_ApplyAndPersist_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, ok := NewProvider(reopened).Resolve("onvif-abc123", "")
+	got, ok := NewProvider(reopened).Resolve("onvif-abc123")
 	if !ok {
 		t.Fatal("expected credential to be resolvable after reopen")
 	}
@@ -115,14 +115,14 @@ func TestStore_Apply_SameRevisionIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changed, err := store.Apply([]Credential{cred})
+	stats, err := store.Apply([]Credential{cred})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if changed {
+	if stats.Changed() {
 		t.Fatal("re-applying the same revision should be a no-op")
 	}
-	got, ok := NewProvider(store).Resolve("dev-1", "")
+	got, ok := NewProvider(store).Resolve("dev-1")
 	if !ok || !reflect.DeepEqual(got, cred) {
 		t.Fatalf("cache mutated by idempotent apply: %+v", got)
 	}
@@ -138,14 +138,14 @@ func TestStore_Apply_HigherRevisionReplaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	newer := Credential{ID: "c1", Scope: ScopeDevice, CandidateKeys: []string{"dev-1"}, Username: "admin", Password: "new-pass", Revision: 2}
-	changed, err := store.Apply([]Credential{newer})
+	stats, err := store.Apply([]Credential{newer})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !changed {
+	if !stats.Changed() {
 		t.Fatal("higher revision should replace and report changed")
 	}
-	got, ok := NewProvider(store).Resolve("dev-1", "")
+	got, ok := NewProvider(store).Resolve("dev-1")
 	if !ok || got.Password != "new-pass" {
 		t.Fatalf("got %+v", got)
 	}
@@ -161,14 +161,14 @@ func TestStore_Apply_StaleRevisionIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale := Credential{ID: "c1", Scope: ScopeDevice, CandidateKeys: []string{"dev-1"}, Username: "admin", Password: "stale-pass", Revision: 2}
-	changed, err := store.Apply([]Credential{stale})
+	stats, err := store.Apply([]Credential{stale})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if changed {
+	if stats.Changed() {
 		t.Fatal("stale revision must not be reported as a change")
 	}
-	got, ok := NewProvider(store).Resolve("dev-1", "")
+	got, ok := NewProvider(store).Resolve("dev-1")
 	if !ok || got.Password != "current-pass" {
 		t.Fatalf("stale revision overwrote current cache: %+v", got)
 	}
@@ -184,14 +184,14 @@ func TestStore_Apply_AbsentEntryIsRevoked(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changed, err := store.Apply(nil) // SaaS no longer lists this credential
+	stats, err := store.Apply(nil) // SaaS no longer lists this credential
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !changed {
+	if !stats.Changed() {
 		t.Fatal("removing the last entry should report changed")
 	}
-	if _, ok := NewProvider(store).Resolve("dev-1", ""); ok {
+	if _, ok := NewProvider(store).Resolve("dev-1"); ok {
 		t.Fatal("credential should have been revoked/removed")
 	}
 }
@@ -216,7 +216,7 @@ func TestStore_Apply_PersistFailureKeepsMemoryInSyncWithDisk(t *testing.T) {
 	if _, err := store.Apply([]Credential{cred}); err == nil {
 		t.Fatal("expected Apply to fail while data dir is unwritable")
 	}
-	if _, ok := NewProvider(store).Resolve("dev-1", ""); ok {
+	if _, ok := NewProvider(store).Resolve("dev-1"); ok {
 		t.Fatal("memory should still reflect the state before the failed Apply")
 	}
 
@@ -225,14 +225,14 @@ func TestStore_Apply_PersistFailureKeepsMemoryInSyncWithDisk(t *testing.T) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	changed, err := store.Apply([]Credential{cred})
+	stats, err := store.Apply([]Credential{cred})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !changed {
+	if !stats.Changed() {
 		t.Fatal("retry with the same payload after fixing the disk problem must persist, not report changed=false")
 	}
-	if _, ok := NewProvider(store).Resolve("dev-1", ""); !ok {
+	if _, ok := NewProvider(store).Resolve("dev-1"); !ok {
 		t.Fatal("credential should be resolvable after the successful retry")
 	}
 }

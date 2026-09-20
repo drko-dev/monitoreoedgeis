@@ -61,6 +61,17 @@ type ModuleOptions struct {
 	Log          *slog.Logger
 	OnStatus     func(ModuleStatus)
 	Now          func() time.Time
+
+	// OnScanSuccess, if set, is called after every scan that completes
+	// without error — including one that found zero devices — once its
+	// results have already been applied to Inventory (Upsert +
+	// PruneExpired). It is never called under m.mu or scanMu (see
+	// executeScanAndNotify), so it is safe for it to call back into other
+	// modules (Hito Z G1-B's camera-target reconciler). Rediscover, the
+	// periodic scan loop, and the SaaS-triggered scan loop all converge on
+	// this single notification path. A nil OnScanSuccess preserves the
+	// exact previous behavior.
+	OnScanSuccess func()
 }
 
 // Module implements the agent.Module interface for device discovery.
@@ -115,7 +126,10 @@ func (m *Module) Engine() *Engine { return m.engine }
 
 // Rediscover uses the existing serialized scan lifecycle; it opens no new
 // listener and accepts no remote parameters.
-func (m *Module) Rediscover(ctx context.Context) error { _, err := m.executeScan(ctx); return err }
+func (m *Module) Rediscover(ctx context.Context) error {
+	_, err := m.executeScanAndNotify(ctx)
+	return err
+}
 
 // Start starts the background periodic discovery and SaaS polling loops.
 func (m *Module) Start(_ context.Context) error {
@@ -227,6 +241,22 @@ func (m *Module) executeScan(ctx context.Context) (*ScanResult, error) {
 	return result, nil
 }
 
+// executeScanAndNotify wraps executeScan and, on a successful scan, invokes
+// OnScanSuccess. Rediscover, periodicScanLoop, and saasPullLoop all call
+// this instead of executeScan directly, so success notification has
+// exactly one implementation rather than three that could drift.
+//
+// By the time OnScanSuccess runs here, executeScan has already returned —
+// its `defer m.scanMu.Unlock()` has already fired — so this runs outside
+// both scanMu and m.mu (setStatus releases m.mu before returning too).
+func (m *Module) executeScanAndNotify(ctx context.Context) (*ScanResult, error) {
+	result, err := m.executeScan(ctx)
+	if err == nil && m.opts.OnScanSuccess != nil {
+		m.opts.OnScanSuccess()
+	}
+	return result, err
+}
+
 func (m *Module) periodicScanLoop(ctx context.Context) {
 	// Initial jittered delay
 	jitter := time.Duration(rand.Int63n(int64(InitialScanDelay)))
@@ -237,7 +267,7 @@ func (m *Module) periodicScanLoop(ctx context.Context) {
 	}
 
 	// Perform initial scan
-	if _, err := m.executeScan(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	if _, err := m.executeScanAndNotify(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		m.log.Warn("discovery: initial scan failed", slog.Any("error", err))
 	}
 
@@ -247,7 +277,7 @@ func (m *Module) periodicScanLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			if _, err := m.executeScan(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			if _, err := m.executeScanAndNotify(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				m.log.Warn("discovery: periodic scan failed", slog.Any("error", err))
 			}
 		case <-ctx.Done():
@@ -311,7 +341,7 @@ func (m *Module) saasPullLoop(ctx context.Context) {
 		}
 
 		m.log.Info("discovery: claimed SaaS run, executing scan", slog.Int("run_id", *runID))
-		scanResult, scanErr := m.executeScan(ctx)
+		scanResult, scanErr := m.executeScanAndNotify(ctx)
 		if scanErr != nil {
 			m.log.Error("discovery: scan for claimed run failed", slog.Int("run_id", *runID), slog.Any("error", scanErr))
 			reportReq := transport.DiscoveryReportRequest{

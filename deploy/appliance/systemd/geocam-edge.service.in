@@ -17,6 +17,12 @@ Type=notify
 WorkingDirectory=@GEOCAM_DATA_DIR_PLACEHOLDER@
 ExecStart=@GEOCAM_EXEC_PATH@ run
 @GEOCAM_FFMPEG_ENV_LINE@
+# Derived from the installed release (B2): the Full Edge vision worker's SCRIPT
+# path. The interpreter is NOT set here -- the package ships no Python runtime --
+# so GEOCAM_EDGE_YOLO_WORKER_CMD must be provisioned by the operator and checked
+# with scripts/check-vision-runtime.sh. An operator override in EnvironmentFile
+# below still wins (later systemd definitions override earlier ones).
+@GEOCAM_VISION_ENV_LINE@
 EnvironmentFile=@GEOCAM_ENV_FILE@
 User=@GEOCAM_SERVICE_USER@
 Group=@GEOCAM_SERVICE_GROUP@

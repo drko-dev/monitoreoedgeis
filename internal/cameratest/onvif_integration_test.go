@@ -70,7 +70,7 @@ func TestIntegration_TapoONVIFAndRTSP(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	result := TestONVIFCredential(ctx, client, provider, candidateKey, "", xaddr)
+	result := TestONVIFCredential(ctx, client, provider, candidateKey, xaddr)
 	t.Logf("ONVIF result: state=%s manufacturer=%s model=%s profiles=%d streamURI=%s err=%v",
 		result.State, result.Manufacturer, result.Model, result.ProfileCount, result.StreamURI, result.Err)
 

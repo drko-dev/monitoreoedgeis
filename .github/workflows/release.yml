@@ -36,8 +36,29 @@ jobs:
             exit 1
           fi
 
+      # Hito Z B10: a real release must never publish an appliance that
+      # silently lacks ffmpeg. Both static binaries are built BEFORE
+      # package.sh runs, from the same unmodified Hito H recipe (LGPL-only,
+      # no --enable-gpl/--enable-nonfree/libx264/libx265) that
+      # build-ffmpeg-static.sh has always used -- see that script's header.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build static ffmpeg (linux/amd64)
+        run: ./deploy/appliance/scripts/build-ffmpeg-static.sh amd64 dist
+
+      - name: Build static ffmpeg (linux/arm64)
+        run: ./deploy/appliance/scripts/build-ffmpeg-static.sh arm64 dist
+
+      - name: Verify both static ffmpeg binaries exist
+        run: |
+          set -euo pipefail
+          for f in dist/ffmpeg-linux-amd64 dist/ffmpeg-linux-arm64; do
+            [ -x "$f" ] || { echo "::error::$f is missing or not executable -- refusing to package."; exit 1; }
+          done
+
       - name: Package full appliance artifacts (amd64 + arm64)
-        run: ./deploy/appliance/scripts/package.sh "${GITHUB_REF_NAME}" dist
+        run: ./deploy/appliance/scripts/package.sh --require-ffmpeg "${GITHUB_REF_NAME}" dist
 
       - name: Generate SHA256SUMS
         run: |

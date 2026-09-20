@@ -24,6 +24,19 @@ type Manager struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	stopped     chan struct{}
+
+	// reconcileMu serializes whole SetTargets reconciliations AND Stop, without
+	// holding mu across the blocking supervisor Stop/Start phase. Holding mu
+	// there was a lock-cycle hazard: a supervisor's own goroutine can be inside
+	// PacketSink.OnPacket, which takes processing.mu and then calls back into
+	// DescriptorFor -> mu.
+	reconcileMu sync.Mutex
+
+	// stopping is set (under mu) as the first thing Stop does, before any
+	// ownership lock is released, so SetTargets can never register a new
+	// supervisor or start a goroutine against a cancelled context during or
+	// after shutdown.
+	stopping bool
 }
 
 // NewManager creates a manager with the given config and status sink.
@@ -80,26 +93,53 @@ func (m *Manager) Start(ctx context.Context) error {
 
 // Stop terminates all supervisors and halts the manager.
 //
+// Locking discipline, matching SetTargets: reconcileMu serializes shutdown
+// against reconciliation, and mu is held ONLY to mark the manager stopping and
+// to detach the supervisors. mu is never held across Supervisor.Stop(), which
+// blocks until a supervisor goroutine unwinds.
+//
+// That second point matters for the same reason it does in SetTargets. A
+// supervisor goroutine may be inside processing.Manager.OnPacket, which holds
+// processing.mu and calls back into rtsp.Manager.DescriptorFor, which needs mu.
+// Holding mu here would close that cycle — Stop waiting on a goroutine that is
+// waiting on mu.
+//
 // Stop on a manager that was never started returns immediately instead of
 // waiting on a coordination goroutine that does not exist. Calling Stop twice
 // is safe.
 func (m *Manager) Stop(ctx context.Context) error {
+	// Serialize against SetTargets: a reconciliation already in flight finishes
+	// before we detach, and one starting afterwards observes stopping=true.
+	m.reconcileMu.Lock()
+	defer m.reconcileMu.Unlock()
+
 	m.mu.Lock()
-	if m.cancel == nil {
-		for key, sup := range m.supervisors {
-			sup.Stop()
-			delete(m.supervisors, key)
-		}
-		m.mu.Unlock()
-		return nil
-	}
-	m.cancel()
-	// Stop all supervisors
+	// Mark stopping BEFORE releasing any ownership, so no new supervisor can be
+	// registered and no goroutine can be started against a cancelled context.
+	m.stopping = true
+	cancel := m.cancel
+	detached := make([]*Supervisor, 0, len(m.supervisors))
 	for key, sup := range m.supervisors {
-		sup.Stop()
+		detached = append(detached, sup)
 		delete(m.supervisors, key)
 	}
+	wasStarted := cancel != nil
 	m.mu.Unlock()
+
+	if wasStarted {
+		cancel()
+	}
+
+	// Blocking phase, deliberately outside mu.
+	for _, sup := range detached {
+		sup.Stop()
+	}
+
+	// Never started: nothing to wait for. Any supervisors registered by a
+	// targets-before-Start sequence have still been stopped above.
+	if !wasStarted {
+		return nil
+	}
 
 	select {
 	case <-m.stopped:
@@ -144,11 +184,35 @@ func (m *Manager) SetDescriptorFor(candidateKey string, desc StreamDescriptor) {
 	}
 }
 
-// SetTargets synchronizes the set of active supervisors to match desired targets.
-func (m *Manager) SetTargets(targets []CameraTarget) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// supervisorNeedsRestart reports whether an existing supervisor must be
+// replaced for target. Only connection-affecting fields count: Addr, RTSPPath
+// and the credentials. A change to Codec/Width/Height/FPS/StreamRole alone is
+// metadata and does not justify tearing down a working stream.
+func supervisorNeedsRestart(existing, target CameraTarget) bool {
+	return existing.Addr != target.Addr ||
+		existing.RTSPPath != target.RTSPPath ||
+		existing.Username != target.Username ||
+		existing.Password != target.Password
+}
 
+// SetTargets synchronizes the set of active supervisors to match desired
+// targets.
+//
+// Concurrency and locking, deliberately:
+//
+//   - reconcileMu serializes whole reconciliations, so two concurrent calls
+//     cannot interleave their stop/start phases and cannot create two
+//     supervisors for one candidate key.
+//   - mu is held ONLY to compute the diff and to mutate the supervisor map. It
+//     is never held across Supervisor.Stop/Start, which block for as long as a
+//     supervisor goroutine takes to unwind.
+//
+// The second point fixes a real lock cycle. Before, mu was held while calling
+// sup.Stop(). That supervisor's goroutine may be inside
+// processing.Manager.OnPacket, which holds processing.mu and calls back into
+// rtsp.Manager.DescriptorFor — which needs mu. Reconciliation callbacks make
+// that window far more reachable, so the blocking work now happens outside mu.
+func (m *Manager) SetTargets(targets []CameraTarget) {
 	desired := make(map[string]CameraTarget, len(targets))
 	for _, t := range targets {
 		if t.CandidateKey != "" && t.Addr != "" {
@@ -156,40 +220,65 @@ func (m *Manager) SetTargets(targets []CameraTarget) {
 		}
 	}
 
-	// Remove supervisors not in desired list
+	m.reconcileMu.Lock()
+	defer m.reconcileMu.Unlock()
+
+	m.mu.Lock()
+	if m.stopping {
+		// Shutdown has begun: never register a supervisor or start a goroutine
+		// against a cancelled context, and never resurrect a stopped camera.
+		m.mu.Unlock()
+		return
+	}
+	var toStop []*Supervisor
 	for key, sup := range m.supervisors {
-		if _, ok := desired[key]; !ok {
-			sup.Stop()
+		target, want := desired[key]
+		if !want || supervisorNeedsRestart(sup.target, target) {
+			toStop = append(toStop, sup)
 			delete(m.supervisors, key)
-			m.logger.Info("stopped camera stream supervisor", "candidate_key", key)
 		}
 	}
-
-	// Add or update supervisors
+	var toStart []*Supervisor
 	for key, target := range desired {
-		existing, ok := m.supervisors[key]
-		if !ok {
-			sup := NewSupervisor(target, m.cfg, m.logger)
-			sup.SetPacketSink(m.packetSink)
-			m.supervisors[key] = sup
-			if m.ctx != nil {
-				sup.Start(m.ctx)
-			}
-			m.logger.Info("started camera stream supervisor", "candidate_key", key, "addr", target.Addr, "role", target.StreamRole)
-		} else if existing.target.Addr != target.Addr || existing.target.RTSPPath != target.RTSPPath ||
-			existing.target.Username != target.Username || existing.target.Password != target.Password {
-			// Configuration changed, restart supervisor
-			existing.Stop()
-			sup := NewSupervisor(target, m.cfg, m.logger)
-			sup.SetPacketSink(m.packetSink)
-			m.supervisors[key] = sup
-			if m.ctx != nil {
-				sup.Start(m.ctx)
-			}
-			m.logger.Info("restarted camera stream supervisor with updated config", "candidate_key", key)
+		if _, ok := m.supervisors[key]; ok {
+			continue
+		}
+		sup := NewSupervisor(target, m.cfg, m.logger)
+		sup.SetPacketSink(m.packetSink)
+		m.supervisors[key] = sup
+		toStart = append(toStart, sup)
+	}
+	ctx := m.ctx
+	m.mu.Unlock()
+
+	// Blocking phase, outside mu.
+	for _, sup := range toStop {
+		key := sup.target.CandidateKey
+		sup.Stop()
+		m.logger.Info("stopped camera stream supervisor", "candidate_key", key)
+	}
+	if ctx != nil {
+		for _, sup := range toStart {
+			sup.Start(ctx)
+			m.logger.Info("started camera stream supervisor",
+				"candidate_key", sup.target.CandidateKey,
+				"addr", sup.target.Addr,
+				"role", sup.target.StreamRole)
+		}
+	} else {
+		for _, sup := range toStart {
+			m.logger.Info("registered camera stream supervisor (manager not started yet)",
+				"candidate_key", sup.target.CandidateKey)
 		}
 	}
 
+	m.publishStatus()
+}
+
+// publishStatus takes mu briefly to snapshot the supervisor set.
+func (m *Manager) publishStatus() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.publishStatusLocked()
 }
 

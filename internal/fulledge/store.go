@@ -49,6 +49,24 @@ func (s *EventStore) BaseDir() string {
 	return s.baseDir
 }
 
+// Evict permanently removes a persisted event file (Hito Z B3 retention).
+// wasPending must reflect the event's own recorded SyncStatus so
+// backlogCount, which is maintained by ±1 on every transition, stays
+// coherent — the same invariant Save/transitionLocked already preserve.
+func (s *EventStore) Evict(eventUUID string, wasPending bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	path := filepath.Join(s.baseDir, eventUUID+".json")
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("fulledge: evict event %s: %w", eventUUID, err)
+	}
+	if wasPending {
+		s.backlogCount.Add(-1)
+	}
+	return nil
+}
+
 // BacklogCount returns the current number of unsynced events on disk.
 func (s *EventStore) BacklogCount() int64 {
 	return s.backlogCount.Load()

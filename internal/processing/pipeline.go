@@ -109,7 +109,7 @@ func newCameraPipeline(candidateKey string, desc rtsp.StreamDescriptor, cfg Conf
 		packetCh:     make(chan packetItem, cfg.QueueDepth),
 		auCh:         make(chan AccessUnit, cfg.QueueDepth),
 		depack:       NewH264Depacketizer(),
-		sampler:      NewAdaptiveSampler(cfg.TargetFPS, cfg.Hybrid.IdleFPS, cfg.Hybrid.IdleAfter),
+		sampler:      newPipelineSampler(cfg),
 		ring:         NewRingBuffer(cfg.RingBufferSize),
 		doneCh:       make(chan struct{}),
 		state:        "starting",
@@ -127,6 +127,31 @@ func newCameraPipeline(candidateKey string, desc rtsp.StreamDescriptor, cfg Conf
 		)
 	}
 	return p
+}
+
+// newPipelineSampler builds the frame sampler for cfg.
+//
+// Adaptive (idle/active) sampling is driven exclusively by the motion
+// evaluator's NoteMotion feedback, and the evaluator only exists when
+// cfg.Hybrid.Enabled (see the constructor above). So the adaptive parameters
+// are only honored in hybrid mode; every other mode gets the plain fixed-FPS
+// gate.
+//
+// Passing Hybrid.IdleFPS through unconditionally — which this did before —
+// made a *cloud*-mode pipeline silently drop to idle FPS whenever
+// GEOCAM_VIDEO_HYBRID_IDLE_FPS was set: NoteMotion is never called without a
+// motion detector, so the sampler's `!hasMotion` branch left it permanently in
+// its idle interval and the pipeline emitted at IdleFPS instead of TargetFPS.
+// That contradicted the documented contract that cloud mode is unchanged by
+// the Milestone J knobs (internal/agent/agent.go's Hybrid wiring and
+// GEOCAM_VIDEO_HYBRID_IDLE_FPS's own doc in internal/config), and it made
+// cloud and hybrid indistinguishable in exactly the dimension Hybrid is
+// supposed to differ.
+func newPipelineSampler(cfg Config) *Sampler {
+	if !cfg.Hybrid.Enabled {
+		return NewSampler(cfg.TargetFPS)
+	}
+	return NewAdaptiveSampler(cfg.TargetFPS, cfg.Hybrid.IdleFPS, cfg.Hybrid.IdleAfter)
 }
 
 // Start launches the pipeline's goroutines in the background.

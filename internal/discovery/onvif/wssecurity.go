@@ -71,9 +71,11 @@ func (c *Client) PostSOAPAuth(ctx context.Context, xaddr, action, bodyXML, usern
 }
 
 // GetDeviceInformationAuth is the WS-Security-authenticated counterpart of
-// GetDeviceInformation. It is used only by the one-shot credential test
-// flow (internal/cameratest) — never by the passive, unauthenticated Hito E
-// discovery/enrichment path, which keeps using GetDeviceInformation.
+// GetDeviceInformation. It is used by the one-shot credential test flow
+// (internal/cameratest) and, since Hito Z G1-B, also by the passive
+// discovery/enrichment path (internal/discovery/engine.go) once a
+// credential resolves for a device that rejected the anonymous
+// GetDeviceInformation with ErrAuthRequired.
 func (c *Client) GetDeviceInformationAuth(ctx context.Context, xaddr, username, password string) (*DeviceInfo, error) {
 	body := `<GetDeviceInformation xmlns="http://www.onvif.org/ver10/device/wsdl"/>`
 	respBytes, err := c.PostSOAPAuth(ctx, xaddr, "http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation", body, username, password)
@@ -84,10 +86,11 @@ func (c *Client) GetDeviceInformationAuth(ctx context.Context, xaddr, username, 
 }
 
 // GetCapabilitiesAuth is the WS-Security-authenticated counterpart of
-// GetCapabilities, used only by internal/cameratest. Some devices (e.g. the
-// Tapo TC70) require WS-Security on every ONVIF operation, including
-// GetCapabilities, so the test flow cannot rely on the unauthenticated
-// GetCapabilities to discover the Media service XAddr.
+// GetCapabilities, used by internal/cameratest and, since Hito Z G1-B, by
+// the passive discovery/enrichment path. Some devices (e.g. the Tapo TC70)
+// require WS-Security on every ONVIF operation, including GetCapabilities,
+// so neither flow can rely on the unauthenticated GetCapabilities to
+// discover the Media service XAddr.
 func (c *Client) GetCapabilitiesAuth(ctx context.Context, xaddr, username, password string) (mediaXAddr string, err error) {
 	body := `<GetCapabilities xmlns="http://www.onvif.org/ver10/device/wsdl"><Category>All</Category></GetCapabilities>`
 	respBytes, err := c.PostSOAPAuth(ctx, xaddr, "http://www.onvif.org/ver10/device/wsdl/GetCapabilities", body, username, password)
@@ -97,8 +100,27 @@ func (c *Client) GetCapabilitiesAuth(ctx context.Context, xaddr, username, passw
 	return parseMediaXAddr(respBytes), nil
 }
 
+// GetVideoSourcesAuth is the WS-Security-authenticated counterpart of
+// GetVideoSources. Unlike the other Auth methods here, it is also used by
+// the passive discovery/enrichment path (internal/discovery/engine.go,
+// Hito Z G1-B) once a credential resolves for a device that required
+// authentication — establishing single-source cardinality on an
+// authenticated device needs it, since G1 only ever produces a target for a
+// device with exactly one VideoSource. It reuses the exact same
+// GetVideoSourcesResponse parser as the anonymous call, only the transport
+// (WS-Security vs plain) differs.
+func (c *Client) GetVideoSourcesAuth(ctx context.Context, mediaXAddr, username, password string) ([]VideoSource, error) {
+	body := `<GetVideoSources xmlns="http://www.onvif.org/ver10/media/wsdl"/>`
+	respBytes, err := c.PostSOAPAuth(ctx, mediaXAddr, "http://www.onvif.org/ver10/media/wsdl/GetVideoSources", body, username, password)
+	if err != nil {
+		return nil, err
+	}
+	return parseVideoSourcesResponse(respBytes), nil
+}
+
 // GetProfilesAuth is the WS-Security-authenticated counterpart of
-// GetProfiles, used only by internal/cameratest.
+// GetProfiles, used by internal/cameratest and, since Hito Z G1-B, by the
+// passive discovery/enrichment path.
 func (c *Client) GetProfilesAuth(ctx context.Context, mediaXAddr, username, password string) ([]MediaProfile, error) {
 	body := `<GetProfiles xmlns="http://www.onvif.org/ver10/media/wsdl"/>`
 	respBytes, err := c.PostSOAPAuth(ctx, mediaXAddr, "http://www.onvif.org/ver10/media/wsdl/GetProfiles", body, username, password)
@@ -109,8 +131,9 @@ func (c *Client) GetProfilesAuth(ctx context.Context, mediaXAddr, username, pass
 }
 
 // GetStreamUriAuth is the WS-Security-authenticated counterpart of
-// GetStreamUri, used only by internal/cameratest. Like GetStreamUri, the
-// returned URI is always sanitized to strip userinfo before it is returned.
+// GetStreamUri, used by internal/cameratest and, since Hito Z G1-B, by the
+// passive discovery/enrichment path. Like GetStreamUri, the returned URI is
+// always sanitized to strip userinfo before it is returned.
 func (c *Client) GetStreamUriAuth(ctx context.Context, mediaXAddr, profileToken, username, password string) (string, error) {
 	var escapedToken bytes.Buffer
 	if err := xml.EscapeText(&escapedToken, []byte(profileToken)); err != nil {

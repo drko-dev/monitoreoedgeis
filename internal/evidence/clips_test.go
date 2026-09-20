@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,6 +28,74 @@ func TestSelectFramesBoundsDeduplicatesAndOrders(t *testing.T) {
 func TestNewClipperRejectsUnboundedConfig(t *testing.T) {
 	if _, err := NewClipper(ClipConfig{DataDir: t.TempDir()}); err == nil {
 		t.Fatal("want max frames error")
+	}
+}
+
+type fixedDiskChecker struct {
+	free uint64
+	err  error
+}
+
+func (d fixedDiskChecker) FreeBytes(string) (uint64, error) { return d.free, d.err }
+
+// Hito Z B3: the free-disk gate must refuse the write before ffmpeg is ever
+// invoked (a real ffmpeg is never installed in this test environment, so an
+// encoder-side failure here would prove nothing about the gate itself).
+func TestCaptureRefusesWriteBelowMinFreeDisk(t *testing.T) {
+	dir := t.TempDir()
+	c, err := NewClipper(ClipConfig{
+		DataDir: dir, FFmpegPath: "definitely-not-ffmpeg", MaxFrames: 2,
+		MinFreeDiskBytes: 1000, DiskChecker: fixedDiskChecker{free: 500},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now()
+	h := fixedHistory{frames: []processing.Frame{{Seq: 1, Timestamp: at, OutputWidth: 2, OutputHeight: 2, Data: make([]byte, 6)}}}
+	_, err = c.Capture(context.Background(), h, "event-1", at)
+	if !errors.Is(err, ErrDiskSpaceBelowMinimum) {
+		t.Fatalf("want ErrDiskSpaceBelowMinimum, got %v", err)
+	}
+}
+
+func TestCaptureProceedsWhenFreeDiskAboveMinimum(t *testing.T) {
+	dir := t.TempDir()
+	c, err := NewClipper(ClipConfig{
+		DataDir: dir, FFmpegPath: "definitely-not-ffmpeg", MaxFrames: 2,
+		MinFreeDiskBytes: 1000, DiskChecker: fixedDiskChecker{free: 5000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now()
+	h := fixedHistory{frames: []processing.Frame{{Seq: 1, Timestamp: at, OutputWidth: 2, OutputHeight: 2, Data: make([]byte, 6)}}}
+	_, err = c.Capture(context.Background(), h, "event-1", at)
+	// Must fail for the encoder-not-found reason, never the disk gate — the
+	// gate must not block a write that has enough room.
+	if errors.Is(err, ErrDiskSpaceBelowMinimum) {
+		t.Fatal("disk gate must not block a write with sufficient free space")
+	}
+	if err == nil {
+		t.Fatal("want encoder failure (no real ffmpeg in this test environment)")
+	}
+}
+
+func TestCaptureDiskCheckErrorDegradesSafely(t *testing.T) {
+	dir := t.TempDir()
+	c, err := NewClipper(ClipConfig{
+		DataDir: dir, FFmpegPath: "definitely-not-ffmpeg", MaxFrames: 2,
+		MinFreeDiskBytes: 1000, DiskChecker: fixedDiskChecker{err: errors.New("boom")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now()
+	h := fixedHistory{frames: []processing.Frame{{Seq: 1, Timestamp: at, OutputWidth: 2, OutputHeight: 2, Data: make([]byte, 6)}}}
+	_, err = c.Capture(context.Background(), h, "event-1", at)
+	// Matches fulledge.LimitsManager.CanWriteEvidence exactly: a FreeBytes
+	// error allows the write to proceed rather than blocking it.
+	if errors.Is(err, ErrDiskSpaceBelowMinimum) {
+		t.Fatal("a disk-metrics read failure must degrade safely, not block the write")
 	}
 }
 

@@ -61,7 +61,7 @@ func TestTestONVIFCredential_NoCredentialIsError(t *testing.T) {
 	})
 	defer ts.Close()
 
-	result := TestONVIFCredential(context.Background(), client, provider, "this-device", "", ts.URL)
+	result := TestONVIFCredential(context.Background(), client, provider, "this-device", ts.URL)
 	if result.State != StateError {
 		t.Errorf("expected ERROR when no credential resolves, got %v", result.State)
 	}
@@ -91,7 +91,7 @@ func TestTestONVIFCredential_DeviceScopeValid(t *testing.T) {
 	})
 	defer ts.Close()
 
-	result := TestONVIFCredential(context.Background(), client, provider, "stable-id-1", "", ts.URL)
+	result := TestONVIFCredential(context.Background(), client, provider, "stable-id-1", ts.URL)
 	if result.State != StateValid {
 		t.Fatalf("expected VALID, got %v (err=%v)", result.State, result.Err)
 	}
@@ -100,11 +100,15 @@ func TestTestONVIFCredential_DeviceScopeValid(t *testing.T) {
 	}
 }
 
-func TestTestONVIFCredential_GroupFallback(t *testing.T) {
+func TestTestONVIFCredential_GroupResolvesByCandidateKey(t *testing.T) {
+	// A GROUP credential carries the real per-camera candidate keys of the
+	// cameras assigned to that group — not a group id — and the Edge resolves
+	// it by candidate key (the SaaS already applied DEVICE-over-GROUP
+	// precedence before sending).
 	provider := newTestProvider(t, cameracreds.Credential{
 		ID:            "cred-group",
 		Scope:         cameracreds.ScopeGroup,
-		CandidateKeys: []string{"group-1"},
+		CandidateKeys: []string{"stable-id-group-member"},
 		Username:      "admin",
 		Password:      "pw",
 		Revision:      1,
@@ -116,11 +120,36 @@ func TestTestONVIFCredential_GroupFallback(t *testing.T) {
 	})
 	defer ts.Close()
 
-	// No DEVICE credential for "stable-id-unassigned"; must fall back to
-	// the GROUP credential via groupID.
-	result := TestONVIFCredential(context.Background(), client, provider, "stable-id-unassigned", "group-1", ts.URL)
+	// No DEVICE credential exists for this camera, so the GROUP credential
+	// must resolve for it by candidate key alone.
+	result := TestONVIFCredential(context.Background(), client, provider, "stable-id-group-member", ts.URL)
 	if result.Err != nil && result.State != StateValid {
-		t.Fatalf("expected the group credential to resolve and authenticate, got %v (err=%v)", result.State, result.Err)
+		t.Fatalf("expected the group credential to resolve by candidate key and authenticate, got %v (err=%v)", result.State, result.Err)
+	}
+}
+
+// TestTestONVIFCredential_UnassignedCandidateHasNoCredential pins that a
+// candidate key no credential is assigned to yields the explicit
+// "no credential assigned" outcome — never a guessed or default credential.
+func TestTestONVIFCredential_UnassignedCandidateHasNoCredential(t *testing.T) {
+	provider := newTestProvider(t, cameracreds.Credential{
+		ID:            "cred-group",
+		Scope:         cameracreds.ScopeGroup,
+		CandidateKeys: []string{"stable-id-group-member"},
+		Username:      "admin",
+		Password:      "pw",
+		Revision:      1,
+	})
+
+	client, ts := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(deviceInfoXML))
+	})
+	defer ts.Close()
+
+	result := TestONVIFCredential(context.Background(), client, provider, "stable-id-not-assigned", ts.URL)
+	if result.State != StateError || result.Err == nil {
+		t.Fatalf("expected an explicit no-credential error, got state=%q err=%v", result.State, result.Err)
 	}
 }
 
@@ -138,7 +167,7 @@ func TestTestONVIFCredential_InvalidPassword(t *testing.T) {
 	})
 	defer ts.Close()
 
-	result := TestONVIFCredential(context.Background(), client, provider, "stable-id-1", "", ts.URL)
+	result := TestONVIFCredential(context.Background(), client, provider, "stable-id-1", ts.URL)
 	if result.State != StateInvalid {
 		t.Errorf("expected INVALID, got %v", result.State)
 	}
@@ -160,7 +189,7 @@ func TestTestONVIFCredential_Unreachable(t *testing.T) {
 	})
 
 	// Nothing listens on this port.
-	result := TestONVIFCredential(context.Background(), client, provider, "stable-id-1", "", "http://127.0.0.1:1")
+	result := TestONVIFCredential(context.Background(), client, provider, "stable-id-1", "http://127.0.0.1:1")
 	if result.State != StateUnreachable {
 		t.Errorf("expected UNREACHABLE, got %v (err=%v)", result.State, result.Err)
 	}

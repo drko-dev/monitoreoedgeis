@@ -52,8 +52,8 @@ type ONVIFResult struct {
 // candidateKey MUST be Hito E's stable device identity (discovery.Candidate
 // / DiscoveredDevice's StableIdentity) — never an IP address — since that is
 // the key credentials are assigned against.
-func TestONVIFCredential(ctx context.Context, client *onvif.Client, provider *cameracreds.Provider, candidateKey, groupID, xaddr string) ONVIFResult {
-	cred, ok := provider.Resolve(candidateKey, groupID)
+func TestONVIFCredential(ctx context.Context, client *onvif.Client, provider *cameracreds.Provider, candidateKey, xaddr string) ONVIFResult {
+	cred, ok := provider.Resolve(candidateKey)
 	if !ok {
 		return ONVIFResult{State: StateError, Err: errors.New("cameratest: no credential assigned for this candidate")}
 	}

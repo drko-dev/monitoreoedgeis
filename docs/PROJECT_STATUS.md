@@ -1,30 +1,32 @@
 # PROJECT STATUS — Where we stand right now
 
 > Answers one question: **"¿Dónde estamos parados ahora?"**
-> This document is the real state of the project at this moment. If it disagrees
-> with anyone's memory, this document and Git win.
+> Git + the final Hito Z integration are the source of truth. Historical sections below are retained as implementation history and may describe the state that existed at those earlier hitos.
 
 ## Snapshot
 
-| Field             | Value                                                     |
-| ----------------- | ----------------------------------------------------------- |
-| **PROJECT**       | GEO CAM Edge                                              |
-| **CURRENT HITO**  | I — Modo Cloud (first slice: Edge→SaaS frame push)        |
-| **STATE**         | IMPLEMENTED / UNIT-TESTED — NO real-camera validation yet — NOT REVIEWED |
-| **MERGED**        | Hito G: **YES** (PRs #7/#8/#9, `main` @ `50c7de7`). Hito H: **YES** (PR #10, `main` @ `f7263b3`). Hito I: **NO** — PR open on `feature/cloud-video-sink` (Edge) / `feature/edge-frame-push` (SaaS, `monitoreoia`) |
-| **Branch**        | `feature/cloud-video-sink`                                   |
-| **DEPLOYED PROD** | **NO** — VPS/production untouched                         |
-| **Go version**    | 1.26.2                                                    |
+| Field | Value |
+| --- | --- |
+| **PROJECT** | GEO CAM Edge |
+| **CURRENT HITO** | Z — Producción/evolución |
+| **STATE** | Hito Z functional blockers closed; final integration gate pending |
+| **INTEGRATION BRANCH** | `integration/hito-z-final` |
+| **SOFTWARE 1.0** | **CANDIDATE** — becomes READY when the final integration PR passes and merges unchanged into `main` |
+| **RELEASE 1.0** | **NOT_VALIDATED** — B11: no real signed `v1.0.0` run yet |
+| **DEPLOYED PROD** | **NO / NO TARGET REGISTERED** |
+| **REAL CAMERA / PILOT** | **NOT_VALIDATED / NOT EXECUTED** |
+| **HARDWARE CERTIFIED** | **NO** |
+| **CUDA / REAL PYTORCH** | **NOT_VALIDATED** |
+| **Go version** | 1.26.2 |
 
-Hitos A through H are merged into `main` (Hito G via PRs #7/#8/#9, Hito H via
-PR #10). This snapshot previously said Hito H's PR was still open — that was
-stale; corrected here as part of Hito I per AGENTS.md's "keep PROJECT_STATUS
-accurate" rule. Hito I's first slice (Edge→SaaS frame push, `docs/ROADMAP.md`
-items I1/I3/I4/I5/I8) is implemented and unit-tested on both repos
-(`go test -race ./...` clean on the Edge; SaaS unit tests clean, its
-PostgreSQL-backed integration tests are written but not run in this
-environment — no local Postgres). **No real-camera validation has been done
-for this slice** — see the Hito I section below.
+### Hito Z blocker state
+
+`B1/G1, B2, B3, B4, B5, B6, B7, B8, B10, B12 = CLOSED`.
+
+`B9` is physical validation and remains a separate validation axis.
+`B11` is the real signed release gate and remains NOT_VALIDATED until a tag-driven release actually runs.
+
+See `docs/product/RELEASE_1_0_READINESS.md` for the authoritative distinction between SOFTWARE 1.0, RELEASE 1.0 and DEPLOYED PROD.
 
 ## Hito A — what was implemented (MERGED)
 
@@ -996,7 +998,6 @@ not available here):
 - Real CUDA/NPU hardware.
 - Physical benchmark.
 
-<<<<<<< HEAD
 ## HITO L1–L4 — Transporte seguro Edge ↔ SaaS — CODE DONE
 
 **Hardening pass over transport already built in prior hitos (C, D, E, I, J, K) — no rearchitecture, no new endpoints.**

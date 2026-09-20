@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -21,6 +22,13 @@ type Engine struct {
 	log         *slog.Logger
 	interfaces  []string      // Explicit interfaces or empty for auto-private
 	scanTimeout time.Duration // Scan duration per interface
+
+	// credentialResolver is nil until SetCredentialResolver is called (see
+	// internal/agent's discovery module wiring, Hito Z G1-B). A nil resolver
+	// preserves the exact previous behavior: a device that rejects
+	// unauthenticated SOAP inspection is left with AuthRequired=true and no
+	// profiles/StreamURI, and the scan continues normally.
+	credentialResolver CredentialResolver
 }
 
 // NewEngine creates a new discovery engine.
@@ -66,6 +74,17 @@ func NewEngine(
 // Inventory returns the active local inventory.
 func (e *Engine) Inventory() *Inventory {
 	return e.inventory
+}
+
+// SetCredentialResolver wires an authenticated-ONVIF-retry credential
+// resolver into the engine (Hito Z G1-B). It follows the same
+// post-construction-setter shape as SetXAddrValidator on the onvif.Client,
+// for the same reason: the resolver (backed by cameracreds.Provider) is
+// only available once internal/agent has built the camera-credentials
+// subsystem, which happens after the engine itself is constructed. Passing
+// nil restores the previous anonymous-only behavior.
+func (e *Engine) SetCredentialResolver(resolve CredentialResolver) {
+	e.credentialResolver = resolve
 }
 
 // ScanResult holds the outcome of a single discovery scan cycle.
@@ -133,6 +152,17 @@ func (e *Engine) RunScan(ctx context.Context) (*ScanResult, error) {
 	for _, dev := range enriched {
 		stored := e.inventory.Upsert(dev)
 		recorded = append(recorded, *stored)
+	}
+
+	// Step 5: expire devices that have not been seen within DeviceTTL.
+	//
+	// This runs on every SUCCESSFUL scan, including one that found nothing, so
+	// a camera that disappears from the LAN is eventually removed even if no
+	// further Upsert happens (expiry used to be a side effect of Upsert only).
+	// It is TTL-based, so a single missed multicast response never removes a
+	// device — only sustained absence does.
+	if pruned := e.inventory.PruneExpired(time.Now().UTC()); pruned > 0 {
+		e.log.Info("discovery: pruned expired devices from inventory", slog.Int("pruned", pruned))
 	}
 
 	return &ScanResult{
@@ -257,8 +287,17 @@ func (e *Engine) enrichSingleDevice(ctx context.Context, dev DiscoveredDevice) D
 	// 1. GetDeviceInformation
 	info, err := e.onvifClient.GetDeviceInformation(ctx, dev.XAddr)
 	if err != nil {
-		if strings.Contains(err.Error(), "authentication required") || strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "403") {
+		if errors.Is(err, onvif.ErrAuthRequired) {
 			dev.AuthRequired = true
+			// Hito Z G1-B: a resolvable credential lets us retry the whole
+			// enrichment over WS-Security instead of leaving the device
+			// permanently un-enriched. No credential, or the authenticated
+			// retry itself failing, falls through to the same behavior as
+			// before: AuthRequired stays true, no profiles/StreamURI, and
+			// the scan continues with the other devices.
+			if authDev, ok := e.tryAuthenticatedEnrich(ctx, dev); ok {
+				return authDev
+			}
 		}
 		// If unauthenticated SOAP fails, we keep the data discovered passively
 		return dev
@@ -339,6 +378,109 @@ func (e *Engine) enrichSingleDevice(ctx context.Context, dev DiscoveredDevice) D
 	}
 
 	return dev
+}
+
+// tryAuthenticatedEnrich retries enrichment over WS-Security when a
+// credential resolves for dev.StableIdentity. It mirrors
+// enrichSingleDevice's anonymous flow field-for-field, using only the
+// existing GetXxxAuth methods (never reimplementing WS-Security).
+//
+// ok=false means "leave dev exactly as the caller already set it" — no
+// credential was available, or an authenticated call itself failed (wrong
+// or stale password, camera-side change). Either way this never falls back
+// to guessing default credentials and never aborts the rest of the scan.
+func (e *Engine) tryAuthenticatedEnrich(ctx context.Context, dev DiscoveredDevice) (DiscoveredDevice, bool) {
+	if e.credentialResolver == nil {
+		return dev, false
+	}
+	username, password, ok := e.credentialResolver(dev.StableIdentity)
+	if !ok {
+		return dev, false
+	}
+
+	// 1. GetDeviceInformationAuth
+	info, err := e.onvifClient.GetDeviceInformationAuth(ctx, dev.XAddr, username, password)
+	if err != nil {
+		return dev, false
+	}
+	if info != nil {
+		if info.Manufacturer != "" {
+			dev.Manufacturer = info.Manufacturer
+		}
+		if info.Model != "" {
+			dev.Model = info.Model
+		}
+		if info.SerialNumber != "" {
+			dev.Serial = info.SerialNumber
+		}
+		if info.FirmwareVersion != "" {
+			dev.Firmware = info.FirmwareVersion
+		}
+	}
+
+	// 2. Discover Media Service XAddr via GetCapabilitiesAuth
+	mediaXAddr, err := e.onvifClient.GetCapabilitiesAuth(ctx, dev.XAddr, username, password)
+	if err != nil || mediaXAddr == "" {
+		mediaXAddr = dev.XAddr // fallback to primary XAddr
+	}
+
+	// 3. GetVideoSourcesAuth to detect multichannel NVR/DVR
+	sources, err := e.onvifClient.GetVideoSourcesAuth(ctx, mediaXAddr, username, password)
+	if err == nil && len(sources) > 0 {
+		var mappedSources []VideoSource
+		for _, s := range sources {
+			mappedSources = append(mappedSources, VideoSource{
+				SourceToken: s.SourceToken,
+				Label:       s.Label,
+			})
+		}
+		dev.VideoSources = mappedSources
+		dev.DeviceType = classifyDeviceType(strings.Join(dev.Scopes, " "), dev.Types, len(sources))
+	}
+
+	// 4. GetProfilesAuth to discover streams and resolutions
+	profiles, err := e.onvifClient.GetProfilesAuth(ctx, mediaXAddr, username, password)
+	if err == nil && len(profiles) > 0 {
+		var mappedProfiles []MediaProfile
+		for _, p := range profiles {
+			role := StreamRoleUnknown
+			if p.Role == onvif.StreamRoleMain {
+				role = StreamRoleMainStream
+			} else if p.Role == onvif.StreamRoleSub {
+				role = StreamRoleSubStream
+			}
+
+			uri, _ := e.onvifClient.GetStreamUriAuth(ctx, mediaXAddr, p.Token, username, password)
+
+			mappedProfiles = append(mappedProfiles, MediaProfile{
+				Token:     p.Token,
+				Name:      p.Name,
+				Codec:     p.Codec,
+				Width:     p.Width,
+				Height:    p.Height,
+				FPS:       p.FPS,
+				StreamURI: uri,
+				Role:      role,
+			})
+		}
+
+		if len(dev.VideoSources) > 0 {
+			dev.VideoSources[0].Profiles = mappedProfiles
+		} else {
+			dev.VideoSources = []VideoSource{
+				{
+					SourceToken: "source_0",
+					Label:       "Channel 1",
+					Profiles:    mappedProfiles,
+				},
+			}
+		}
+	}
+
+	// dev.AuthRequired stays true: it is informational ("this device does
+	// require credentials"), not a gate the target builder uses — the
+	// builder only cares whether a credential actually resolved.
+	return dev, true
 }
 
 func classifyDeviceType(scopes, types string, videoSourceCount int) DeviceType {

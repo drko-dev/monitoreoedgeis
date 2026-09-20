@@ -5,7 +5,19 @@
 # systemd unit template, install/update/rollback/uninstall scripts, example
 # config, VERSION and ARCH marker files, and a .sha256 checksum.
 #
-# Usage: package.sh [version] [dist-dir]
+# Usage: package.sh [--require-ffmpeg] [version] [dist-dir]
+#
+# --require-ffmpeg (Hito Z B10): fail closed instead of packaging without
+# ffmpeg. A real release must never publish an appliance that silently
+# lacks ffmpeg — GEOCAM_VIDEO_PIPELINE_ENABLED would then fail at runtime
+# with no warning anyone saw at build time. Local/dev packaging that
+# deliberately skips ffmpeg keeps working exactly as before: this flag is
+# opt-in, so omitting it preserves the previous warn-and-continue behavior.
+#
+# Every artifact always carries the Full Edge vision worker's SOURCES (B2)
+# under vision-worker/. The Python runtime does not travel with it: the wheels
+# are architecture-specific, so a portable virtualenv for amd64+arm64 cannot
+# exist honestly. See scripts/check-vision-runtime.sh.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APPLIANCE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -13,13 +25,29 @@ REPO_ROOT="$(cd "$APPLIANCE_DIR/../.." && pwd)"
 # shellcheck source=lib.sh
 . "$SCRIPT_DIR/lib.sh"
 
-VERSION="${1:-$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo dev)}"
-DIST_DIR="${2:-$REPO_ROOT/dist}"
+REQUIRE_FFMPEG=0
+ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --require-ffmpeg) REQUIRE_FFMPEG=1 ;;
+        *) ARGS+=("$arg") ;;
+    esac
+done
+
+VERSION="${ARGS[0]:-$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo dev)}"
+DIST_DIR="${ARGS[1]:-$REPO_ROOT/dist}"
+
+# Normalize to an absolute path. Packaging below runs `( cd "$STAGE" && tar
+# czf "$ARTIFACT" . )`, so a relative $DIST_DIR/$ARTIFACT would resolve
+# against $STAGE (a throwaway mktemp dir), not against the caller's actual
+# working directory -- silently writing (or failing to write) the tarball
+# somewhere the caller never looks. release.yml called this with a plain
+# "dist" and would have hit exactly that.
+mkdir -p "$DIST_DIR"
+DIST_DIR="$(cd "$DIST_DIR" && pwd)"
 
 log "building geocam-edge $VERSION for linux/amd64 and linux/arm64"
 ( cd "$REPO_ROOT" && make build-linux VERSION="$VERSION" )
-
-mkdir -p "$DIST_DIR"
 
 for arch in amd64 arm64; do
     STAGE="$(mktemp -d)"
@@ -35,6 +63,11 @@ for arch in amd64 arm64; do
         cp "$FFMPEG_BIN" "$STAGE/ffmpeg"
         chmod 0755 "$STAGE/ffmpeg"
         log "bundling static ffmpeg for $arch"
+    elif [ "$REQUIRE_FFMPEG" = "1" ]; then
+        log "ERROR: --require-ffmpeg was set but no static ffmpeg found at $FFMPEG_BIN." \
+            "Run scripts/build-ffmpeg-static.sh $arch first. Refusing to publish an" \
+            "appliance artifact where GEOCAM_VIDEO_PIPELINE_ENABLED would fail at runtime."
+        exit 1
     else
         log "warning: no static ffmpeg found at $FFMPEG_BIN — packaging without it." \
             "Run scripts/build-ffmpeg-static.sh $arch first (requires Docker as a BUILD-time" \
@@ -48,13 +81,33 @@ for arch in amd64 arm64; do
     # repo checkout or from an extracted tarball.
     mkdir -p "$STAGE/scripts" "$STAGE/systemd" "$STAGE/config"
     cp "$SCRIPT_DIR"/install.sh "$SCRIPT_DIR"/update.sh "$SCRIPT_DIR"/rollback.sh \
-       "$SCRIPT_DIR"/uninstall.sh "$SCRIPT_DIR"/wait-ready.sh "$SCRIPT_DIR"/bootstrap.sh "$SCRIPT_DIR"/lib.sh "$SCRIPT_DIR"/ota-updater.sh "$STAGE/scripts/"
+       "$SCRIPT_DIR"/uninstall.sh "$SCRIPT_DIR"/wait-ready.sh "$SCRIPT_DIR"/bootstrap.sh "$SCRIPT_DIR"/lib.sh "$SCRIPT_DIR"/ota-updater.sh \
+       "$SCRIPT_DIR"/check-vision-runtime.sh "$STAGE/scripts/"
     cp "$APPLIANCE_DIR/systemd/geocam-edge.service.in" "$STAGE/systemd/"
     if [ -f "$APPLIANCE_DIR/systemd/geocam-edge-bootstrap.service.in" ]; then
         cp "$APPLIANCE_DIR/systemd/geocam-edge-bootstrap.service.in" "$STAGE/systemd/"
     fi
     cp "$APPLIANCE_DIR/systemd/geocam-edge-ota-updater.service.in" "$APPLIANCE_DIR/systemd/geocam-edge-ota-updater.path.in" "$STAGE/systemd/"
     cp "$APPLIANCE_DIR/config/geocam-edge.env.example" "$STAGE/config/"
+
+    # Full Edge's out-of-process Python worker (B2). These are plain,
+    # architecture-independent sources -- no interpreter, no virtualenv, no
+    # wheels and no model weights travel here, because shipping a "portable
+    # venv" across amd64 and arm64 would be a lie: native wheels are
+    # per-architecture. The runtime is provisioned on the appliance and
+    # verified by scripts/check-vision-runtime.sh. PyTorch never enters the Go
+    # process.
+    VISION_SRC="$REPO_ROOT/deploy/vision-worker"
+    for f in worker.py backend.py requirements.txt; do
+        if [ ! -f "$VISION_SRC/$f" ]; then
+            log "ERROR: missing $VISION_SRC/$f — the Full Edge vision worker cannot be packaged."
+            exit 1
+        fi
+    done
+    mkdir -p "$STAGE/vision-worker"
+    cp "$VISION_SRC/worker.py" "$VISION_SRC/backend.py" "$VISION_SRC/requirements.txt" "$STAGE/vision-worker/"
+    chmod 0644 "$STAGE/vision-worker/"*
+    log "bundled Full Edge vision worker sources for $arch (runtime installed separately)"
 
     ARTIFACT="$DIST_DIR/geocam-edge-$VERSION-linux-$arch.tar.gz"
     ( cd "$STAGE" && tar czf "$ARTIFACT" . )

@@ -139,6 +139,20 @@ type VideoPipelineSummary struct {
 	// CloudBufferReporter and reports buffering as active (Milestone I6).
 	CloudBuffer  *CloudBufferStats  `json:"cloud_buffer,omitempty"`
 	RouterQueues []RouterQueueStats `json:"router_queues,omitempty"`
+
+	// PipelineLimit is the configured admission ceiling
+	// (GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES). It bounds how many cameras can
+	// have a decode pipeline at once; cameras beyond it are NOT admitted.
+	PipelineLimit int `json:"pipeline_limit"`
+	// SkippedLimit counts frames dropped because the admission ceiling was
+	// already reached. Before this existed the drop was completely silent, so
+	// a site running more cameras than the limit looked healthy while only
+	// some cameras were actually being decoded.
+	SkippedLimit int64 `json:"skipped_limit"`
+	// SkippedLimitKeys names up to maxReportedSkippedKeys candidate keys that
+	// hit the ceiling, so an operator can see WHICH cameras are not being
+	// decoded. Bounded on purpose — never one entry per frame.
+	SkippedLimitKeys []string `json:"skipped_limit_keys,omitempty"`
 }
 
 // CloudBufferStats is a point-in-time snapshot of Milestone I6's offline

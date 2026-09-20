@@ -29,6 +29,18 @@ const (
 	StreamRoleUnknown    StreamRole = "unknown"
 )
 
+// CredentialResolver resolves the camera credential to use for an
+// authenticated ONVIF retry, keyed by a device's StableIdentity — never an
+// IP address. ok=false means no credential is available for that candidate;
+// the caller must keep treating the device as AuthRequired and move on to
+// the next one rather than guessing a default.
+//
+// This is a narrow function type, not an import of internal/cameracreds:
+// discovery stays usable without pulling in the credential cache/store, and
+// the real adapter (over cameracreds.Provider.Resolve) is built by
+// internal/agent, which already depends on both packages.
+type CredentialResolver func(candidateKey string) (username, password string, ok bool)
+
 // MediaProfile represents an ONVIF Media Profile exposed by a video source.
 type MediaProfile struct {
 	Token     string     `json:"token"`
@@ -199,6 +211,32 @@ func (inv *Inventory) evictExpiredLocked(now time.Time) {
 	}
 }
 
+// PruneExpired removes every device whose LastSeen is older than DeviceTTL and
+// returns how many were removed.
+//
+// It exists because expiry previously happened only as a side effect of Upsert
+// (evictExpiredLocked above), so List/Count/Get kept reporting devices that had
+// stopped being seen — up to a full DeviceTTL after the last successful scan.
+// Any consumer that reconciles inventory into other subsystems must prune
+// explicitly before reading, otherwise it would keep acting on stale devices.
+//
+// A single missed multicast response is NOT an expiry: a device is removed only
+// once now-LastSeen exceeds DeviceTTL, which is deliberately not configurable
+// here. Callers pass `now` so the behaviour is deterministic under test.
+func (inv *Inventory) PruneExpired(now time.Time) int {
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+
+	removed := 0
+	for key, d := range inv.devices {
+		if now.Sub(d.LastSeen) > DeviceTTL {
+			delete(inv.devices, key)
+			removed++
+		}
+	}
+	return removed
+}
+
 // List returns a snapshot of all discovered devices in the inventory.
 func (inv *Inventory) List() []DiscoveredDevice {
 	inv.mu.RLock()
@@ -227,4 +265,17 @@ func (inv *Inventory) Get(key string) *DiscoveredDevice {
 		return &copyDev
 	}
 	return nil
+}
+
+// SetLastSeenForTests backdates an already-inventoried device's LastSeen,
+// for deterministic TTL-expiry tests in other packages (e.g.
+// internal/agent's reconciler suite) that cannot wait out the real
+// DeviceTTL and have no access to this package's unexported fields. It is a
+// no-op if key is not present. Production code has no reason to call this.
+func (inv *Inventory) SetLastSeenForTests(key string, when time.Time) {
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	if d, ok := inv.devices[key]; ok {
+		d.LastSeen = when
+	}
 }

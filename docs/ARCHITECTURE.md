@@ -41,16 +41,30 @@ is being built towards. Anything marked **future** does not exist yet.
                 Python / YOLO
 ```
 
-> The Vision Worker **does not exist yet**. No Python, no YOLO, no PyTorch is
-> present in this repository or in the container image.
+> The Vision Worker **exists**: `deploy/vision-worker/` (Python, Ultralytics)
+> and `internal/vision` (the Go-side supervisor). It is a separate process the
+> agent `exec`s and talks to over a Unix domain socket with newline-delimited
+> JSON. PyTorch is never embedded in the Go binary — the module has no
+> third-party dependencies, there is no `import "C"`, and every target builds
+> `CGO_ENABLED=0`. It is still not present in the **container image**, which is
+> distroless by design. The appliance package ships the worker's *sources*
+> (under `vision-worker/`), but not a Python runtime — the wheels are
+> architecture-specific, so the runtime is provisioned on the appliance.
 
 Mode semantics:
 
 | Mode     | Meaning                                                       |
 | -------- | ------------------------------------------------------------- |
-| `cloud`  | Lightweight gateway. No local YOLO.                           |
-| `hybrid` | Local preprocessing + Cloud processing.                       |
-| `edge`   | Full local inference (via the future Vision Worker).          |
+| `cloud`  | Lightweight gateway. No local YOLO; frames go to the Cloud.   |
+| `hybrid` | Local motion gating + Cloud inference. No local model.        |
+| `edge`   | Full local inference via the out-of-process Vision Worker.    |
+
+These three modes are **where inference runs**. The commercial profiles the
+customer buys — Gateway, Hybrid and Full Edge — are these modes combined with
+whether the local video pipeline is enabled. That mapping, the capability
+matrix and each profile's verified status live in
+[docs/product/COMMERCIAL_MODES.md](product/COMMERCIAL_MODES.md), which is the
+source of truth for product-level claims; this document stays technical.
 
 ## Design decisions
 
@@ -65,9 +79,12 @@ fan-out work (many cameras, heartbeats, buffering) that is coming.
 
 Deliberately. YOLO/Ultralytics/PyTorch is a Python ecosystem; embedding it would
 force a heavy image and a Python runtime onto every gateway, including the
-`cloud`-mode ones that never run inference. Instead the core will talk to a
+`cloud`-mode ones that never run inference. Instead the core talks to a
 separate **Vision Worker** process, deployed only where the processing mode
-requires it.
+requires it. The worker is spawned by `internal/vision.Worker` and speaks
+newline-delimited JSON over a single Unix socket; the Go side provisions the
+socket's directory, hands over the model paths and the requested device, and
+reads back the device the worker actually confirmed.
 
 Consequence: the `cloud`-mode agent stays tiny (a static binary on distroless),
 which is the common case.
@@ -76,8 +93,14 @@ which is the common case.
 
 `cloud`, `hybrid` and `edge` are a typed enum (`config.ProcessingMode`), not
 three products. The mode is validated at startup, carried in the runtime context
-and surfaced in the health snapshot. This milestone implements **no functional
-difference** between them — only the modeling.
+and surfaced in the health snapshot. All three are **implemented and test-
+covered** (`cloud` since Hito I, `hybrid` since Hito J, `edge` since Hito K).
+
+`ProcessingMode` alone is a *request*: it selects where inference runs but does
+not build the local media path. `GEOCAM_VIDEO_PIPELINE_ENABLED` (default false)
+does that, and `internal/config/profile.go` derives the resulting **effective
+profile** (`gateway`, `hybrid`, `full-edge`, or `gateway-no-media` when the
+pipeline is off), which the agent logs and `/status` reports as `profile`.
 
 ### Local health HTTP (Hito B)
 

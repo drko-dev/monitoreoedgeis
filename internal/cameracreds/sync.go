@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
@@ -22,6 +23,15 @@ type SyncOptions struct {
 	DeviceID   string
 	Credential string
 	Log        *slog.Logger
+
+	// OnSuccess, if set, is called at the end of every Sync that returns
+	// nil — after fetch, validation, and Store.Apply have already
+	// completed, never under Store's lock. It fires even when the applied
+	// snapshot did not change anything (the reconciler it drives, Hito Z
+	// G1-B, is idempotent), and it never fires on a transport failure,
+	// unauthorized response, malformed payload, or persist failure — those
+	// paths return early and keep the last-good cache untouched.
+	OnSuccess func()
 }
 
 // Syncer performs one fetch-decode-validate-apply cycle against the SaaS.
@@ -73,29 +83,52 @@ func (s *Syncer) Sync(ctx context.Context) error {
 		return err
 	}
 
-	changed, err := s.opts.Store.Apply(creds)
+	stats, err := s.opts.Store.Apply(creds)
 	if err != nil {
 		s.opts.Log.Error("cameracreds: failed to persist synced credentials",
 			slog.String("reason", "persist_failed"))
 		return err
 	}
-	if changed {
-		s.opts.Log.Info("cameracreds: credential cache updated", slog.Int("count", len(creds)))
+	if stats.Changed() {
+		// Counts only — never an id, candidate key, username or password.
+		s.opts.Log.Info("cameracreds: credential cache updated",
+			slog.Int("added", stats.Added),
+			slog.Int("updated", stats.Updated),
+			slog.Int("removed", stats.Removed),
+			slog.Int("active", len(creds)))
+	}
+	if s.opts.OnSuccess != nil {
+		s.opts.OnSuccess()
 	}
 	return nil
 }
 
-// decodePayload validates every entry in resp and drops revoked ones. Any
-// single invalid entry rejects the whole payload — never a partial apply.
+// decodePayload validates every entry in resp and converts it from the SaaS
+// wire shape to this package's canonical representation. Any single invalid
+// entry rejects the whole payload — never a partial apply.
+//
+// The conversion is deliberately explicit, because two wire details differ
+// from the internal representation and getting either wrong breaks every
+// sync:
+//
+//   - the SaaS id is a NUMBER (BIGSERIAL), rendered here as its canonical
+//     decimal string;
+//   - the SaaS scope is LOWERCASE ("device" | "group"), normalized here to
+//     ScopeDevice/ScopeGroup. Any other value is rejected.
+//
+// Revocation needs no special case: the SaaS expresses it by omission, so an
+// entry that is absent from an authoritative snapshot is removed by
+// Store.Apply. There is no revoked flag on the wire.
 func decodePayload(resp transport.CameraCredentialsResponse) ([]Credential, error) {
 	out := make([]Credential, 0, len(resp.Credentials))
 	for _, p := range resp.Credentials {
-		if p.Revoked {
-			continue
+		scope, err := parseScope(p.Scope)
+		if err != nil {
+			return nil, fmt.Errorf("cameracreds: credential id %d: %w", p.ID, err)
 		}
 		c := Credential{
-			ID:            p.ID,
-			Scope:         Scope(p.Scope),
+			ID:            strconv.FormatInt(p.ID, 10),
+			Scope:         scope,
 			CandidateKeys: p.CandidateKeys,
 			Username:      p.Username,
 			Password:      p.Password,

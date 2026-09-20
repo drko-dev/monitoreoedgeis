@@ -78,9 +78,86 @@ See `deploy/appliance/config/geocam-edge.env.example` for the full,
 commented list of every `GEOCAM_*` variable `internal/config.Load()` actually
 reads, with its real default and validation range from that code — not
 invented "recommended production values" for the settings that are still
-open decisions upstream (notably the Cloud offline buffer size and bandwidth
-caps, and `GEOCAM_PROCESSING_MODE=hybrid|edge`, which parse successfully but
-have no functional implementation yet beyond `cloud`).
+open decisions upstream (notably the Cloud offline buffer size and the
+bandwidth caps).
+
+All three processing modes are **implemented**: `cloud` (Hito I), `hybrid`
+(Hito J) and `edge` (Hito K). But `GEOCAM_PROCESSING_MODE` only selects *where
+inference runs* — it does not build the local media path. That is
+`GEOCAM_VIDEO_PIPELINE_ENABLED`, which defaults to **false**, so a stock install
+of this package decodes and uploads nothing: it runs discovery, camera
+connectivity, health, heartbeat, control and OTA, and no frame ever reaches
+Cloud inference. `/status` reports that as `profile: gateway-no-media`.
+
+To run a specific commercial profile, start from one of the ready-made files
+alongside the example:
+
+| Profile   | File                                          | What it runs |
+| --------- | --------------------------------------------- | ------------ |
+| Gateway   | `geocam-edge.env.gateway.example`   | local media path, Cloud runs YOLO |
+| Hybrid    | `geocam-edge.env.hybrid.example`    | local motion gating, Cloud runs YOLO |
+| Full Edge | `geocam-edge.env.fulledge.example`  | local YOLO via the Python Vision Worker |
+
+Read [docs/product/COMMERCIAL_MODES.md](../product/COMMERCIAL_MODES.md) before
+committing to one: it carries the capability matrix, what has and has not been
+verified for each profile, and the known gaps. Two matter most for an appliance
+install — **Full Edge still needs its Python runtime and model weights
+provisioned by hand** (the package now ships the Vision Worker's *sources*, see
+below, but deliberately not a Python runtime: ultralytics/PyTorch wheels are
+architecture-specific, so a portable virtualenv covering amd64 and arm64 cannot
+exist honestly); and **no camera has been validated on real hardware**.
+
+Camera-target provisioning itself is no longer the gap. Hito Z G1 is
+**IMPLEMENTED / TESTED LOCAL**: discovered devices and their resolved
+credentials are reconciled into `rtsp.Manager.SetTargets`, so `/status` reports
+`cameras` and heartbeats carry a real list once discovery has seen a camera.
+What that does **not** mean: **real cameras are NOT_VALIDATED**, **DVR/NVR
+multi-channel devices are NOT_VALIDATED** (only single-source devices produce a
+target; channels are never collapsed under one key), and **no physical pilot has
+been executed**. Do not read a populated `cameras` list as a validated camera.
+
+### Full Edge: the shipped Vision Worker (B2)
+
+Every appliance artifact carries the Full Edge worker's sources under
+`vision-worker/`:
+
+```
+vision-worker/worker.py
+vision-worker/backend.py
+vision-worker/requirements.txt
+```
+
+`install.sh` places them in the versioned release directory
+(`/opt/geocam-edge/releases/<version>/vision-worker/`) and derives the worker
+**script** path into the systemd unit:
+
+```
+Environment=GEOCAM_EDGE_YOLO_WORKER_ARGS=/opt/geocam-edge/current/vision-worker/worker.py
+```
+
+so an operator only ever supplies the **interpreter**, via
+`GEOCAM_EDGE_YOLO_WORKER_CMD`. The interpreter is not shipped and is not
+guessed: a default path would hide a missing installation.
+
+Because the heavy dependencies are imported lazily inside the worker's `load()`,
+the worker's sources import cleanly even with nothing installed — a naive
+"does it import?" check would report a healthy Full Edge that cannot infer. Use
+the packaged preflight instead, which names the dependencies explicitly:
+
+```sh
+/opt/geocam-edge/current/scripts/check-vision-runtime.sh
+```
+
+It checks the interpreter (and its version), the worker sources, that they
+compile, and that `ultralytics`/`torch`/`pillow` actually import; it reports
+versions, returns non-zero with a reproducible remediation when anything is
+missing, and **never downloads a model, never loads weights and never runs
+inference**. Model weights remain external under `GEOCAM_DATA_DIR/models` and
+are never read, moved or deleted by install, update, rollback or uninstall.
+
+What this does **not** establish: real PyTorch inference, CUDA, or hardware
+certification. Those remain `NOT_VALIDATED` (see
+[docs/deployment/hardware.md](hardware.md)).
 
 `GEOCAM_ENROLLMENT_TOKEN` is deliberately **not** a line in this file: the
 `enroll` subcommand reads it from stdin or a one-shot environment variable at
@@ -206,9 +283,13 @@ layer on top of standard base Linux distributions (Debian 12 minimal, Ubuntu
      > [!NOTE]
      > El appliance tarball completo (que incluye el binario `geocam-edge`,
      > `scripts/`, `systemd/`, `config/`, `VERSION` y `ARCH`) es el generado por
-     > `deploy/appliance/scripts/package.sh`. No debe confundirse con el tarball de
-     > GitHub Release P6 actual (`.github/workflows/release.yml`), que hoy empaqueta
-     > únicamente el binario suelto.
+     > `deploy/appliance/scripts/package.sh`. El GitHub Release actual
+     > (`.github/workflows/release.yml`) **invoca ese mismo `package.sh`**, así que
+     > publica el tarball completo de appliance — no un binario suelto. Lo que
+     > **no** incluye es el `ffmpeg` estático: `release.yml` no ejecuta
+     > `build-ffmpeg-static.sh`, de modo que hay que provisionar `ffmpeg` aparte
+     > o el pipeline de video no arrancará (`package.sh` avisa de esto al
+     > empaquetar). Ver `docs/product/RELEASE_1_0_READINESS.md`.
    - Execute installation: `sudo GEOCAM_VERSION=<version> ./scripts/install.sh ./geocam-edge ./ffmpeg`.
    - This writes:
      - Versioned binaries and helper scripts in `/opt/geocam-edge/releases/<version>/`.

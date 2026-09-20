@@ -12,6 +12,11 @@ type Status struct {
 	FallbackCPUCount       int64          `json:"fallback_cpu_count"`
 	Hardware               HardwareStatus `json:"hardware"`
 	Limits                 LimitsStatus   `json:"limits"`
+	// Retention is the last completed Hito Z B3 sweep report. Zero-valued
+	// (all fields 0, At the zero time) when retention is disabled or has not
+	// swept yet — never omitted, so its absence is never mistaken for "no
+	// growth happened".
+	Retention RetentionReport `json:"retention"`
 }
 
 // HealthSink allows Service to publish its status snapshot into the agent health reporter.

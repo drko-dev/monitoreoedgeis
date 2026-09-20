@@ -19,18 +19,48 @@ const (
 	ScopeGroup Scope = "GROUP"
 )
 
+// parseScope normalizes a scope string arriving from the SaaS into this
+// package's Scope constants. It is the single place where the wire
+// representation is translated, so a SaaS contract change is caught here
+// rather than silently producing a credential that never matches.
+//
+// The SaaS sends the LOWERCASE values of its scope VARCHAR(16) column
+// ("device" | "group" — see monitoreoia's camera_credentials table and
+// routers/camera_credentials.py). This package's own constants are uppercase
+// for historical reasons; the translation lives here.
+//
+// Anything else — including the uppercase wire form, which the SaaS does not
+// send — is an error, and the caller must reject the entire payload rather
+// than cache a credential whose scope it does not understand.
+func parseScope(raw string) (Scope, error) {
+	switch raw {
+	case "device":
+		return ScopeDevice, nil
+	case "group":
+		return ScopeGroup, nil
+	default:
+		return "", fmt.Errorf("cameracreds: unknown credential scope %q", raw)
+	}
+}
+
 // Credential is one resolved camera credential, held in memory with its
 // password in plaintext. It is only ever written to disk through Store,
 // which encrypts Password before serializing.
 type Credential struct {
-	// ID is the SaaS-issued stable identifier for this credential entry.
+	// ID is the SaaS numeric credential id (BIGSERIAL), rendered as the
+	// canonical decimal string this package and Store key on. The conversion
+	// happens once, at the transport boundary in decodePayload, so every
+	// other layer sees a stable string.
 	ID string
-	// Scope is ScopeDevice or ScopeGroup.
+	// Scope is ScopeDevice or ScopeGroup, already normalized from the SaaS
+	// lowercase wire form at the boundary.
 	Scope Scope
-	// CandidateKeys are the stable_identity/group-id strings this credential
-	// applies to — never an IP address. A DEVICE credential has exactly one
-	// entry; a GROUP credential can have N (one per device assigned to that
-	// group).
+	// CandidateKeys are the stable candidate identities this credential
+	// applies to — never an IP address, and never a group id. The SaaS sends
+	// the real per-camera candidate keys for BOTH scopes, so resolution is by
+	// candidate key in either case (see Provider.Resolve). A DEVICE
+	// credential has exactly one entry; a GROUP credential can have N (one
+	// per device assigned to that group).
 	CandidateKeys []string
 	Username      string
 	// Password is the plaintext secret. Never logged, never encoded in a
