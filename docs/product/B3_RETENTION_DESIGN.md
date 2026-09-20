@@ -136,6 +136,14 @@ omits `models/`, `run/`, `ota/`).
 
 ## 5. Design
 
+> **Corrected semantics, verified by test:** a failed delete STOPS that tree
+> (it does not delete around the failure), and the pending backlog snapshot
+> FAILS CLOSED — if it cannot be read, malformed, or a record is incomplete,
+> that sweep deletes nothing at all. The pending snapshot is loaded **once**,
+> before any delete, and a pending record's `submission.event.event_uuid`
+> protects that event's metadata even when its local `SyncStatus` claims
+> `synced`, because the durable backlog is the more trustworthy source.
+>
 > **Implemented in B3-A** for the events and captures trees:
 > `internal/fulledge/retention.go` (`RetentionManager`), wired from
 > `internal/agent/fulledge_module.go` through `fulledge.ServiceConfig.Retention`,

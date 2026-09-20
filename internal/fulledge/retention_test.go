@@ -859,3 +859,294 @@ func TestMaybeSweep_NoOpWhenDisabled(t *testing.T) {
 		t.Fatal("MaybeSweep must not scan when no bound is configured")
 	}
 }
+
+// ── Corrected safety semantics ─────────────────────────────────────────────
+
+// failingRemove returns a remove seam that fails ONLY for the named basename,
+// so a single-delete failure can be isolated from the rest. A chmod-based
+// failure cannot do this: it makes every remove fail, which cannot distinguish
+// "stops the tree" from "keeps trying".
+func failingRemove(failOn string) func(string) error {
+	return func(path string) error {
+		if filepath.Base(path) == failOn {
+			return fmt.Errorf("injected failure for %s", filepath.Base(path))
+		}
+		return os.Remove(path)
+	}
+}
+
+// TestRetention_EventDeleteFailureOnOldestStopsTheTree: three candidates, a
+// bound that forces at least two deletions, and a failure injected on the
+// OLDEST only. The old behaviour (record and continue) would go on to evict B
+// and C and then report a satisfied bound; the correct behaviour is to stop,
+// leave A, B and C all on disk, report zero evictions, and return an error.
+func TestRetention_EventDeleteFailureOnOldestStopsTheTree(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	names := []string{retTestUUID + "-a", retTestUUID + "-b", retTestUUID + "-c"}
+	for i, n := range names {
+		writeEvent(t, dir, n, SyncStatusSynced, now.Add(-time.Duration(3-i)*time.Hour), "")
+	}
+
+	m := newRetention(t, dir, RetentionBounds{MaxCount: 1}, RetentionBounds{})
+	m.removeFile = failingRemove(names[0] + ".json")
+
+	rep, err := m.Sweep(now)
+	if err == nil {
+		t.Fatal("expected Sweep to return the delete error")
+	}
+	if rep.EventsEvicted != 0 {
+		t.Fatalf("EventsEvicted = %d, want 0: accounting must count only completed deletes", rep.EventsEvicted)
+	}
+	if rep.Failed == 0 {
+		t.Error("report does not record the failure")
+	}
+	for _, n := range names {
+		if _, statErr := os.Stat(filepath.Join(dir, eventsSubdir, n+".json")); statErr != nil {
+			t.Errorf("candidate %s was evicted after a delete failure stopped the tree: %v", n, statErr)
+		}
+	}
+}
+
+// TestRetention_CaptureDeleteFailureOnOldestStopsTheTree is the capture-tree
+// counterpart. It must hold for captures too, or a systemic filesystem failure
+// would be reported as a satisfied bound while evidence remains.
+func TestRetention_CaptureDeleteFailureOnOldestStopsTheTree(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	names := []string{"cap-a", "cap-b", "cap-c"}
+	for i, n := range names {
+		writeCapture(t, dir, n, 8, now.Add(-time.Duration(3-i)*time.Hour))
+	}
+
+	m := newRetention(t, dir, RetentionBounds{}, RetentionBounds{MaxCount: 1})
+	m.removeFile = failingRemove(names[0] + ".jpg")
+
+	rep, err := m.Sweep(now)
+	if err == nil {
+		t.Fatal("expected Sweep to return the delete error")
+	}
+	if rep.CapturesEvicted != 0 {
+		t.Fatalf("CapturesEvicted = %d, want 0", rep.CapturesEvicted)
+	}
+	for _, n := range names {
+		if _, statErr := os.Stat(filepath.Join(dir, evidenceSubdir, capturesSubdir, n+".jpg")); statErr != nil {
+			t.Errorf("capture %s was evicted after a delete failure stopped the tree: %v", n, statErr)
+		}
+	}
+}
+
+// TestRetention_PendingScanErrorPerformsNoDeletes: an unreadable pending
+// directory must NOT be read as "nothing is pending". The pending path is made
+// a regular FILE, so ReadDir fails with ENOTDIR rather than ErrNotExist.
+func TestRetention_PendingScanErrorPerformsNoDeletes(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	writeEvent(t, dir, retTestUUID+"-a", SyncStatusSynced, now.Add(-99*time.Hour), "")
+	writeCapture(t, dir, "cap-a", 8, now.Add(-99*time.Hour))
+
+	// A file where the pending directory should be.
+	pendingPath := filepath.Join(dir, pendingBacklogSubdir, "pending")
+	if err := os.MkdirAll(filepath.Dir(pendingPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pendingPath, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newRetention(t, dir,
+		RetentionBounds{MaxCount: 0, MaxBytes: 0, MaxAge: time.Nanosecond},
+		RetentionBounds{MaxCount: 0, MaxBytes: 0, MaxAge: time.Nanosecond})
+	rep, err := m.Sweep(now)
+	if err == nil {
+		t.Fatal("expected an error when the pending backlog cannot be read")
+	}
+	if rep.EventsEvicted != 0 || rep.CapturesEvicted != 0 {
+		t.Fatalf("deleted something despite an unreadable pending scan: %+v", rep)
+	}
+	if len(eventFiles(t, dir)) != 1 || len(captureFiles(t, dir)) != 1 {
+		t.Fatal("evidence was deleted after a failed pending scan")
+	}
+}
+
+// TestRetention_MalformedPendingRecordPerformsNoDeletes.
+func TestRetention_MalformedPendingRecordPerformsNoDeletes(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	writeEvent(t, dir, retTestUUID+"-a", SyncStatusSynced, now.Add(-99*time.Hour), "")
+	writeCapture(t, dir, "cap-a", 8, now.Add(-99*time.Hour))
+
+	pendingDir := filepath.Join(dir, pendingBacklogSubdir, "pending")
+	if err := os.MkdirAll(pendingDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pendingDir, "00000000000000000001.json"), []byte("{not json"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newRetention(t, dir,
+		RetentionBounds{MaxAge: time.Nanosecond}, RetentionBounds{MaxAge: time.Nanosecond})
+	rep, err := m.Sweep(now)
+	if err == nil {
+		t.Fatal("expected an error for a malformed pending record")
+	}
+	if rep.EventsEvicted != 0 || rep.CapturesEvicted != 0 {
+		t.Fatalf("deleted something despite a malformed pending record: %+v", rep)
+	}
+}
+
+// TestRetention_IncompletePendingRecordPerformsNoDeletes: valid JSON that omits
+// submission.event.event_uuid cannot identify what to protect, so it is treated
+// as incomplete rather than ignored.
+func TestRetention_IncompletePendingRecordPerformsNoDeletes(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	writeEvent(t, dir, retTestUUID+"-a", SyncStatusSynced, now.Add(-99*time.Hour), "")
+
+	pendingDir := filepath.Join(dir, pendingBacklogSubdir, "pending")
+	if err := os.MkdirAll(pendingDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// Parses cleanly, but names no event.
+	body := `{"sequence":1,"stage":"capture","submission":{"capture":{"path":"/x/y.jpg"}}}`
+	if err := os.WriteFile(filepath.Join(pendingDir, "00000000000000000001.json"), []byte(body), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newRetention(t, dir, RetentionBounds{MaxAge: time.Nanosecond}, RetentionBounds{})
+	rep, err := m.Sweep(now)
+	if err == nil {
+		t.Fatal("expected an error for a pending record with no event uuid")
+	}
+	if rep.EventsEvicted != 0 {
+		t.Fatalf("deleted metadata despite an unidentifiable pending record: %+v", rep)
+	}
+}
+
+// TestRetention_UnreadablePendingRecordPerformsNoDeletes: a record that cannot
+// be read at all (a dangling symlink, which is not a directory, so it is not
+// skipped) must also stop the sweep.
+func TestRetention_UnreadablePendingRecordPerformsNoDeletes(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	writeEvent(t, dir, retTestUUID+"-a", SyncStatusSynced, now.Add(-99*time.Hour), "")
+	writeCapture(t, dir, "cap-a", 8, now.Add(-99*time.Hour))
+
+	pendingDir := filepath.Join(dir, pendingBacklogSubdir, "pending")
+	if err := os.MkdirAll(pendingDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// A dangling symlink: entry.IsDir() is false, and ReadFile fails.
+	if err := os.Symlink(filepath.Join(pendingDir, "does-not-exist"), filepath.Join(pendingDir, "00000000000000000001.json")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	m := newRetention(t, dir,
+		RetentionBounds{MaxAge: time.Nanosecond}, RetentionBounds{MaxAge: time.Nanosecond})
+	rep, err := m.Sweep(now)
+	if err == nil {
+		t.Fatal("expected an error for an unreadable pending record")
+	}
+	if rep.EventsEvicted != 0 || rep.CapturesEvicted != 0 {
+		t.Fatalf("deleted something despite an unreadable pending record: %+v", rep)
+	}
+}
+
+// TestRetention_PendingEventUUIDProtectsEvenWhenMarkedSynced is correction 3:
+// the durable backlog is the source of truth, so an event whose local
+// SyncStatus claims "synced" is still protected while a pending record names
+// its UUID. This is what covers a partially recovered or inconsistently
+// transitioned event.
+func TestRetention_PendingEventUUIDProtectsEvenWhenMarkedSynced(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	writeEvent(t, dir, retTestUUID+"-lying", SyncStatusSynced, now.Add(-99*time.Hour), "")
+	writeEvent(t, dir, retTestUUID+"-genuinely-old", SyncStatusSynced, now.Add(-99*time.Hour), "")
+
+	pendingDir := filepath.Join(dir, pendingBacklogSubdir, "pending")
+	if err := os.MkdirAll(pendingDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"sequence":1,"stage":"metadata","submission":{"event":{"event_uuid":%q}}}`, retTestUUID+"-lying")
+	if err := os.WriteFile(filepath.Join(pendingDir, "00000000000000000001.json"), []byte(body), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newRetention(t, dir, RetentionBounds{MaxCount: 0, MaxBytes: 0, MaxAge: time.Nanosecond}, RetentionBounds{})
+	rep, err := m.Sweep(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := eventFiles(t, dir)
+	if len(files) != 1 || !strings.Contains(files[0], "-lying") {
+		t.Fatalf("metadata whose UUID is still pending was evicted; survivors = %v", files)
+	}
+	if rep.EventsEvicted != 1 {
+		t.Fatalf("EventsEvicted = %d, want exactly the non-pending one", rep.EventsEvicted)
+	}
+}
+
+// TestRetention_MissingPendingDirectoryAllowsNormalRetention: not having a
+// backlog directory is a valid state, not an error, and must not disable
+// retention.
+func TestRetention_MissingPendingDirectoryAllowsNormalRetention(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	base := now.Add(-time.Hour)
+	for i := 0; i < 4; i++ {
+		writeEvent(t, dir, fmt.Sprintf("%s-%d", retTestUUID, i), SyncStatusSynced, base.Add(time.Duration(i)*time.Minute), "")
+	}
+	if _, err := os.Stat(filepath.Join(dir, pendingBacklogSubdir)); !os.IsNotExist(err) {
+		t.Fatalf("precondition: backlog dir should not exist: %v", err)
+	}
+
+	m := newRetention(t, dir, RetentionBounds{MaxCount: 1}, RetentionBounds{})
+	rep, err := m.Sweep(now)
+	if err != nil {
+		t.Fatalf("a missing pending directory must not be an error: %v", err)
+	}
+	if rep.EventsEvicted != 3 {
+		t.Fatalf("EventsEvicted = %d, want 3: retention must still work with no backlog dir", rep.EventsEvicted)
+	}
+}
+
+// TestRetention_ClipReferenceIsRecognisedNotConfusedForACapture covers the
+// snapshot's clip awareness: a clip reference must not be treated as a capture
+// reference (or vice versa), even though B3-A never deletes clips.
+func TestRetention_ClipReferenceIsRecognisedNotConfusedForACapture(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	capName := writeCapture(t, dir, "cap", 8, now.Add(-99*time.Hour))
+	clipsDir := filepath.Join(dir, evidenceSubdir, "clips")
+	if err := os.MkdirAll(clipsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	clipPath := filepath.Join(clipsDir, retTestUUID+".mp4")
+	if err := os.WriteFile(clipPath, []byte("clip"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	body := fmt.Sprintf(`{"sequence":1,"stage":"clip","submission":{"event":{"event_uuid":%q},"clip":{"path":%q}}}`,
+		retTestUUID, clipPath)
+	pendingDir := filepath.Join(dir, pendingBacklogSubdir, "pending")
+	if err := os.MkdirAll(pendingDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pendingDir, "00000000000000000001.json"), []byte(body), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	// The capture is NOT referenced by the clip record, so it may be evicted;
+	// the clip is untouched by B3-A regardless.
+	m := newRetention(t, dir, RetentionBounds{}, RetentionBounds{MaxAge: time.Minute})
+	if _, err := m.Sweep(now); err != nil {
+		t.Fatal(err)
+	}
+	if got := captureFiles(t, dir); len(got) != 0 {
+		t.Errorf("capture %v should have been evicted; a clip reference is not a capture reference", got)
+	}
+	if _, err := os.Stat(clipPath); err != nil {
+		t.Errorf("B3-A must not delete clips: %v", err)
+	}
+	_ = capName
+}

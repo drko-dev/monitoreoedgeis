@@ -59,6 +59,11 @@ const (
 	// only ever READ, and only for the pending set.
 	pendingBacklogSubdir = "local-event-backlog"
 
+	// clipsSubdir mirrors internal/evidence/clips.go:104's literal "clips". It
+	// exists only so the pending snapshot can RECOGNISE a clip reference
+	// without confusing it for a capture. B3-A never deletes clips.
+	clipsSubdir = "clips"
+
 	// tempFileGracePeriod is how long a temp file must be untouched before it is
 	// considered abandoned. Every writer removes its own temp on failure, so a
 	// young temp file belongs to a write in flight and must not be swept.
@@ -130,10 +135,18 @@ type RetentionManager struct {
 	// delete from, resolved once so no call can widen the blast radius.
 	eventsDir   string
 	capturesDir string
+	clipsDir    string
 	pendingDir  string
 
 	lastSweepMu sync.Mutex
 	lastSweep   time.Time
+
+	// removeFile is the delete seam, defaulting to os.Remove. Tests inject a
+	// failure to prove that a single failed delete STOPS that tree rather than
+	// deleting around it -- a property that is otherwise untestable without
+	// root, since chmod-based failures are all-or-nothing (they make every
+	// remove fail, which cannot distinguish "stops" from "keeps trying").
+	removeFile func(string) error
 }
 
 // NewRetentionManager builds a RetentionManager. It requires DataDir and
@@ -157,7 +170,9 @@ func NewRetentionManager(cfg RetentionConfig) (*RetentionManager, error) {
 		dataDir:     cfg.DataDir,
 		eventsDir:   filepath.Join(cfg.DataDir, eventsSubdir),
 		capturesDir: filepath.Join(cfg.DataDir, evidenceSubdir, capturesSubdir),
+		clipsDir:    filepath.Join(cfg.DataDir, evidenceSubdir, clipsSubdir),
 		pendingDir:  pending,
+		removeFile:  os.Remove,
 	}, nil
 }
 
@@ -188,9 +203,29 @@ func (r *RetentionManager) Sweep(now time.Time) (RetentionReport, error) {
 			fmt.Sprintf("captures:count=%d,bytes=%d,age=%s", r.cfg.Captures.MaxCount, r.cfg.Captures.MaxBytes, r.cfg.Captures.MaxAge))
 	}
 
+	// 0. Establish the pending snapshot ONCE, before any delete, and fail
+	//    closed. If we cannot determine what the durable backlog still needs, we
+	//    must not delete anything at all: "could not read" must never be read as
+	//    "not referenced", because deleting evidence a pending upload needs makes
+	//    edgebacklog quarantine the whole record and destroys that event's sync.
+	if !r.cfg.Events.Enabled() && !r.cfg.Captures.Enabled() {
+		// Nothing is bounded, so there is nothing destructive to guard. Temp
+		// orphans are still garbage and are safe to reclaim.
+		r.sweepTempOrphans(r.eventsDir, "event", now, &report)
+		r.sweepTempOrphans(r.capturesDir, "evidence", now, &report)
+		return report, nil
+	}
+	pending, pendingErr := r.loadPendingRetentionRefs()
+	if pendingErr != nil {
+		report.FirstError = "pending_scan_failed"
+		r.logger.Warn("fulledge retention: pending backlog cannot be read, skipping this sweep entirely",
+			"error", pendingErr)
+		return report, pendingErr
+	}
+
 	// 1. Event metadata: decide survivors first, because the capture pass must
 	//    know which events are actually still present (F-A).
-	eventOutcome, err := r.sweepEvents(now, &report)
+	eventOutcome, err := r.sweepEvents(now, pending, &report)
 	if err != nil {
 		return report, err
 	}
@@ -198,7 +233,7 @@ func (r *RetentionManager) Sweep(now time.Time) (RetentionReport, error) {
 	// 2. Captures: protected by any SURVIVING event reference and by any
 	//    pending backlog record.
 	if r.cfg.Captures.Enabled() {
-		if err := r.sweepCaptures(now, eventOutcome.survivingCaptureRefs, &report); err != nil {
+		if err := r.sweepCaptures(now, eventOutcome.survivingCaptureRefs, pending, &report); err != nil {
 			return report, err
 		}
 	}
@@ -206,7 +241,7 @@ func (r *RetentionManager) Sweep(now time.Time) (RetentionReport, error) {
 	// 3. Temp orphans are swept regardless of whether a bound is configured:
 	//    they are garbage, not retained data, and leaving them is unbounded
 	//    growth by definition.
-	r.sweepTempOrphans(filepath.Join(r.eventsDir, ""), "event", now, &report)
+	r.sweepTempOrphans(r.eventsDir, "event", now, &report)
 	r.sweepTempOrphans(r.capturesDir, "evidence", now, &report)
 
 	return report, nil
@@ -230,7 +265,7 @@ type dirEntry struct {
 }
 
 // sweepEvents evicts event metadata oldest-first within the event bounds.
-func (r *RetentionManager) sweepEvents(now time.Time, report *RetentionReport) (eventSweepOutcome, error) {
+func (r *RetentionManager) sweepEvents(now time.Time, pending retentionPendingRefs, report *RetentionReport) (eventSweepOutcome, error) {
 	outcome := eventSweepOutcome{survivingCaptureRefs: map[string]bool{}}
 
 	entries, err := secureListDir(r.eventsDir, ".json", "event")
@@ -299,23 +334,32 @@ func (r *RetentionManager) sweepEvents(now time.Time, report *RetentionReport) (
 			continue
 		}
 
-		// F-B: never evict metadata that is still awaiting sync. Deleting it
-		// would not stop the upload, but it would leave the SaaS holding an
-		// event this Edge has no local record of -- a silent desync.
-		if c.pending {
+		// F-B: never evict metadata the durable backlog still needs. Two
+		// independent reasons to keep it:
+		//   - its own SyncStatus says pending; or
+		//   - its UUID appears in a pending record, regardless of what the local
+		//     SyncStatus claims. The durable backlog is the more trustworthy
+		//     source, which is exactly what protects a partially recovered or
+		//     inconsistently transitioned event.
+		if c.pending || pending.eventUUIDs[c.event.EventUUID] {
 			report.Protected++
 			surviving = append(surviving, c)
 			continue
 		}
 
-		if removeErr := os.Remove(c.path); removeErr != nil {
-			// Stop here rather than deleting around the failure: continuing
-			// would report bounds as satisfied while this file remains.
+		if removeErr := r.removeFile(c.path); removeErr != nil {
+			// STOP the whole tree here. Continuing would keep deleting other
+			// candidates around a failure that may be systemic (a read-only or
+			// full filesystem), and would report a bound as satisfied while
+			// files this sweep believes it removed are still on disk. Everything
+			// not yet processed, including this candidate, is treated as
+			// surviving.
 			report.Failed++
-			firstErr = fmt.Errorf("fulledge: retention remove %s: %w", c.name, removeErr)
 			report.FirstError = "remove_failed"
+			firstErr = fmt.Errorf("fulledge: retention remove %s: %w", c.name, removeErr)
 			surviving = append(surviving, c)
-			continue
+			surviving = append(surviving, candidates[i+1:]...)
+			break
 		}
 		evicted++
 		freed += c.size
@@ -340,9 +384,7 @@ func (r *RetentionManager) sweepEvents(now time.Time, report *RetentionReport) (
 // sweepCaptures evicts JPEG evidence oldest-first within the capture bounds,
 // never touching a capture that a surviving event references (F-A) or that a
 // pending backlog record references (F-B).
-func (r *RetentionManager) sweepCaptures(now time.Time, survivingRefs map[string]bool, report *RetentionReport) error {
-	pendingRefs := r.pendingEvidenceRefs()
-
+func (r *RetentionManager) sweepCaptures(now time.Time, survivingRefs map[string]bool, pending retentionPendingRefs, report *RetentionReport) error {
 	entries, err := secureListDir(r.capturesDir, ".jpg", "evidence")
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -371,7 +413,7 @@ func (r *RetentionManager) sweepCaptures(now time.Time, survivingRefs map[string
 
 		// F-A / F-B protection is absolute: a referenced capture is retained
 		// even when it is the sole reason a bound is exceeded.
-		if survivingRefs[e.name] || pendingRefs[e.name] {
+		if survivingRefs[e.name] || pending.captures[e.name] {
 			report.Protected++
 			survivingCount++
 			continue
@@ -384,12 +426,12 @@ func (r *RetentionManager) sweepCaptures(now time.Time, survivingRefs map[string
 			survivingCount++
 			continue
 		}
-		if removeErr := os.Remove(e.path); removeErr != nil {
+		if removeErr := r.removeFile(e.path); removeErr != nil {
+			// Same stop-the-tree rule as the events pass, for the same reason.
 			report.Failed++
 			report.FirstError = "remove_failed"
 			firstErr = fmt.Errorf("fulledge: retention remove %s: %w", e.name, removeErr)
-			survivingCount++
-			continue
+			break
 		}
 		report.CapturesEvicted++
 		report.BytesReclaimed += e.size
@@ -403,35 +445,62 @@ func (r *RetentionManager) sweepCaptures(now time.Time, survivingRefs map[string
 	return firstErr
 }
 
-// pendingEvidenceRefs returns the BASENAMES of evidence files referenced by any
-// durable pending backlog record.
+// retentionPendingRefs is a single, consistent snapshot of what the durable
+// transport backlog still needs. It is loaded ONCE per sweep, before any
+// delete, and passed to both passes.
+type retentionPendingRefs struct {
+	// eventUUIDs are event UUIDs named by a pending record. Metadata for these
+	// must survive regardless of its own local SyncStatus: a partially
+	// recovered or inconsistently-transitioned event is exactly the case where
+	// the durable backlog is the more trustworthy source.
+	eventUUIDs map[string]bool
+	// captures and clips are evidence BASENAMES referenced by pending records.
+	captures map[string]bool
+	clips    map[string]bool
+}
+
+// loadPendingRetentionRefs builds the pending snapshot.
 //
-// The durable pending records are the source of truth (F-B), never in-memory
-// state: a record that survived a restart still needs its evidence, and an
-// in-memory view would not know that.
-func (r *RetentionManager) pendingEvidenceRefs() map[string]bool {
-	refs := map[string]bool{}
+// It FAILS CLOSED. "I could not determine what is pending" must never be
+// interpreted as "nothing is pending", because that reading deletes evidence a
+// pending upload still needs -- and edgebacklog quarantines the whole record
+// when its evidence disappears, destroying that event's sync.
+//
+// The only condition that yields an empty set with no error is the pending
+// directory not existing at all: that is a valid state (nothing has ever been
+// queued) and is distinct from being unreadable.
+func (r *RetentionManager) loadPendingRetentionRefs() (retentionPendingRefs, error) {
+	refs := retentionPendingRefs{
+		eventUUIDs: map[string]bool{},
+		captures:   map[string]bool{},
+		clips:      map[string]bool{},
+	}
+
 	entries, err := os.ReadDir(r.pendingDir)
 	if err != nil {
-		// No pending directory means nothing is pending. Never fatal: retention
-		// must not fail closed on a missing optional directory, but it also
-		// must not guess -- an unreadable directory is treated as "no refs"
-		// only because the alternative (evicting) is worse, and the event-level
-		// protections still apply.
-		return refs
+		if errors.Is(err, os.ErrNotExist) {
+			// Valid: no backlog directory means nothing is pending.
+			return refs, nil
+		}
+		return retentionPendingRefs{}, fmt.Errorf("fulledge: retention cannot read pending backlog %s: %w", r.pendingDir, err)
 	}
+
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		raw, readErr := os.ReadFile(filepath.Join(r.pendingDir, entry.Name()))
 		if readErr != nil {
-			continue
+			return retentionPendingRefs{}, fmt.Errorf("fulledge: retention cannot read pending record %s: %w", entry.Name(), readErr)
 		}
-		// The record shape is edgebacklog's; decode only the evidence paths so
-		// this stays a read-only observer with no import cycle.
+		// The record shape is edgebacklog's. Only the identity and evidence
+		// paths are decoded, keeping this a read-only observer with no import
+		// cycle.
 		var rec struct {
 			Submission struct {
+				Event *struct {
+					EventUUID string `json:"event_uuid"`
+				} `json:"event,omitempty"`
 				Capture *struct {
 					Path string `json:"path"`
 				} `json:"capture,omitempty"`
@@ -441,23 +510,36 @@ func (r *RetentionManager) pendingEvidenceRefs() map[string]bool {
 			} `json:"submission"`
 		}
 		if unmarshalErr := json.Unmarshal(raw, &rec); unmarshalErr != nil {
-			continue
+			return retentionPendingRefs{}, fmt.Errorf("fulledge: retention found a malformed pending record %s: %w", entry.Name(), unmarshalErr)
 		}
+		// A pending record always carries the event it is delivering; without
+		// its UUID this sweep cannot know which metadata to protect, so it is
+		// treated as incomplete rather than ignored.
+		if rec.Submission.Event == nil || rec.Submission.Event.EventUUID == "" {
+			return retentionPendingRefs{}, fmt.Errorf("fulledge: retention found an incomplete pending record %s: missing submission.event.event_uuid", entry.Name())
+		}
+		refs.eventUUIDs[rec.Submission.Event.EventUUID] = true
+
+		// Only a file DIRECTLY inside a managed evidence directory is recorded.
+		// A path elsewhere is IGNORED rather than resolved, so a crafted record
+		// cannot widen the blast radius -- and ignoring it is safe, because we
+		// only ever delete from directories we manage, and a genuinely managed
+		// file's reference would be honoured here.
 		for _, p := range []*struct {
 			Path string `json:"path"`
 		}{rec.Submission.Capture, rec.Submission.Clip} {
 			if p == nil || p.Path == "" {
 				continue
 			}
-			// Only a file DIRECTLY inside the captures tree may ever be
-			// protected/considered; anything else is ignored rather than
-			// resolved, so a crafted path cannot widen the blast radius.
 			if filepath.Dir(p.Path) == r.capturesDir {
-				refs[filepath.Base(p.Path)] = true
+				refs.captures[filepath.Base(p.Path)] = true
+			}
+			if filepath.Dir(p.Path) == r.clipsDir {
+				refs.clips[filepath.Base(p.Path)] = true
 			}
 		}
 	}
-	return refs
+	return refs, nil
 }
 
 // secureListDir lists regular files in dir whose name ends in suffix, using
@@ -539,7 +621,7 @@ func (r *RetentionManager) sweepTempOrphans(dir, prefix string, now time.Time, r
 		if now.Sub(info.ModTime()) < tempFileGracePeriod {
 			continue
 		}
-		if removeErr := os.Remove(full); removeErr != nil {
+		if removeErr := r.removeFile(full); removeErr != nil {
 			report.Failed++
 			if report.FirstError == "" {
 				report.FirstError = "temp_remove_failed"
