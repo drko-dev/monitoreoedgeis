@@ -156,6 +156,9 @@ func (s *Session) describe(timeout time.Duration) (string, error) {
 		}
 	}
 
+	if status == 401 {
+		return "", fmt.Errorf("%w: describe status 401", ErrAuthFailed)
+	}
 	if status != 200 {
 		return "", fmt.Errorf("rtsp: describe status %d", status)
 	}

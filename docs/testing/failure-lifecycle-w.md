@@ -221,14 +221,11 @@ handoff between the unit and the real binary.
 Recorded, not implemented. Each is a capability the current contract does not
 have.
 
-- **RTSP credential rejection has no distinct state or terminal stop.** A wrong
-  camera password is indistinguishable from an unreachable camera at the
-  supervisor level (both are `degraded` + `reconnect_count++`) and is retried
-  forever with exponential backoff. The error text carries the 401, and
-  `ErrAuthFailed` is used only for an unparseable challenge, so nothing
-  upstream can act on "bad password" specifically. W6/W7 pin the current
-  behaviour; adding an auth-specific state or a stop after N rejections is a
-  resilience decision (Hito Y), not a test fix.
+- **Resolved in Hito Y.** RTSP credential rejection now surfaces as the
+  `auth_failed` camera state while retaining bounded reconnect backoff. A
+  corrected target delivered through `Manager.SetTargets` replaces the
+  supervisor and recovers without changing stored identity or enrollment
+  credentials. See `docs/testing/failure-lifecycle-y.md`.
 - **Rollback is not re-verified.** `rollback.sh` requires only that the recorded
   previous release directory exists; it checks no signature, checksum, arch or
   version, which is weaker than `docs/security/update-trust.md` requirement 7.

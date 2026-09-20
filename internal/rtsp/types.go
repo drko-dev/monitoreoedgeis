@@ -12,6 +12,7 @@ const (
 	StateConnecting State = "connecting"
 	StateOnline     State = "online"
 	StateDegraded   State = "degraded"
+	StateAuthFailed State = "auth_failed"
 	StateOffline    State = "offline"
 )
 

@@ -13,9 +13,9 @@ package rtsp_test
 //     stall; a peer close or a refused dial counts as neither.
 //   - reconnect_count increments on every dial failure and every stream
 //     interruption, and is never reset by a successful reconnect.
-//   - A wrong password is a dial failure like any other: it is retried with
-//     the same exponential backoff, never becomes a separate state, and the
-//     username/password never appear in status or logs.
+//   - A wrong password is reported as auth_failed, retried with the same
+//     exponential backoff, and the username/password never appear in status
+//     or logs.
 
 import (
 	"bufio"
@@ -841,6 +841,53 @@ func TestW7_BadCredentialsAreRetriedWithBackoffNotInALoop(t *testing.T) {
 	if attempts > 6 {
 		t.Errorf("%d dial attempts in 700ms against a rejected credential; "+
 			"the exponential backoff is not being applied", attempts)
+	}
+}
+
+func TestY5_AuthFailureIsDistinctAndRecoversAfterCredentialUpdate(t *testing.T) {
+	srv := newFakeRTSP(t, behaviorStream)
+	cfg := testConfig()
+	cfg.InitialBackoff = 40 * time.Millisecond
+	cfg.MaxBackoff = 200 * time.Millisecond
+
+	target := cameraTarget(srv)
+	target.Password = "wrong-password"
+
+	mgr := rtsp.NewManager(cfg, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("manager start: %v", err)
+	}
+	mgr.SetTargets([]rtsp.CameraTarget{target})
+
+	waitFor(t, "auth_failed camera state", 5*time.Second, func() bool {
+		for _, camera := range mgr.Snapshot() {
+			if camera.Status == rtsp.StateAuthFailed {
+				return true
+			}
+		}
+		return false
+	})
+
+	target.Password = srv.password
+	mgr.SetTargets([]rtsp.CameraTarget{target})
+	waitFor(t, "camera recovery after credential update", 5*time.Second, func() bool {
+		for _, camera := range mgr.Snapshot() {
+			if camera.Status == rtsp.StateOnline && camera.PacketsReceived > 0 {
+				return true
+			}
+		}
+		return false
+	})
+
+	if got := len(mgr.Snapshot()); got != 1 {
+		t.Fatalf("manager tracks %d cameras after credential recovery, want 1", got)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+	if err := mgr.Stop(stopCtx); err != nil {
+		t.Fatalf("manager stop: %v", err)
 	}
 }
 
