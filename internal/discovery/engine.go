@@ -135,6 +135,17 @@ func (e *Engine) RunScan(ctx context.Context) (*ScanResult, error) {
 		recorded = append(recorded, *stored)
 	}
 
+	// Step 5: expire devices that have not been seen within DeviceTTL.
+	//
+	// This runs on every SUCCESSFUL scan, including one that found nothing, so
+	// a camera that disappears from the LAN is eventually removed even if no
+	// further Upsert happens (expiry used to be a side effect of Upsert only).
+	// It is TTL-based, so a single missed multicast response never removes a
+	// device — only sustained absence does.
+	if pruned := e.inventory.PruneExpired(time.Now().UTC()); pruned > 0 {
+		e.log.Info("discovery: pruned expired devices from inventory", slog.Int("pruned", pruned))
+	}
+
 	return &ScanResult{
 		DevicesFound: recorded,
 		Duration:     time.Since(start),

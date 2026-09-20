@@ -199,6 +199,32 @@ func (inv *Inventory) evictExpiredLocked(now time.Time) {
 	}
 }
 
+// PruneExpired removes every device whose LastSeen is older than DeviceTTL and
+// returns how many were removed.
+//
+// It exists because expiry previously happened only as a side effect of Upsert
+// (evictExpiredLocked above), so List/Count/Get kept reporting devices that had
+// stopped being seen — up to a full DeviceTTL after the last successful scan.
+// Any consumer that reconciles inventory into other subsystems must prune
+// explicitly before reading, otherwise it would keep acting on stale devices.
+//
+// A single missed multicast response is NOT an expiry: a device is removed only
+// once now-LastSeen exceeds DeviceTTL, which is deliberately not configurable
+// here. Callers pass `now` so the behaviour is deterministic under test.
+func (inv *Inventory) PruneExpired(now time.Time) int {
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+
+	removed := 0
+	for key, d := range inv.devices {
+		if now.Sub(d.LastSeen) > DeviceTTL {
+			delete(inv.devices, key)
+			removed++
+		}
+	}
+	return removed
+}
+
 // List returns a snapshot of all discovered devices in the inventory.
 func (inv *Inventory) List() []DiscoveredDevice {
 	inv.mu.RLock()
