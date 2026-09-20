@@ -5,6 +5,11 @@
 # systemd unit template, install/update/rollback/uninstall scripts, example
 # config, VERSION and ARCH marker files, and a .sha256 checksum.
 #
+# Every artifact always carries the Full Edge vision-worker sources
+# (worker.py, backend.py, requirements.txt) under vision-worker/; the Python
+# runtime itself is provisioned on the appliance, not shipped (see
+# scripts/check-vision-runtime.sh).
+#
 # Usage: package.sh [--require-ffmpeg] [version] [dist-dir]
 #
 # --require-ffmpeg makes the static ffmpeg binary MANDATORY: packaging fails if
@@ -47,19 +52,35 @@ log "building geocam-edge $VERSION for linux/amd64 and linux/arm64"
 
 mkdir -p "$DIST_DIR"
 
-# require_artifact_entries fails the build unless the finished tarball really
+# verify_artifact_entries fails the build unless the finished tarball really
 # carries every entry a released appliance needs. Checking the ARTIFACT (not
-# just its inputs) is what makes --require-ffmpeg meaningful: it would catch a
-# staging regression that dropped a file, not only a missing ffmpeg binary.
-require_artifact_entries() {
-    local artifact="$1" listing missing=""
+# just its inputs) is what makes the guarantee meaningful: it catches a staging
+# regression that dropped a file, not only a missing input binary.
+#
+# The base layout is verified on EVERY packaging run, because every entry in it
+# is reproducible from the repo alone. The static ffmpeg binary is added to the
+# required set only under --require-ffmpeg, since building it needs Docker and a
+# local dev run may legitimately not have it.
+verify_artifact_entries() {
+    local artifact="$1" require_ffmpeg="$2" listing missing=""
     listing="$(tar tzf "$artifact")"
-    for entry in ./geocam-edge ./ffmpeg ./VERSION ./ARCH; do
+
+    local files="./geocam-edge ./VERSION ./ARCH"
+    [ "$require_ffmpeg" = "1" ] && files="$files ./ffmpeg"
+    for entry in $files; do
         printf '%s\n' "$listing" | grep -qxF -- "$entry" || missing="$missing $entry"
     done
-    for dir in ./scripts/ ./systemd/ ./config/; do
+
+    # vision-worker/ carries the Full Edge Python worker (B2). It is repo content
+    # like scripts/ and config/, so it is required unconditionally: an appliance
+    # that cannot ship the worker cannot run Full Edge at all.
+    for dir in ./scripts/ ./systemd/ ./config/ ./vision-worker/; do
         printf '%s\n' "$listing" | grep -qF -- "$dir" || missing="$missing $dir"
     done
+    for entry in ./vision-worker/worker.py ./vision-worker/backend.py ./vision-worker/requirements.txt; do
+        printf '%s\n' "$listing" | grep -qxF -- "$entry" || missing="$missing $entry"
+    done
+
     [ -z "$missing" ] || die "$artifact is missing required entries:$missing"
 }
 
@@ -96,13 +117,29 @@ for arch in amd64 arm64; do
     # repo checkout or from an extracted tarball.
     mkdir -p "$STAGE/scripts" "$STAGE/systemd" "$STAGE/config"
     cp "$SCRIPT_DIR"/install.sh "$SCRIPT_DIR"/update.sh "$SCRIPT_DIR"/rollback.sh \
-       "$SCRIPT_DIR"/uninstall.sh "$SCRIPT_DIR"/wait-ready.sh "$SCRIPT_DIR"/bootstrap.sh "$SCRIPT_DIR"/lib.sh "$SCRIPT_DIR"/ota-updater.sh "$STAGE/scripts/"
+       "$SCRIPT_DIR"/uninstall.sh "$SCRIPT_DIR"/wait-ready.sh "$SCRIPT_DIR"/bootstrap.sh "$SCRIPT_DIR"/lib.sh "$SCRIPT_DIR"/ota-updater.sh \
+       "$SCRIPT_DIR"/check-vision-runtime.sh "$STAGE/scripts/"
     cp "$APPLIANCE_DIR/systemd/geocam-edge.service.in" "$STAGE/systemd/"
     if [ -f "$APPLIANCE_DIR/systemd/geocam-edge-bootstrap.service.in" ]; then
         cp "$APPLIANCE_DIR/systemd/geocam-edge-bootstrap.service.in" "$STAGE/systemd/"
     fi
     cp "$APPLIANCE_DIR/systemd/geocam-edge-ota-updater.service.in" "$APPLIANCE_DIR/systemd/geocam-edge-ota-updater.path.in" "$STAGE/systemd/"
     cp "$APPLIANCE_DIR/config/geocam-edge.env.example" "$STAGE/config/"
+
+    # Full Edge's out-of-process Python worker (B2). These are plain, readable,
+    # ARCHITECTURE-INDEPENDENT sources -- no interpreter, no virtualenv, no
+    # wheels and no model weights travel here. Shipping a "portable venv" across
+    # amd64 and arm64 would be a lie: native wheels are per-architecture, so the
+    # runtime is installed on the appliance by the operator and verified by
+    # scripts/check-vision-runtime.sh. PyTorch never enters the Go process.
+    VISION_SRC="$REPO_ROOT/deploy/vision-worker"
+    [ -f "$VISION_SRC/worker.py" ] || die "missing $VISION_SRC/worker.py"
+    [ -f "$VISION_SRC/backend.py" ] || die "missing $VISION_SRC/backend.py"
+    [ -f "$VISION_SRC/requirements.txt" ] || die "missing $VISION_SRC/requirements.txt"
+    mkdir -p "$STAGE/vision-worker"
+    cp "$VISION_SRC/worker.py" "$VISION_SRC/backend.py" "$VISION_SRC/requirements.txt" "$STAGE/vision-worker/"
+    chmod 0644 "$STAGE/vision-worker/"*
+    log "bundled Full Edge vision worker sources for $arch (runtime installed separately)"
 
     ARTIFACT="$DIST_DIR/geocam-edge-$VERSION-linux-$arch.tar.gz"
     ( cd "$STAGE" && tar czf "$ARTIFACT" . )
@@ -111,9 +148,11 @@ for arch in amd64 arm64; do
     elif have_cmd shasum; then
         ( cd "$DIST_DIR" && shasum -a 256 "$(basename "$ARTIFACT")" > "$(basename "$ARTIFACT").sha256" )
     fi
+    verify_artifact_entries "$ARTIFACT" "$REQUIRE_FFMPEG"
     if [ "$REQUIRE_FFMPEG" = "1" ]; then
-        require_artifact_entries "$ARTIFACT"
-        log "verified required artifact layout for $arch (including ffmpeg)"
+        log "verified required artifact layout for $arch (including ffmpeg and vision-worker)"
+    else
+        log "verified required artifact layout for $arch (vision-worker included; ffmpeg optional in this mode)"
     fi
     log "packaged $ARTIFACT"
 
