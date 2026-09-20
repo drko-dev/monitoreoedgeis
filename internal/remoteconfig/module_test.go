@@ -136,7 +136,6 @@ func TestModule_SyncOnce_DoesNotAckOnEngineError(t *testing.T) {
 	}
 }
 
-
 func TestModule_SyncOnce_NoRuntimeAdapterDoesNotAckApplied(t *testing.T) {
 	var ackStatus, ackCode string
 	client := &fakeClient{
