@@ -13,13 +13,17 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/vision"
 )
 
-// NoopRuntimeAdapter is a safe, do-nothing Adapter: it accepts any
-// well-formed Config and never touches real runtime state. It lets the
-// engine run in tests where no real runtime knobs are wired.
+// NoopRuntimeAdapter is the fail-closed fallback used when no live runtime
+// adapter exists (for example, when the video pipeline was not constructed).
+// Validation remains syntax/contract-neutral, but Apply must never report
+// success for tuning that changed nothing. Engine.ReceiveDesired turns this
+// apply error into the existing rolled_back / APPLY_FAILED terminal outcome.
 type NoopRuntimeAdapter struct{}
 
 func (NoopRuntimeAdapter) ValidateRuntimeConfig(context.Context, Config) error { return nil }
-func (NoopRuntimeAdapter) ApplyRuntimeConfig(context.Context, Config) error    { return nil }
+func (NoopRuntimeAdapter) ApplyRuntimeConfig(context.Context, Config) error {
+	return fmt.Errorf("remoteconfig: runtime adapter unavailable; configuration was not applied")
+}
 func (NoopRuntimeAdapter) RollbackRuntimeConfig(context.Context, Config) error { return nil }
 
 // RuntimeAdapter connects validated remote configuration to the live Edge runtime.
