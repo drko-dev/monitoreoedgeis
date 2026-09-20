@@ -78,9 +78,33 @@ See `deploy/appliance/config/geocam-edge.env.example` for the full,
 commented list of every `GEOCAM_*` variable `internal/config.Load()` actually
 reads, with its real default and validation range from that code — not
 invented "recommended production values" for the settings that are still
-open decisions upstream (notably the Cloud offline buffer size and bandwidth
-caps, and `GEOCAM_PROCESSING_MODE=hybrid|edge`, which parse successfully but
-have no functional implementation yet beyond `cloud`).
+open decisions upstream (notably the Cloud offline buffer size and the
+bandwidth caps).
+
+All three processing modes are **implemented**: `cloud` (Hito I), `hybrid`
+(Hito J) and `edge` (Hito K). But `GEOCAM_PROCESSING_MODE` only selects *where
+inference runs* — it does not build the local media path. That is
+`GEOCAM_VIDEO_PIPELINE_ENABLED`, which defaults to **false**, so a stock install
+of this package decodes and uploads nothing: it runs discovery, camera
+connectivity, health, heartbeat, control and OTA, and no frame ever reaches
+Cloud inference. `/status` reports that as `profile: gateway-no-media`.
+
+To run a specific commercial profile, start from one of the ready-made files
+alongside the example:
+
+| Profile   | File                                          | What it runs |
+| --------- | --------------------------------------------- | ------------ |
+| Gateway   | `geocam-edge.env.gateway.example`   | local media path, Cloud runs YOLO |
+| Hybrid    | `geocam-edge.env.hybrid.example`    | local motion gating, Cloud runs YOLO |
+| Full Edge | `geocam-edge.env.fulledge.example`  | local YOLO via the Python Vision Worker |
+
+Read [docs/product/COMMERCIAL_MODES.md](../product/COMMERCIAL_MODES.md) before
+committing to one: it carries the capability matrix, what has and has not been
+verified for each profile, and the known gaps. Two matter most for an appliance
+install — **nothing in production populates camera targets**, so `/status` omits
+`cameras` and heartbeats carry an empty list; and **this package does not ship
+the Python Vision Worker**, so Full Edge needs its Python environment and model
+weights provisioned by hand before it can start.
 
 `GEOCAM_ENROLLMENT_TOKEN` is deliberately **not** a line in this file: the
 `enroll` subcommand reads it from stdin or a one-shot environment variable at

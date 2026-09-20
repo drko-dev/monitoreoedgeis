@@ -100,11 +100,20 @@ type Config struct {
 	// K5-K8 originally defined a second, disconnected
 	// GEOCAM_EDGE_INFERENCE_DEVICE knob for the same concept (Go-side
 	// CUDA-capability preselection feeding fulledge.HardwareManager) — that
-	// duplicate has been removed; internal/agent's wiring resolves
-	// EdgeYOLODevice through HardwareManager (auto -> cpu/cuda preselection)
-	// before passing it to the worker, and the *actually confirmed* device
-	// the worker reports back via its health handshake is what fulledge
-	// status displays (see internal/vision.InferenceResult.Device).
+	// duplicate has been removed.
+	//
+	// Honest note on the two layers (verified against the code, Hito Z):
+	// this raw string is what internal/agent passes to the worker
+	// (internal/agent/vision_module.go), i.e. the worker receives the
+	// *requested* device, not a Go-resolved one. Resolution is layered:
+	// internal/fulledge.HardwareManager resolves it Go-side for *status and
+	// fallback accounting only* (CPU/CUDA preselection via /dev/nvidia*,
+	// /dev/nvhost-ctrl and nvidia-smi), while the Python worker resolves it
+	// authoritatively at load time through torch.cuda.is_available() and
+	// reports both the effective device and what was requested back over the
+	// health handshake. The worker-confirmed values are the ones to trust:
+	// /status .vision.worker.device / .device_requested and each event's
+	// device. See internal/vision and deploy/vision-worker/backend.py.
 	EdgeYOLOWorkerCmd         string
 	EdgeYOLOWorkerArgs        []string
 	EdgeYOLOModelsDir         string

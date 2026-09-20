@@ -545,9 +545,13 @@ func TestFullEdgeConfig_Invalid(t *testing.T) {
 		env  map[string]string
 	}{
 		// No "invalid device" case: GEOCAM_EDGE_YOLO_DEVICE accepts any
-		// string at Load() time (it is validated, with a safe fallback to
-		// "auto", by fulledge.ParseDeviceMode in internal/agent's wiring —
-		// see the removed GEOCAM_EDGE_INFERENCE_DEVICE knob's doc comment).
+		// string at Load() time. It IS validated at runtime, but not here:
+		// internal/agent passes the raw value to the vision worker (see
+		// internal/agent/vision_module.go), fulledge.ParseDeviceMode only
+		// governs the Go-side status/fallback manager (an invalid value
+		// falls back to "auto" there), and the authoritative resolution
+		// happens in the Python worker (deploy/vision-worker/backend.py's
+		// resolve_device). See the EdgeYOLODevice doc comment in config.go.
 		{"max concurrent inference zero", map[string]string{"GEOCAM_EDGE_MAX_CONCURRENT_INFERENCE": "0"}},
 		{"max concurrent inference too high", map[string]string{"GEOCAM_EDGE_MAX_CONCURRENT_INFERENCE": "32"}},
 		{"queue depth zero", map[string]string{"GEOCAM_EDGE_INFERENCE_QUEUE_DEPTH": "0"}},

@@ -3,12 +3,25 @@
 Lightweight Go agent for GEO CAM edge gateways (Raspberry Pi, Orange Pi, mini-PC,
 server). It runs on-site, next to the cameras, and talks to the GEO CAM SaaS.
 
-Through Hito G, merged to `main`: agent core (config, persistent identity,
+Through Hito Y, merged to `main`: agent core (config, persistent identity,
 platform detection, health, logging, module lifecycle), SaaS enrollment and
 credential rotation, SaaS heartbeat, ONVIF/WS-Discovery LAN autodiscovery,
-per-device camera credential management, and RTSP camera connectivity with
-reconnection and health state. There is still no local vision/YOLO inference,
-video pipeline, OTA, or VPN (see [Not implemented yet](#not-implemented-yet)).
+per-device camera credential management, RTSP camera connectivity with
+reconnection and health state, the ffmpeg video pipeline, Cloud frame push with
+offline buffering and bandwidth control, local motion gating, local YOLO
+inference through an **out-of-process Python Vision Worker**, local
+events/evidence with durable sync, signed OTA, remote configuration, appliance
+packaging, and systemd watchdog integration.
+
+This binary serves **three commercial profiles** — Gateway, Hybrid and Full
+Edge — from one codebase, selected by configuration rather than by three
+products. Which one an Edge is actually running is reported on `/status` as
+`profile`; see [docs/product/COMMERCIAL_MODES.md](docs/product/COMMERCIAL_MODES.md)
+for the capability matrix, each profile's readiness, and the known gaps.
+
+**Not implemented in this repository**: a VPN or subnet-routing client (the
+tunnel is deliberately customer-side infrastructure), and cross-subnet
+camera-target provisioning.
 
 ## Project documentation
 
@@ -20,6 +33,7 @@ these documents — read them in this order:
 | [AGENTS.md](AGENTS.md)                               | Working rules and constraints      |
 | [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)     | Where the project stands right now |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)         | Architecture and technical decisions |
+| [docs/product/COMMERCIAL_MODES.md](docs/product/COMMERCIAL_MODES.md) | What Gateway / Hybrid / Full Edge are, and how far each is verified |
 | [docs/ROADMAP.md](docs/ROADMAP.md)                   | Master backlog A–Z and block status |
 
 ## Why Go
@@ -38,24 +52,44 @@ environment only — no code is coupled to it.
 ## Architecture
 
 ```
-GEO CAM Edge Core (Go)  --->  Vision Worker (Python + YOLO)   [does not exist yet]
+GEO CAM Edge Core (Go)  --->  Vision Worker (Python + YOLO)   [Full Edge profile only]
+                                   Unix socket, newline-delimited JSON
 ```
 
 The Go core owns the agent lifecycle, identity, config, transport, health and
-telemetry. Local inference is deliberately kept **out** of the Go core: when it
-is eventually needed, it will live in a separate Python Vision Worker process.
+telemetry. Local inference is deliberately kept **out** of the Go core: it lives
+in a separate Python Vision Worker process that the agent `exec`s and supervises
+over a Unix domain socket. **PyTorch is never embedded in the Go binary** — the
+module has no third-party dependencies, there is no `import "C"` anywhere, and
+every target builds `CGO_ENABLED=0`. The worker is provisioned only where the
+`edge` mode needs it; as of this branch the appliance package does **not** ship
+it, so Full Edge requires manual Python provisioning (see
+[docs/product/COMMERCIAL_MODES.md](docs/product/COMMERCIAL_MODES.md) §3).
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full picture.
 
-### Processing modes
+### Processing modes and commercial profiles
 
-| Mode     | Behavior                                                                                                                                                   |
-| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cloud`  | All processing in the SaaS. Every sampled frame is dispatched, unfiltered.                                                                                    |
-| `hybrid` | Milestone J: a lightweight local motion evaluator runs ahead of the Router — only frames flagged as motion candidates reach the Cloud sink. Cloud remains the sole inference engine; this is not local object detection (see [docs/ROADMAP.md](docs/ROADMAP.md) for Hito K). |
-| `edge`   | Local inference via the (future) Python Vision Worker. Still modeled, no functional difference yet.                                                          |
+`GEOCAM_PROCESSING_MODE` selects **where inference runs**; it does not by itself
+enable the local media path. `GEOCAM_VIDEO_PIPELINE_ENABLED` (default `false`)
+decides whether the local video pipeline is built at all. The two together
+determine the effective commercial profile:
 
-Default: `cloud`. An invalid value aborts startup with a clear error.
+| Mode     | With the video pipeline enabled                                                                                                                              | With it disabled |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------- |
+| `cloud`  | **Gateway** — light local media path (decode/resize/sample); every sampled frame is uploaded and the **Cloud runs YOLO**. No local model.                     | no media path at all |
+| `hybrid` | **Hybrid** — a local motion evaluator runs ahead of the Router and only motion candidates are uploaded; the **Cloud remains the sole inference engine**. Not local object detection. | no media path at all |
+| `edge`   | **Full Edge** — local YOLO through the out-of-process Python Vision Worker. Cloud does no inference.                                                          | no media path at all |
+
+With the pipeline disabled the Edge still runs ONVIF discovery, camera
+connectivity, health, heartbeat, control and OTA, but decodes and uploads
+nothing — `/status` reports that as `profile: gateway-no-media`. That is what a
+default install does, and it is **not** the commercial Gateway.
+
+Default mode: `cloud`. An invalid mode aborts startup with a clear error. See
+[docs/product/COMMERCIAL_MODES.md](docs/product/COMMERCIAL_MODES.md) for the
+per-profile matrix and the configuration examples in
+`deploy/appliance/config/geocam-edge.env.{gateway,hybrid,fulledge}.example`.
 
 ## Configuration
 
@@ -329,8 +363,25 @@ deploy/helm/       local K3s chart
 
 ## Not implemented yet
 
-FFmpeg, OpenCV, YOLO, PyTorch, the Vision Worker, real WebSockets, VPN, OTA,
-and video pipeline/AI processing (decode, sampling, frame routing) belong to
-subsequent milestones (Hito H and later). Camera credential management
-(Hito F) and RTSP camera connectivity (Hito G) are already implemented and
-merged to `main`.
+**No VPN, tunnel or subnet-routing client.** This is deliberate, not pending:
+the architecture treats the tunnel as customer-side infrastructure. The only
+thing the code contributes is that discovery *excludes* tunnel interfaces
+(`wg`, `tun`, `tap`, `tailscale`, `zt`, …) so it does not scan the tunnel.
+Cross-subnet camera-target provisioning and automatic discovery across subnets
+are likewise not implemented.
+
+**Real WebSockets.** Not present — the current contracts are HTTP plus the
+Edge-initiated control channel.
+
+Everything else this file used to list here now exists and is merged: FFmpeg
+decode and the video pipeline (Hito H), Cloud frame push with offline buffering
+and bandwidth control (Hito I), local motion gating (Hito J), YOLO local
+inference through the out-of-process Python Vision Worker plus events, evidence
+and durable sync (Hito K), signed OTA (Hito T), remote configuration (Hito O)
+and the residential appliance (Hito Q).
+
+What remains is **not** a list of missing milestones but a set of concrete,
+per-profile gaps and unvalidated claims — camera-target provisioning, the
+Python worker not being packaged, the absence of any measured Hybrid bandwidth
+saving, CUDA never having been exercised, and more. They are enumerated in
+[docs/product/COMMERCIAL_MODES.md](docs/product/COMMERCIAL_MODES.md) §6 and §7.
