@@ -135,3 +135,47 @@ func TestModule_SyncOnce_DoesNotAckOnEngineError(t *testing.T) {
 		t.Fatalf("acks = %d, want 0 (must not ACK an unrecorded status)", acks)
 	}
 }
+
+
+func TestModule_SyncOnce_NoRuntimeAdapterDoesNotAckApplied(t *testing.T) {
+	var ackStatus, ackCode string
+	client := &fakeClient{
+		getFunc: func(ctx context.Context, deviceID, credential string) (*transport.RemoteConfig, error) {
+			return &transport.RemoteConfig{
+				Version: 1,
+				Payload: []byte(`{"target_fps":10}`),
+			}, nil
+		},
+		ackFunc: func(ctx context.Context, deviceID, credential string, version int64, status, errorCode string) error {
+			ackStatus = status
+			ackCode = errorCode
+			return nil
+		},
+	}
+
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	m := New(client, NewEngine(store, NoopRuntimeAdapter{}), "device-1", "cred-1", nil)
+
+	if err := m.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("SyncOnce() error = %v", err)
+	}
+	if ackStatus == string(ApplyStatusApplied) {
+		t.Fatalf("acked status = %q; tuning with no runtime adapter must never be reported applied", ackStatus)
+	}
+	if ackStatus != string(ApplyStatusRolledBack) {
+		t.Fatalf("acked status = %q, want %q", ackStatus, ApplyStatusRolledBack)
+	}
+	if ackCode != ErrCodeApplyFailed {
+		t.Fatalf("acked error_code = %q, want %q", ackCode, ErrCodeApplyFailed)
+	}
+	st := store.Get()
+	if st.AppliedVersion != 0 {
+		t.Fatalf("AppliedVersion = %d, want 0", st.AppliedVersion)
+	}
+	if st.LastApplyStatus != ApplyStatusRolledBack {
+		t.Fatalf("LastApplyStatus = %q, want %q", st.LastApplyStatus, ApplyStatusRolledBack)
+	}
+}
