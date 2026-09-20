@@ -1,12 +1,15 @@
 # B3 — Bounded Full Edge Retention: audit and implementation design
 
-> **STATUS: AUDIT COMPLETE · IMPLEMENTATION NOT STARTED · B3 STILL OPEN.**
-> This document is the persisted audit for B3. It contains **no implemented
-> retention**, and nothing here may be read as B3 being closed. It exists so
-> implementation can proceed from the repository alone.
+> **STATUS: IMPLEMENTED · TESTED LOCAL · B3 CLOSED AT CODE LEVEL.**
+> §1–§8 below are the original audit and design and remain accurate as
+> written. `internal/fulledge.RetentionManager` implements this design
+> exactly: three owned trees, `0 = disabled` bounds, refcounted capture
+> eviction (F-A), edgebacklog-pending-aware eviction (F-B), symlink/path
+> safety, and a sanitized `/status` report. See §11 for what was actually
+> built, tested and verified, and what is explicitly still not claimed.
 >
 > Retention **permanently deletes evidence**. A wrong eviction is unrecoverable,
-> which is why this slice is specified before it is written.
+> which is why this slice was specified before it was written.
 
 Branch: `fix/hito-z-b3-retention`, stacked on
 `release/hito-z-b2-vision-worker-package-v2` @ `a2acbf0`.
@@ -249,3 +252,69 @@ Update only B3/retention statements on this branch (the fulledge env example,
 
 **Not claimed:** commercial-ready, Software 1.0 READY, any commercial retention
 period, any validated capacity figure.
+
+## 11. Implementation status (this PR)
+
+Branch: `fix/hito-z-b3-retention`, stacked on
+`release/hito-z-b2-vision-worker-package-v2` @ `a2acbf0`.
+
+**Built exactly as designed in §5–§6:**
+
+* `internal/fulledge/retention.go` — `RetentionManager`, `RetentionConfig`
+  (every bound `0 = disabled`), `RetentionReport`/`RetentionTreeReport`, the
+  pure `planEviction` function (oldest-first, count/byte/age, never evicts a
+  protected candidate), path-safety (`safeDirEntries`: `Lstat`, symlinks
+  refused and reported, never followed), and temp-orphan sweep
+  (`.event-*.tmp`, `.evidence-*.tmp`, `*.mp4.tmp`, 1h grace period).
+* `internal/edgebacklog/pending_reader.go` — `LoadPendingReferences`, the
+  single source of truth for F-B (pending capture/clip paths + pending event
+  UUIDs). A record it cannot parse is a hard error that aborts the whole
+  sweep — never silently skipped.
+* `internal/fulledge/store.go` — `EventStore.Evict`, keeping `backlogCount`
+  coherent on eviction of a pending event (invariant #5 in §3).
+* `internal/evidence/clips.go` — `ClipConfig.MinFreeDiskBytes`/`DiskChecker`,
+  checked before a clip write proceeds; same semantics as
+  `fulledge.LimitsManager.CanWriteEvidence` (0 disables it, a `FreeBytes`
+  error degrades safely and allows the write) — preserved, not "fixed".
+* `internal/config/config.go` — the 11 `GEOCAM_EDGE_RETENTION_*` knobs from
+  §6, all defaulting to disabled, negative values rejected.
+* Wired in `internal/agent/fulledge_module.go` (construction-time sweep,
+  non-fatal on failure) and `internal/agent/agent.go` (clip disk checker).
+  `Service.ProcessInference`/`ProcessInferenceWithJPEG` trigger a
+  rate-limited sweep after every successful write.
+* `/status` reports the last sweep via `fulledge.Status.Retention`
+  (`RetentionReport`), sanitized: counts only, never a raw path.
+
+**Tests (§7's required cases), all passing, `-race`-clean, `-count=10`
+stable:**
+
+`internal/fulledge/retention_test.go`: count bound, byte bound, TTL bound,
+oldest-first (pure `planEviction` unit tests, no filesystem); count+byte+TTL
+bounds across all three real trees together; event eviction keeps
+`BacklogCount` coherent; **F-A** shared-capture-protected-while-referenced;
+**F-B** pending capture+clip never evicted, pending event JSON protected
+unless `EvictPending=true`; symlink escape refused with the target file
+verified byte-identical afterward; concurrent create+evict (`-race`);
+restart/reopen determinism; delete failure (read-only directory) stops that
+tree without touching the untried survivors; repeated writes plateau at the
+bound; all-disabled config deletes nothing; temp-orphan sweep age-gates
+correctly; a corrupt pending record aborts the entire sweep.
+`internal/config/config_test.go`: defaults-all-disabled, overrides applied,
+negative/garbage values rejected, explicit `0` accepted as disabled.
+`internal/evidence/clips_test.go`: the min-free-disk gate refuses a clip
+write below the threshold, proceeds above it, and degrades safely on a
+`FreeBytes` read error — all asserted before ffmpeg is ever invoked.
+
+**Sensitivity checked manually** (not part of the CI suite, done once before
+closing this PR): disabling the F-A/F-B protection check in
+`sweepCaptures` made `TestRetentionManager_SharedCaptureProtectedWhileReferenced`
+and `TestRetentionManager_PendingEvidenceNeverEvicted` fail immediately, then
+reverted — confirming those two tests actually exercise the guard rather than
+passing vacuously.
+
+**Explicitly NOT_VALIDATED, unchanged by this PR:** real hardware, a physical
+pilot, real PyTorch inference, real CUDA, any commercial retention period or
+GB quota (every bound ships `0 = disabled`), and retention behavior under
+genuine sustained production disk pressure (only exercised against
+`t.TempDir()` filesystems). B11 (a real tagged release) and Software 1.0
+readiness are untouched by this PR.

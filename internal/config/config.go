@@ -150,6 +150,29 @@ type Config struct {
 	// internal/agent. Zero means "not configured": no invented commercial
 	// default here, only a real one wired to match the SaaS's actual limit.
 	EdgeMaxClipSizeBytes int64
+	// Bounded Full Edge retention (Hito Z B3): event metadata, JPEG capture
+	// and MP4 clip trees each get their own count/byte/age bound, all
+	// disabled (0) by default. No commercial retention period or GB figure
+	// is invented here — every bound ships off until an operator sets it.
+	// See internal/fulledge.RetentionManager.
+	RetentionMaxEvents       int64
+	RetentionMaxEventBytes   int64
+	RetentionMaxEventAge     time.Duration
+	RetentionMaxCaptures     int64
+	RetentionMaxCaptureBytes int64
+	RetentionMaxCaptureAge   time.Duration
+	RetentionMaxClips        int64
+	RetentionMaxClipBytes    int64
+	RetentionMaxClipAge      time.Duration
+	// RetentionEvictPending, when true, allows retention to also delete a
+	// pending (not-yet-synced) event JSON once it is otherwise eligible.
+	// Default false: deleting a pending record's evidence would quarantine
+	// its edgebacklog sync (see internal/edgebacklog), so this stays an
+	// explicit opt-in, never a side effect of a count/byte/age bound.
+	RetentionEvictPending bool
+	// RetentionSweepInterval rate-limits sweep-on-write; 0 means "sweep only
+	// on construction and once per write", never a background goroutine.
+	RetentionSweepInterval time.Duration
 }
 
 // HybridROI is one normalized (0..1) region of interest parsed from
@@ -918,6 +941,10 @@ func Load() (*Config, error) {
 		cfg.EdgeMaxMemoryPercent = v
 	}
 
+	if err := parseRetentionEnv(cfg); err != nil {
+		return nil, err
+	}
+
 	// Fail-fast: reject an insecure http:// SaaS URL here, before any
 	// request is ever attempted, unless explicitly allowed for development.
 	if cfg.SaaSURL != "" && strings.HasPrefix(strings.ToLower(cfg.SaaSURL), "http://") && !cfg.AllowInsecureHTTP {
@@ -984,5 +1011,59 @@ func validateVideoOutputDimensions(width, height int) error {
 	if width%2 != 0 || height%2 != 0 {
 		return fmt.Errorf("invalid video output dimensions %dx%d: must be even (yuv420p)", width, height)
 	}
+	return nil
+}
+
+// parseRetentionEnv reads the Hito Z B3 retention knobs. Every bound is
+// 0 = disabled; a negative value is rejected rather than silently clamped.
+func parseRetentionEnv(cfg *Config) error {
+	int64Fields := []struct {
+		name string
+		dst  *int64
+	}{
+		{"GEOCAM_EDGE_RETENTION_MAX_EVENTS", &cfg.RetentionMaxEvents},
+		{"GEOCAM_EDGE_RETENTION_MAX_EVENT_BYTES", &cfg.RetentionMaxEventBytes},
+		{"GEOCAM_EDGE_RETENTION_MAX_CAPTURES", &cfg.RetentionMaxCaptures},
+		{"GEOCAM_EDGE_RETENTION_MAX_CAPTURE_BYTES", &cfg.RetentionMaxCaptureBytes},
+		{"GEOCAM_EDGE_RETENTION_MAX_CLIPS", &cfg.RetentionMaxClips},
+		{"GEOCAM_EDGE_RETENTION_MAX_CLIP_BYTES", &cfg.RetentionMaxClipBytes},
+	}
+	for _, f := range int64Fields {
+		raw := strings.TrimSpace(os.Getenv(f.name))
+		if raw == "" {
+			continue
+		}
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || v < 0 {
+			return fmt.Errorf("invalid %s %q: must be a non-negative integer (0 = disabled)", f.name, raw)
+		}
+		*f.dst = v
+	}
+
+	durationFields := []struct {
+		name string
+		dst  *time.Duration
+	}{
+		{"GEOCAM_EDGE_RETENTION_MAX_EVENT_AGE", &cfg.RetentionMaxEventAge},
+		{"GEOCAM_EDGE_RETENTION_MAX_CAPTURE_AGE", &cfg.RetentionMaxCaptureAge},
+		{"GEOCAM_EDGE_RETENTION_MAX_CLIP_AGE", &cfg.RetentionMaxClipAge},
+		{"GEOCAM_EDGE_RETENTION_SWEEP_INTERVAL", &cfg.RetentionSweepInterval},
+	}
+	for _, f := range durationFields {
+		raw := strings.TrimSpace(os.Getenv(f.name))
+		if raw == "" {
+			continue
+		}
+		d, err := time.ParseDuration(raw)
+		if err != nil || d < 0 {
+			return fmt.Errorf("invalid %s %q: must be a non-negative duration (0 = disabled)", f.name, raw)
+		}
+		*f.dst = d
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_RETENTION_EVICT_PENDING")); raw == "true" {
+		cfg.RetentionEvictPending = true
+	}
+
 	return nil
 }

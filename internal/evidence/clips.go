@@ -19,7 +19,8 @@ import (
 
 // Sentinel errors for clip operations.
 var (
-	ErrClipConflict = errors.New("evidence: divergent clip content for event")
+	ErrClipConflict          = errors.New("evidence: divergent clip content for event")
+	ErrDiskSpaceBelowMinimum = errors.New("evidence: free disk space below minimum threshold")
 )
 
 // FrameHistory is implemented by an existing ring buffer or a small adapter
@@ -41,6 +42,24 @@ type ClipConfig struct {
 	// MAX_CAPTURE_SIZE_BYTES (integration item #8: GEOCAM_EDGE_MAX_CLIP_SIZE_BYTES
 	// / config.DefaultEdgeMaxClipSizeBytes). Zero disables the check.
 	MaxSizeBytes int64
+	// MinFreeDiskBytes and DiskChecker extend the same free-disk gate
+	// fulledge.EvidenceManager already applies to JPEG captures
+	// (fulledge.LimitsManager.CanWriteEvidence) to clips — a clip write must
+	// never proceed into a filesystem that cannot hold it either.
+	// MinFreeDiskBytes == 0 disables the check (matches CanWriteEvidence's
+	// semantics exactly). DiskChecker defaults to a real free-space reader
+	// when MinFreeDiskBytes > 0 and DiskChecker is nil.
+	MinFreeDiskBytes uint64
+	DiskChecker      DiskChecker
+}
+
+// DiskChecker inspects filesystem capacity. Deliberately structurally
+// identical to fulledge.DiskChecker so a *fulledge.PlatformDiskChecker can be
+// passed here without this package importing fulledge (would be a cycle:
+// fulledge already reaches evidence indirectly through internal/agent's
+// wiring).
+type DiskChecker interface {
+	FreeBytes(dataDir string) (uint64, error)
 }
 
 type ClipRecord struct {
@@ -75,6 +94,29 @@ func NewClipper(cfg ClipConfig) (*Clipper, error) {
 	return &Clipper{cfg: cfg}, nil
 }
 
+// checkDiskSpace mirrors fulledge.LimitsManager.CanWriteEvidence exactly:
+// MinFreeDiskBytes == 0 disables the check, and a FreeBytes error allows the
+// write (degrade safely rather than blocking clips permanently on a
+// transient disk-metrics failure). This behaviour is preserved, not
+// "fixed", per the B3 design doc.
+func (c *Clipper) checkDiskSpace() error {
+	if c.cfg.MinFreeDiskBytes == 0 {
+		return nil
+	}
+	checker := c.cfg.DiskChecker
+	if checker == nil {
+		return nil
+	}
+	free, err := checker.FreeBytes(c.cfg.DataDir)
+	if err != nil {
+		return nil
+	}
+	if free < c.cfg.MinFreeDiskBytes {
+		return fmt.Errorf("%w: free=%d min_required=%d", ErrDiskSpaceBelowMinimum, free, c.cfg.MinFreeDiskBytes)
+	}
+	return nil
+}
+
 // Capture writes GEOCAM_DATA_DIR/evidence/clips/<event_uuid>.mp4 from the
 // already-decoded ring-buffer frames surrounding eventAt. A failed encoder
 // returns an error but never mutates an event/capture record owned by callers.
@@ -99,6 +141,9 @@ func (c *Clipper) Capture(ctx context.Context, history FrameHistory, eventUUID s
 		return ClipRecord{}, fmt.Errorf("evidence: no frames in configured event window")
 	}
 	if err := sameShape(frames); err != nil {
+		return ClipRecord{}, err
+	}
+	if err := c.checkDiskSpace(); err != nil {
 		return ClipRecord{}, err
 	}
 	dir := filepath.Join(c.cfg.DataDir, "evidence", "clips")

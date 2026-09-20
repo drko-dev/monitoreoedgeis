@@ -570,3 +570,88 @@ func TestFullEdgeConfig_Invalid(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadRetentionDefaultsAllDisabled(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.RetentionMaxEvents != 0 || cfg.RetentionMaxEventBytes != 0 || cfg.RetentionMaxEventAge != 0 ||
+		cfg.RetentionMaxCaptures != 0 || cfg.RetentionMaxCaptureBytes != 0 || cfg.RetentionMaxCaptureAge != 0 ||
+		cfg.RetentionMaxClips != 0 || cfg.RetentionMaxClipBytes != 0 || cfg.RetentionMaxClipAge != 0 ||
+		cfg.RetentionEvictPending || cfg.RetentionSweepInterval != 0 {
+		t.Fatalf("expected every retention knob to default to disabled/off, got %+v", cfg)
+	}
+}
+
+func TestLoadRetentionOverrides(t *testing.T) {
+	t.Setenv("GEOCAM_EDGE_RETENTION_MAX_EVENTS", "100")
+	t.Setenv("GEOCAM_EDGE_RETENTION_MAX_EVENT_BYTES", "1048576")
+	t.Setenv("GEOCAM_EDGE_RETENTION_MAX_EVENT_AGE", "24h")
+	t.Setenv("GEOCAM_EDGE_RETENTION_MAX_CAPTURES", "50")
+	t.Setenv("GEOCAM_EDGE_RETENTION_MAX_CAPTURE_BYTES", "2097152")
+	t.Setenv("GEOCAM_EDGE_RETENTION_MAX_CAPTURE_AGE", "12h")
+	t.Setenv("GEOCAM_EDGE_RETENTION_MAX_CLIPS", "10")
+	t.Setenv("GEOCAM_EDGE_RETENTION_MAX_CLIP_BYTES", "4194304")
+	t.Setenv("GEOCAM_EDGE_RETENTION_MAX_CLIP_AGE", "6h")
+	t.Setenv("GEOCAM_EDGE_RETENTION_EVICT_PENDING", "true")
+	t.Setenv("GEOCAM_EDGE_RETENTION_SWEEP_INTERVAL", "1m")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.RetentionMaxEvents != 100 || cfg.RetentionMaxEventBytes != 1048576 || cfg.RetentionMaxEventAge != 24*time.Hour {
+		t.Errorf("event knobs not applied: %+v", cfg)
+	}
+	if cfg.RetentionMaxCaptures != 50 || cfg.RetentionMaxCaptureBytes != 2097152 || cfg.RetentionMaxCaptureAge != 12*time.Hour {
+		t.Errorf("capture knobs not applied: %+v", cfg)
+	}
+	if cfg.RetentionMaxClips != 10 || cfg.RetentionMaxClipBytes != 4194304 || cfg.RetentionMaxClipAge != 6*time.Hour {
+		t.Errorf("clip knobs not applied: %+v", cfg)
+	}
+	if !cfg.RetentionEvictPending {
+		t.Error("RetentionEvictPending not applied")
+	}
+	if cfg.RetentionSweepInterval != time.Minute {
+		t.Errorf("RetentionSweepInterval = %v, want 1m", cfg.RetentionSweepInterval)
+	}
+}
+
+func TestLoadRetentionRejectsNegativeValues(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+	}{
+		{"negative max events", map[string]string{"GEOCAM_EDGE_RETENTION_MAX_EVENTS": "-1"}},
+		{"negative max event bytes", map[string]string{"GEOCAM_EDGE_RETENTION_MAX_EVENT_BYTES": "-1"}},
+		{"negative max capture bytes", map[string]string{"GEOCAM_EDGE_RETENTION_MAX_CAPTURE_BYTES": "-1"}},
+		{"negative max clips", map[string]string{"GEOCAM_EDGE_RETENTION_MAX_CLIPS": "-1"}},
+		{"negative event age", map[string]string{"GEOCAM_EDGE_RETENTION_MAX_EVENT_AGE": "-1h"}},
+		{"negative sweep interval", map[string]string{"GEOCAM_EDGE_RETENTION_SWEEP_INTERVAL": "-1s"}},
+		{"garbage int", map[string]string{"GEOCAM_EDGE_RETENTION_MAX_EVENTS": "not-a-number"}},
+		{"garbage duration", map[string]string{"GEOCAM_EDGE_RETENTION_MAX_CLIP_AGE": "not-a-duration"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected error for case %q, got nil", tc.name)
+			}
+		})
+	}
+}
+
+func TestLoadRetentionZeroExplicitlyDisables(t *testing.T) {
+	t.Setenv("GEOCAM_EDGE_RETENTION_MAX_EVENTS", "0")
+	t.Setenv("GEOCAM_EDGE_RETENTION_SWEEP_INTERVAL", "0")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.RetentionMaxEvents != 0 || cfg.RetentionSweepInterval != 0 {
+		t.Fatalf("explicit 0 must be accepted as disabled, got %+v", cfg)
+	}
+}

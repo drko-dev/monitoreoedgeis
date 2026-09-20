@@ -69,5 +69,39 @@ func newFullEdgeService(cfg *config.Config, ident identity.Identity, creds crede
 		JPEGQuality: cfg.CloudJPEGQuality,
 	}
 
-	return fulledge.NewService(svcCfg, store, evidenceMgr, hwMgr, limitsMgr, reporter, log)
+	svc := fulledge.NewService(svcCfg, store, evidenceMgr, hwMgr, limitsMgr, reporter, log)
+
+	// Hito Z B3: bounded retention over events/, evidence/captures/ and
+	// evidence/clips/. Every bound is 0 = disabled by default, so an operator
+	// who has not set any GEOCAM_EDGE_RETENTION_* knob gets identical
+	// behaviour to before B3. A construction failure (e.g. an unreadable
+	// events dir) degrades to "no retention enforced" rather than aborting
+	// Full Edge startup — the same non-fatal posture the rest of this
+	// function already uses.
+	retentionCfg := fulledge.RetentionConfig{
+		DataDir:       cfg.DataDir,
+		MaxEvents:     cfg.RetentionMaxEvents,
+		MaxEventBytes: cfg.RetentionMaxEventBytes,
+		MaxEventAge:   cfg.RetentionMaxEventAge,
+
+		MaxCaptures:     cfg.RetentionMaxCaptures,
+		MaxCaptureBytes: cfg.RetentionMaxCaptureBytes,
+		MaxCaptureAge:   cfg.RetentionMaxCaptureAge,
+
+		MaxClips:     cfg.RetentionMaxClips,
+		MaxClipBytes: cfg.RetentionMaxClipBytes,
+		MaxClipAge:   cfg.RetentionMaxClipAge,
+
+		EvictPending:  cfg.RetentionEvictPending,
+		SweepInterval: cfg.RetentionSweepInterval,
+		Logger:        log,
+	}
+	retention, err := fulledge.NewRetentionManager(retentionCfg, store)
+	if err != nil {
+		log.Warn("full edge: failed to initialize retention, evidence growth is unbounded", slog.Any("error", err))
+	} else {
+		svc.SetRetention(retention)
+	}
+
+	return svc
 }

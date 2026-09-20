@@ -167,6 +167,13 @@ func New(cfg *config.Config) *Agent {
 				PostEvent:    0,
 				FrameRate:    float64(cfg.VideoTargetFPS),
 				MaxSizeBytes: cfg.EdgeMaxClipSizeBytes,
+				// Hito Z B3: extend the same free-disk gate JPEG captures
+				// already have (fulledge.LimitsManager.CanWriteEvidence) to
+				// clips. fulledge.PlatformDiskChecker satisfies
+				// evidence.DiskChecker structurally, so this is the one real
+				// implementation shared by both gates.
+				MinFreeDiskBytes: cfg.EdgeMinFreeDiskBytes,
+				DiskChecker:      fulledge.PlatformDiskChecker{},
 			}
 			var clipErr error
 			clipper, clipErr = evidence.NewClipper(clipCfg)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync/atomic"
+	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
@@ -28,6 +29,7 @@ type Service struct {
 	limits     *LimitsManager
 	store      *EventStore
 	evidence   *EvidenceManager
+	retention  *RetentionManager
 	healthSink HealthSink
 	logger     *slog.Logger
 
@@ -82,6 +84,21 @@ func (s *Service) Store() *EventStore {
 // Evidence returns the underlying EvidenceManager.
 func (s *Service) Evidence() *EvidenceManager {
 	return s.evidence
+}
+
+// SetRetention wires the Hito Z B3 RetentionManager. Optional: a nil (never
+// set) retention manager means no bound is enforced, exactly as before B3.
+func (s *Service) SetRetention(r *RetentionManager) {
+	s.retention = r
+}
+
+// maybeSweepRetention triggers a rate-limited retention sweep after a
+// successful write. It never fails ProcessInference — the same
+// degrade-safely posture already used when evidence itself fails to save.
+func (s *Service) maybeSweepRetention() {
+	if s.retention != nil {
+		s.retention.MaybeSweepAfterWrite(time.Now())
+	}
 }
 
 // ProcessInference evaluates an InferenceResult and creates persisted LocalEvents and evidence if detections are present.
@@ -158,6 +175,7 @@ func (s *Service) ProcessInference(res InferenceResult, optFrame *processing.Fra
 	}
 
 	s.publishStatus()
+	s.maybeSweepRetention()
 	return created, nil
 }
 
@@ -232,6 +250,7 @@ func (s *Service) ProcessInferenceWithJPEG(res InferenceResult, jpegBytes []byte
 	}
 
 	s.publishStatus()
+	s.maybeSweepRetention()
 	return created, nil
 }
 
@@ -252,7 +271,17 @@ func (s *Service) Status() Status {
 		FallbackCPUCount:       s.hardware.FallbackCount(),
 		Hardware:               s.hardware.Status(),
 		Limits:                 s.limits.Status(s.cfg.DataDir),
+		Retention:              s.retentionStatus(),
 	}
+}
+
+// retentionStatus returns the last completed sweep, or a zero-valued report
+// when retention was never configured (s.retention == nil).
+func (s *Service) retentionStatus() RetentionReport {
+	if s.retention == nil {
+		return RetentionReport{}
+	}
+	return s.retention.LastReport()
 }
 
 func (s *Service) publishStatus() {
