@@ -14,10 +14,25 @@
   working locally the entire time: RTSP supervisors keep running, discovery
   keeps running, Full Edge inference keeps running.
 - Cloud-bound frames (Gateway/Hybrid) buffer locally in the cloud sink
-  (`internal/transport/cloudsink.go`) with age- and byte-based eviction,
+  (`internal/cloudsink/`, specifically `internal/cloudsink/cloudsink.go` and
+  `internal/cloudsink/buffer.go`) with age- and byte-based eviction,
   oldest-first, when the SaaS is unreachable.
-- Control instructions and remote config changes queue locally until
-  reconnect; nothing is lost by an outage, only delayed.
+- **Control and Remote Config are Edge-initiated pull, not a local outbound
+  queue.** Pending control commands live on the **SaaS side**; Edge claims
+  them via outbound polling once connectivity is back
+  (`internal/control/module.go`). The local control ledger exists for
+  durability/idempotency of commands Edge has *already* claimed/executed —
+  it is not a queue of commands still waiting on the SaaS. Remote Config
+  works the same way: there is no local queue of "future" configs. SaaS
+  queues a `reload_config` control command; when Edge claims that command it
+  calls `GetDesiredConfig` and applies whatever the *current* desired state
+  is at that moment (`internal/remoteconfig/module.go:SyncOnce`) — not
+  necessarily every intermediate config that was set while Edge was
+  offline. If that `SyncOnce` fails, it's reported as a failed command, and
+  the SaaS can re-queue `reload_config`. Do not read this as "nothing is
+  ever lost" — it means: no result is silently dropped without a
+  reportable outcome, and Edge always converges to the *latest* desired
+  state, not necessarily every state that existed in between.
 
 ## Camera TCP refused / RTSP EOF / timeout / stall
 

@@ -14,15 +14,23 @@ Deep design reference for this flow: `docs/product/G1_CAMERA_TARGET_WIRING.md`.
 
 What the camera needs, before Edge can do anything with it:
 
-- **IP address reachable from the Edge host's LAN.** Discovery
-  (`internal/discovery/`) is WS-Discovery on the local network segment. The
-  README states explicitly that "cross-subnet camera-target provisioning and
-  automatic discovery across subnets" are **not implemented**
-  (`README.md:377`), and there is no manual-provisioning code path either:
-  `CameraTarget`s are built exclusively from the discovery `Inventory`
-  (`internal/agent/camera_target_reconciler.go:reconcile`, which reads
-  `disc.Engine().Inventory().List()`). A camera outside the Edge host's LAN
-  segment is not reachable by this Edge today — full stop, no workaround.
+- **IP address reachable from the Edge host.** IP reachability and product
+  onboarding are two different things — do not conflate them:
+  - Network-level reachability (routing/VPN) to a camera on another
+    subnet may well exist.
+  - Discovery itself (`internal/discovery/`, WS-Discovery) does not cross
+    subnets — the README states explicitly that "cross-subnet camera-target
+    provisioning and automatic discovery across subnets" are **not
+    implemented** (`README.md:377`).
+  - There is no manual-provisioning code path either: `CameraTarget`s are
+    built exclusively from the discovery `Inventory`
+    (`internal/agent/camera_target_reconciler.go:reconcile`, which reads
+    `disc.Engine().Inventory().List()`).
+  - **Net result:** a camera outside the Edge host's LAN segment is not
+    onboardable through the currently supported production flow — even if
+    it is technically pingable — because nothing in this repo builds a
+    `CameraTarget` for it. This is a product-onboarding gap, not a claim
+    that the network path itself is unreachable.
 - **ONVIF support.** Production camera onboarding today depends entirely on
   ONVIF discovery to populate the inventory that `CameraTarget`s are built
   from. There is currently no CLI, env var, API or config surface to insert a
@@ -166,14 +174,35 @@ Covered in detail in §B above. Summary of the state machine
 (`internal/rtsp/types.go`):
 
 ```
-connecting (initial only) --(TCP+RTSP handshake OK)--> online
-connecting --(dial error, not auth)--> degraded --(backoff, retry same target)--> connecting attempt again
-connecting --(401/digest failure)--> auth_failed --(backoff, retry same target)--> connecting attempt again
-online --(packet silence > PacketTimeout)--> degraded
-online --(connection closed/EOF)--> degraded
-degraded --(handshake OK again)--> online
-any state --(supervisor stopped: target removed)--> offline
+initial visible state: connecting
+
+first Dial attempt, no-auth failure (refused/timeout/EOF):
+  visible state -> degraded
+  supervisor backs off, then retries Dial with the same CameraTarget
+  visible state stays degraded across every retry, until Dial succeeds or
+  a different kind of error changes it
+
+first Dial attempt, auth failure (401/digest):
+  visible state -> auth_failed
+  supervisor backs off, then retries Dial with the same CameraTarget
+  visible state stays auth_failed across every retry, until Dial succeeds
+  or Manager.SetTargets() replaces this CameraTarget with new credentials
+
+successful Dial (from any prior state):
+  visible state -> online
+
+online, then packet silence > PacketTimeout, or connection closed/EOF:
+  visible state -> degraded (same retry behavior as above)
+
+any state, target removed via Manager.SetTargets():
+  visible state -> offline (this supervisor is stopped, not "camera down")
 ```
+
+**`connecting` is never re-entered as a transition.** It is the state a
+supervisor is constructed with, once (`internal/rtsp/supervisor.go:65`), and
+no error path — nor a successful reconnect — ever sets it again. Treat it as
+"this supervisor has never yet completed a Dial attempt", not as a recurring
+retry state.
 
 Verified directly in `internal/rtsp/supervisor.go`'s `run()` loop:
 **every** dial failure — including `auth_failed` — retries automatically with
