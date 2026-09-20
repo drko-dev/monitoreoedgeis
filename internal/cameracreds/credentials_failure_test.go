@@ -109,7 +109,7 @@ func TestW7_SaaSAuthRejectionLeavesTheCredentialCacheUntouched(t *testing.T) {
 	if got := len(store.Snapshot()); got != 1 {
 		t.Errorf("cache size = %d, want 1", got)
 	}
-	if _, ok := NewProvider(store).Resolve("dev-1", ""); !ok {
+	if _, ok := NewProvider(store).Resolve("dev-1"); !ok {
 		t.Error("the cached credential no longer resolves after a 401")
 	}
 

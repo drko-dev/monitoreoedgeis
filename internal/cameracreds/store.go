@@ -108,50 +108,79 @@ func (s *Store) Snapshot() []Credential {
 	return out
 }
 
+// ApplyStats reports what one Apply did, for sanitized observability. It
+// carries counts only — never an id, candidate key, username or password.
+type ApplyStats struct {
+	Added   int
+	Updated int
+	Removed int
+}
+
+// Changed reports whether the cache contents differ from before the Apply.
+func (s ApplyStats) Changed() bool {
+	return s.Added > 0 || s.Updated > 0 || s.Removed > 0
+}
+
 // Apply merges incoming (the SaaS's current, authoritative set of active
 // credentials) into the cache and persists the result if anything changed:
 //
-//   - an entry not yet cached, or cached at a lower Revision, replaces the
-//     cached one (revision mayor reemplaza);
+//   - an entry not yet cached is added;
+//   - an entry cached at a lower Revision is replaced (revision mayor
+//     reemplaza);
 //   - an entry cached at the same or a higher Revision than incoming is left
 //     untouched (same revision = no-op; stale/lower incoming revision is
 //     ignored);
-//   - a cached entry whose ID is absent from incoming is dropped (the SaaS
-//     payload is a full snapshot, so absence means revoked/unassigned).
+//   - a cached entry whose ID is absent from incoming is removed.
+//
+// Absence-means-removed is the CORRECT and REQUIRED semantics: this endpoint is
+// a full authoritative snapshot, so a successful 200 with an empty list
+// legitimately means "this gateway has no active camera credentials", and a
+// revoked credential is expressed by omitting it. There is deliberately NO
+// "empty snapshot protection" here — retaining entries the SaaS no longer lists
+// would resurrect revoked camera access. Last-good-cache behaviour belongs to
+// fetch/decode failures upstream (see Syncer), not to a successful snapshot.
 //
 // incoming must already be validated; malformed input is rejected by the
 // caller (see Syncer) before it ever reaches Apply, so the cache is never
 // partially corrupted by a bad payload.
-func (s *Store) Apply(incoming []Credential) (changed bool, err error) {
+func (s *Store) Apply(incoming []Credential) (ApplyStats, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	var stats ApplyStats
 	next := make(map[string]Credential, len(incoming))
 	for _, c := range incoming {
 		existing, ok := s.entries[c.ID]
-		if !ok || c.Revision > existing.Revision {
+		if !ok {
 			next[c.ID] = c
-			changed = true
+			stats.Added++
+			continue
+		}
+		if c.Revision > existing.Revision {
+			next[c.ID] = c
+			stats.Updated++
 			continue
 		}
 		// Same or stale revision: keep what's already cached.
 		next[c.ID] = existing
 	}
-	if len(next) != len(s.entries) {
-		changed = true
+	for id := range s.entries {
+		if _, ok := next[id]; !ok {
+			stats.Removed++
+		}
 	}
 
-	if !changed {
+	if !stats.Changed() {
 		s.entries = next
-		return false, nil
+		return stats, nil
 	}
 	prev := s.entries
 	s.entries = next
 	if err := s.persistLocked(); err != nil {
 		s.entries = prev // memoria y disco siguen coincidiendo; el próximo intento reintenta
-		return false, err
+		return ApplyStats{}, err
 	}
-	return true, nil
+	return stats, nil
 }
 
 // persistLocked writes the current entries to disk atomically. Callers must

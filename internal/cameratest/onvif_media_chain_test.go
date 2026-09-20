@@ -55,7 +55,7 @@ func TestTestONVIFCredential_FullMediaChainWithSanitizedStreamURI(t *testing.T) 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	result := TestONVIFCredential(ctx, client, provider, "stable-id-w2-chain", "", sim.DeviceXAddr())
+	result := TestONVIFCredential(ctx, client, provider, "stable-id-w2-chain", sim.DeviceXAddr())
 
 	if result.State != StateValid {
 		t.Fatalf("expected VALID, got %v (err=%v)", result.State, result.Err)

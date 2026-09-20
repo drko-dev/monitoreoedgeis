@@ -68,7 +68,7 @@ func TestIntegration_VideoPipeline(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 	provider := cameracreds.NewProvider(store)
-	cred, ok := provider.Resolve(candidateKey, "")
+	cred, ok := provider.Resolve(candidateKey)
 	if !ok {
 		t.Fatal("no credential resolved for test candidate")
 	}

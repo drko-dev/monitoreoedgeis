@@ -46,7 +46,7 @@ func TestW7_ONVIFAuthRejectionIsInvalidAndIsNotRetried(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	result := TestONVIFCredential(ctx, client, provider, "dev-1", "", server.URL)
+	result := TestONVIFCredential(ctx, client, provider, "dev-1", server.URL)
 
 	if result.State != StateInvalid {
 		t.Fatalf("state = %q for a 401, want %q (err=%v)", result.State, StateInvalid, result.Err)
@@ -91,7 +91,7 @@ func TestW7_ONVIFAuthFaultIsAlsoInvalidAndSanitized(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	result := TestONVIFCredential(ctx, client, provider, "dev-1", "", server.URL)
+	result := TestONVIFCredential(ctx, client, provider, "dev-1", server.URL)
 	if result.State != StateInvalid {
 		t.Fatalf("state = %q for a SOAP auth fault, want %q (err=%v)", result.State, StateInvalid, result.Err)
 	}
@@ -123,7 +123,7 @@ func TestW7_UnreachableDeviceIsNotReportedAsABadCredential(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	result := TestONVIFCredential(ctx, client, provider, "dev-1", "", deadURL)
+	result := TestONVIFCredential(ctx, client, provider, "dev-1", deadURL)
 	if result.State == StateInvalid {
 		t.Fatalf("an unreachable device was reported as an invalid credential (err=%v)", result.Err)
 	}
