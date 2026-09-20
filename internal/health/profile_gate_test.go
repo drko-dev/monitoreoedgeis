@@ -127,7 +127,6 @@ func TestEdgeVisionReady_NonEdgeModesAreUnaffected(t *testing.T) {
 	}
 }
 
-
 func TestSnapshot_FullEdgeStatusFollowsEffectiveProfile(t *testing.T) {
 	r := reporterFor(t, config.ModeCloud, true)
 	r.SetFullEdgeStatus(fulledge.Status{LocalDetections: 7})
