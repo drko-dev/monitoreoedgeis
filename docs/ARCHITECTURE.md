@@ -47,7 +47,9 @@ is being built towards. Anything marked **future** does not exist yet.
 > JSON. PyTorch is never embedded in the Go binary — the module has no
 > third-party dependencies, there is no `import "C"`, and every target builds
 > `CGO_ENABLED=0`. It is still not present in the **container image**, which is
-> distroless by design, and the appliance package does not ship it either.
+> distroless by design. The appliance package ships the worker's *sources*
+> (under `vision-worker/`), but not a Python runtime — the wheels are
+> architecture-specific, so the runtime is provisioned on the appliance.
 
 Mode semantics:
 

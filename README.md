@@ -65,8 +65,11 @@ in a separate Python Vision Worker process that the agent `exec`s and supervises
 over a Unix domain socket. **PyTorch is never embedded in the Go binary** — the
 module has no third-party dependencies, there is no `import "C"` anywhere, and
 every target builds `CGO_ENABLED=0`. The worker is provisioned only where the
-`edge` mode needs it; as of this branch the appliance package does **not** ship
-it, so Full Edge requires manual Python provisioning (see
+`edge` mode needs it. The appliance package ships the worker's **sources**
+under `vision-worker/` and derives its script path at install time, but it does
+not ship a Python runtime: ultralytics/PyTorch wheels are architecture-specific,
+so the runtime is provisioned on the appliance and verified with
+`scripts/check-vision-runtime.sh` (see
 [docs/product/COMMERCIAL_MODES.md](docs/product/COMMERCIAL_MODES.md) §3).
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full picture.

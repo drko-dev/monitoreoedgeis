@@ -13,6 +13,11 @@
 # with no warning anyone saw at build time. Local/dev packaging that
 # deliberately skips ffmpeg keeps working exactly as before: this flag is
 # opt-in, so omitting it preserves the previous warn-and-continue behavior.
+#
+# Every artifact always carries the Full Edge vision worker's SOURCES (B2)
+# under vision-worker/. The Python runtime does not travel with it: the wheels
+# are architecture-specific, so a portable virtualenv for amd64+arm64 cannot
+# exist honestly. See scripts/check-vision-runtime.sh.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APPLIANCE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -76,13 +81,33 @@ for arch in amd64 arm64; do
     # repo checkout or from an extracted tarball.
     mkdir -p "$STAGE/scripts" "$STAGE/systemd" "$STAGE/config"
     cp "$SCRIPT_DIR"/install.sh "$SCRIPT_DIR"/update.sh "$SCRIPT_DIR"/rollback.sh \
-       "$SCRIPT_DIR"/uninstall.sh "$SCRIPT_DIR"/wait-ready.sh "$SCRIPT_DIR"/bootstrap.sh "$SCRIPT_DIR"/lib.sh "$SCRIPT_DIR"/ota-updater.sh "$STAGE/scripts/"
+       "$SCRIPT_DIR"/uninstall.sh "$SCRIPT_DIR"/wait-ready.sh "$SCRIPT_DIR"/bootstrap.sh "$SCRIPT_DIR"/lib.sh "$SCRIPT_DIR"/ota-updater.sh \
+       "$SCRIPT_DIR"/check-vision-runtime.sh "$STAGE/scripts/"
     cp "$APPLIANCE_DIR/systemd/geocam-edge.service.in" "$STAGE/systemd/"
     if [ -f "$APPLIANCE_DIR/systemd/geocam-edge-bootstrap.service.in" ]; then
         cp "$APPLIANCE_DIR/systemd/geocam-edge-bootstrap.service.in" "$STAGE/systemd/"
     fi
     cp "$APPLIANCE_DIR/systemd/geocam-edge-ota-updater.service.in" "$APPLIANCE_DIR/systemd/geocam-edge-ota-updater.path.in" "$STAGE/systemd/"
     cp "$APPLIANCE_DIR/config/geocam-edge.env.example" "$STAGE/config/"
+
+    # Full Edge's out-of-process Python worker (B2). These are plain,
+    # architecture-independent sources -- no interpreter, no virtualenv, no
+    # wheels and no model weights travel here, because shipping a "portable
+    # venv" across amd64 and arm64 would be a lie: native wheels are
+    # per-architecture. The runtime is provisioned on the appliance and
+    # verified by scripts/check-vision-runtime.sh. PyTorch never enters the Go
+    # process.
+    VISION_SRC="$REPO_ROOT/deploy/vision-worker"
+    for f in worker.py backend.py requirements.txt; do
+        if [ ! -f "$VISION_SRC/$f" ]; then
+            log "ERROR: missing $VISION_SRC/$f — the Full Edge vision worker cannot be packaged."
+            exit 1
+        fi
+    done
+    mkdir -p "$STAGE/vision-worker"
+    cp "$VISION_SRC/worker.py" "$VISION_SRC/backend.py" "$VISION_SRC/requirements.txt" "$STAGE/vision-worker/"
+    chmod 0644 "$STAGE/vision-worker/"*
+    log "bundled Full Edge vision worker sources for $arch (runtime installed separately)"
 
     ARTIFACT="$DIST_DIR/geocam-edge-$VERSION-linux-$arch.tar.gz"
     ( cd "$STAGE" && tar czf "$ARTIFACT" . )

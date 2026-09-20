@@ -118,6 +118,34 @@ cp "$SCRIPT_DIR"/*.sh "$RELEASE_DIR/scripts/"
 cp "$SCRIPT_DIR/../systemd"/*.in "$RELEASE_DIR/systemd/"
 cp "$SCRIPT_DIR/../config"/* "$RELEASE_DIR/config/"
 chmod 0755 "$RELEASE_DIR/scripts"/*.sh 2>/dev/null || true
+
+# Full Edge's Python worker sources (B2). Versioned with the release, so an
+# update or rollback moves the worker together with the agent that speaks to it
+# — the wire protocol lives in both. Only the SOURCES travel: no interpreter, no
+# virtualenv and no model weights. Model weights live in GEOCAM_DATA_DIR/models
+# and are never read, written or deleted here.
+# Two candidate locations, because the two layouts differ exactly one level:
+#   - an extracted package mirrors the stage:  <root>/scripts + <root>/vision-worker
+#   - the repo checkout keeps the worker at:   deploy/vision-worker (a sibling of
+#     deploy/appliance, not of deploy/appliance/scripts)
+# Resolving both avoids keeping a second copy of the worker in the repo, which
+# would inevitably drift from the one the Go agent's protocol expects.
+VISION_WORKER_SRC=""
+for candidate in "$SCRIPT_DIR/../vision-worker" "$SCRIPT_DIR/../../vision-worker"; do
+    if [ -f "$candidate/worker.py" ]; then
+        VISION_WORKER_SRC="$candidate"
+        break
+    fi
+done
+if [ -n "$VISION_WORKER_SRC" ]; then
+    mkdir -p "$RELEASE_DIR/vision-worker"
+    cp "$VISION_WORKER_SRC"/*.py "$VISION_WORKER_SRC"/requirements.txt "$RELEASE_DIR/vision-worker/"
+    chmod 0644 "$RELEASE_DIR/vision-worker"/*.py "$RELEASE_DIR/vision-worker"/requirements.txt
+    log "installed Full Edge vision worker sources in $RELEASE_DIR/vision-worker (from $VISION_WORKER_SRC)"
+else
+    log "warning: no vision-worker/ sources found next to this script;" \
+        "Full Edge will report worker_not_configured until they are installed."
+fi
 cp "$SCRIPT_DIR/ota-updater.sh" "$(root_path "$GEOCAM_LIBEXEC_DIR")/ota-updater.sh"
 chmod 0755 "$(root_path "$GEOCAM_LIBEXEC_DIR")/ota-updater.sh"
 
@@ -155,10 +183,23 @@ if [ -f "$RELEASE_DIR/ffmpeg" ]; then
     FFMPEG_ENV_LINE="Environment=GEOCAM_VIDEO_FFMPEG_PATH=$GEOCAM_PREFIX/current/ffmpeg"
 fi
 
+# The worker SCRIPT path is derived from the installed release, so an operator
+# only ever has to supply the INTERPRETER. The interpreter cannot be derived:
+# the package deliberately ships no Python runtime (ultralytics/PyTorch wheels
+# are architecture-specific, so a portable venv for amd64+arm64 cannot exist).
+# Set GEOCAM_EDGE_YOLO_WORKER_CMD to your interpreter and verify it with
+# scripts/check-vision-runtime.sh. Emitted as an Environment= line ahead of
+# EnvironmentFile=, so an operator override still wins.
+VISION_ENV_LINE=""
+if [ -f "$RELEASE_DIR/vision-worker/worker.py" ]; then
+    VISION_ENV_LINE="Environment=GEOCAM_EDGE_YOLO_WORKER_ARGS=$GEOCAM_PREFIX/current/vision-worker/worker.py"
+fi
+
 mkdir -p "$SYSTEMD_DIR"
 sed \
     -e "s|@GEOCAM_EXEC_PATH@|$GEOCAM_PREFIX/current/geocam-edge|g" \
     -e "s|@GEOCAM_FFMPEG_ENV_LINE@|$FFMPEG_ENV_LINE|g" \
+    -e "s|@GEOCAM_VISION_ENV_LINE@|$VISION_ENV_LINE|g" \
     -e "s|@GEOCAM_ENV_FILE@|$GEOCAM_CONFIG_DIR/geocam-edge.env|g" \
     -e "s|@GEOCAM_SERVICE_USER@|$GEOCAM_SERVICE_USER|g" \
     -e "s|@GEOCAM_SERVICE_GROUP@|$GEOCAM_SERVICE_GROUP|g" \
