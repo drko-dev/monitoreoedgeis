@@ -370,6 +370,14 @@ func (r *Reporter) Snapshot() Snapshot {
 	videoEnabled := r.cfg != nil && r.cfg.VideoPipelineEnabled
 	profile := config.ProfileFor(config.ProcessingMode(pm), videoEnabled)
 
+	// fullEdge is preconstructed so runtime mode transitions can enter Edge
+	// without rebuilding the service, but its status is only truthful while
+	// the effective live profile is actually Full Edge. Never expose stale or
+	// preconstructed Full Edge state in Gateway/Hybrid snapshots.
+	if profile != config.ProfileFullEdge {
+		fe = nil
+	}
+
 	return Snapshot{
 		Status:              r.state,
 		Version:             r.version,
