@@ -209,3 +209,8 @@ func TestManager_PublishStatus_CloudBufferNilWithoutReportingSink(t *testing.T) 
 		t.Fatalf("CloudBuffer = %+v, want nil (no sink implements CloudBufferReporter)", *got)
 	}
 }
+
+// lastPipelineSummary returns the most recent published summary.
+func (r *recordingHealthSink) lastPipelineSummary() VideoPipelineSummary {
+	return r.get()
+}

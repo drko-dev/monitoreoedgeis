@@ -1,6 +1,6 @@
 # G1 — Camera Target Wiring: audit, contracts and implementation design
 
-> **STATUS: AUDIT COMPLETE · IMPLEMENTATION NOT STARTED · G1 STILL BLOCKED.**
+> **STATUS: PRECONDITIONS DONE (G1-A) · WIRING NOT IMPLEMENTED · G1 STILL BLOCKED.**
 > This document is the persisted audit for the G1 slice (blocker B1). It exists
 > so implementation can proceed from the repository alone. It contains **no
 > implemented wiring**, and nothing here may be read as G1 being closed. The G1
@@ -77,6 +77,37 @@ supervisor, one pipeline and one status row — a silent data-loss bug. Therefor
   diagnostic. Channels are never collapsed under one key.
 - Z2 already documents DVR/NVR as NOT_VALIDATED; G1 does not have to solve it.
 
+**The real SaaS wire shape (confirmed, not assumed).** Auditing
+`monitoreoia` (`geocam/routers/camera_credentials.py`, table
+`camera_credentials`) established the exact payload, and the Edge was wrong on
+two points that together made every sync impossible:
+
+```json
+{"credentials": [{"id": 42, "name": "Camara Entrada", "scope": "device",
+                  "username": "admin", "password": "...", "revision": 2,
+                  "candidate_keys": ["a1b2c3..."]}]}
+```
+
+- **`id` is a NUMBER** (`BIGSERIAL`). The Edge declared `ID string`, so decoding
+  a numeric id failed and `FetchCameraCredentials` returned a decode error on
+  every call. The transport payload is now `int64`, converted once to the
+  canonical decimal string at the boundary.
+- **`scope` is LOWERCASE** (`device` | `group`, matching the DB column). The
+  Edge compared against `DEVICE`/`GROUP`, so `validate()` would reject every
+  entry. Normalization now happens in exactly one place (`parseScope`), and any
+  other value rejects the whole payload instead of caching an uninterpretable
+  credential.
+- There is **no `revoked` field** on the wire; the old field was dead and has
+  been removed.
+- A GROUP credential carries the **real per-camera candidate keys** of its
+  assigned cameras — not a group id.
+
+**GROUP credentials resolve by candidate key, not by a group id.**
+The SaaS resolves DEVICE-over-GROUP precedence server-side and sends genuine
+candidate keys for both scopes. `Provider.Resolve` therefore takes only a
+candidate key and tries DEVICE first, then GROUP. There is no group identifier
+for the Edge to supply, and none is invented.
+
 **GROUP credentials are unreachable.** `Resolve` matches `ScopeGroup` by
 `groupID`, and discovery carries no group assignment for a device. G1 therefore
 resolves **DEVICE scope only** — call `Resolve(stableIdentity, "")`. This must be
@@ -87,37 +118,47 @@ documented, not papered over with a fabricated group id.
 These were found during the audit and each one breaks a hard requirement in the
 slice brief.
 
-**D-A — `Store.Apply` is destructively snapshot-based.**
-`Apply` rebuilds the cache from `incoming` alone and **drops any cached entry
-whose ID is absent** (`internal/cameracreds/store.go:111-153`). A perfectly valid
-`{"credentials":[]}` 200 response therefore **wipes every cached credential**,
-and a well-formed but *shortened* list silently drops the missing entries.
-This violates "nunca borrar/crear credenciales por error" and "preservar último
-cache bueno si SaaS falla". Fix required in `internal/cameracreds`: refuse to
-apply an empty payload, and treat a shortening payload as a diagnostic rather
-than a silent mass revocation (exact policy to be decided and tested; it is a
-SaaS-contract question, so it must be explicit).
+**D-A — NOT A DEFECT. Reclassified after auditing the SaaS contract.**
+`Store.Apply` drops any cached entry absent from `incoming`
+(`internal/cameracreds/store.go`). This was initially flagged as destructive,
+but the SaaS contract is explicit: `GET /api/v1/gateway/camera-credentials` is a
+**full authoritative snapshot**, so a successful `{"credentials":[]}` legitimately
+means "this gateway has no active credentials", and revocation is expressed by
+**omission** (the endpoint never emits a revoked entry).
 
-**D-B — `Inventory.List()` does not purge expired devices.**
+Retaining absent entries would resurrect revoked camera access — a security
+regression. There is therefore deliberately **no empty-snapshot protection**.
+Last-good-cache behaviour applies only to fetch and payload failures, which is
+where the Syncer enforces it. Verified against monitoreoia
+`docs/saas/19-camera-credentials.md`, `geocam/routers/camera_credentials.py`
+(`sync_camera_credentials`) and the `status='revoked'` soft-delete semantics
+covered by `test_revoke_removes_from_sync`.
+
+**D-B — FIXED (G1-A). `Inventory.List()` does not purge expired devices.**
 Eviction runs only inside `Upsert` (`types.go:126,193-200`); `List()`, `Get()`
 and `Count()` have no TTL check. Reconciliation would keep feeding targets for
-devices that stopped being seen up to 24h ago. Fix: add a narrow, tested
-TTL-respecting accessor (e.g. `ListActive()`), and **do not change `DeviceTTL`**
-(`security.go:31`).
+devices that stopped being seen up to 24h ago. Fixed by adding the deterministic,
+tested `Inventory.PruneExpired(now) int`, called at the end of every successful
+`Engine.RunScan` (including a scan that found nothing). `DeviceTTL` is
+unchanged, so a single multicast miss never removes a device.
 
-**D-C — `rtsp.ParseTarget` silently drops the URI query string.**
+**D-C — FIXED (G1-A). `rtsp.ParseTarget` silently drops the URI query string.**
 It returns `u.EscapedPath()` (`auth.go:36`) and discards `u.RawQuery`. Many ONVIF
 `StreamURI`s carry `?channel=1&subtype=0`; dropping it produces a target that
-connects to the wrong resource or fails. Either preserve the query (a genuine
-bug fix, and the correct behaviour) or refuse such targets with a diagnostic —
-but never emit a silently-wrong target.
+connects to the wrong resource or fails. Fixed by preserving the query in
+`ParseTarget`, so `rtsp://10.0.0.20:554/stream?channel=1&subtype=0` round-trips
+into `addr=10.0.0.20:554` and `path=/stream?channel=1&subtype=0`. `rtsps://`
+stays rejected — the client dials plain TCP and implements no TLS.
 
-**D-D — exceeding `MaxConcurrentPipelines` is completely silent.**
+**D-D — FIXED (G1-A). Exceeding `MaxConcurrentPipelines` is completely silent.**
 `processing.Manager.OnPacket` drops excess cameras with no log, no counter and no
 status row (`processing/manager.go:178-181`); the documented `skipped_limit`
 state is never set. With the default of 4, a 5–10 camera site silently runs 4
-cameras and `/status` shows no hint. At minimum this must be logged/counted so a
-G1 integration test can assert it.
+cameras and `/status` shows no hint. Fixed with a bounded diagnostic: an
+`skipped_limit` counter (unbounded count), a capped set of at most 32 distinct
+`skipped_limit_keys`, the configured `pipeline_limit`, and a one-line log per
+newly-seen key — no per-frame log storm, no unbounded map. The default of 4 is
+deliberately unchanged; the 5-10 camera pilot must configure it explicitly.
 
 ## 5. Design
 
@@ -209,12 +250,18 @@ error.
 
 ## 8. Risks to handle during implementation
 
-- **Lock-cycle hazard.** `SetTargets` holds `rtsp.mu` while calling `sup.Stop()`,
-  and a supervisor goroutine can simultaneously be inside
-  `processing.Manager.OnPacket`, which holds `processing.mu` and calls
-  `rtsp.DescriptorFor`. Adding a callback that calls `SetTargets` widens the
-  window. Reconcile from a path that holds **no** rtsp/processing lock, and
-  never call `SetTargets` from inside `OnPacket`.
+- **Lock-cycle hazard — FIXED (G1-A).** `SetTargets` used to hold `rtsp.mu`
+  while calling `sup.Stop()`, while a supervisor goroutine could be inside
+  `processing.Manager.OnPacket` holding `processing.mu` and calling
+  `rtsp.DescriptorFor` — a cycle reachable in the first-packet window. `SetTargets`
+  now computes the diff under `mu`, mutates the map, releases `mu`, and only then
+  performs the blocking stop/start. A separate `reconcileMu` serializes whole
+  reconciliations so concurrent calls cannot interleave and cannot create two
+  supervisors for one candidate key. Covered by a race/stress test.
+
+- **Still true for the wiring (G1-B):** reconciliation callbacks must not run
+  under a module's internal lock, and `SetTargets` must never be called from
+  inside `OnPacket`.
 - **Secret leaks.** `Credential` has no `String()`/`MarshalJSON`, so `%+v` or
   `json.Marshal` prints the password verbatim; `Store.Snapshot()` returns full
   credentials; `transport.CameraCredentialPayload.Password` is plaintext.
@@ -237,3 +284,25 @@ a completed physical pilot, commercial readiness, or Software 1.0 READY. Do not
 touch IA2 / PR #84 (B1 is closed there only at final integration). Do not
 change `DeviceTTL`, do not add default credentials, do not relax the XAddr/SSRF
 guards, and do not create a second camera stack.
+
+## 10. G1-A closure status (preconditions only)
+
+G1-A resolved the contract and lifecycle preconditions. **It did not implement
+the wiring, and G1 is still BLOCKED.**
+
+| Item | Status |
+| --- | --- |
+| D-A destructive-snapshot semantics | **RECLASSIFIED — NOT A DEFECT** (authoritative snapshot confirmed against SaaS) |
+| Real SaaS wire shape (numeric `id`, lowercase `scope`, no `revoked`, GROUP candidate keys) | **FIXED** — boundary corrected, with a real-HTTP JSON test |
+| D-B inventory TTL | **FIXED** — `PruneExpired` + prune on every successful scan |
+| D-C RTSP query preservation | **FIXED** — query preserved; `rtsps://` still rejected |
+| D-D admission-ceiling observability | **FIXED** — bounded `skipped_limit` + keys + `pipeline_limit` |
+| GROUP resolution by candidate key | **FIXED** — `Resolve(candidateKey)`, DEVICE over GROUP |
+| `rtsp.Manager.SetTargets` lock cycle | **FIXED** — diff under `mu`, blocking stop/start outside it, `reconcileMu` serializes |
+| `discovery` → `rtsp.Manager.SetTargets` production wiring | **NOT IMPLEMENTED** — this is G1-B |
+| Authenticated ONVIF enrichment | **NOT IMPLEMENTED** — G1-B |
+| Scan/sync success callbacks | **NOT IMPLEMENTED** — G1-B |
+| `internal/agent/failure_lifecycle_test.go` (asserts no credential files exist) | **UNCHANGED** — its update belongs to G1-B, when the agent lifecycle actually changes |
+
+Not claimed: G1 closed, camera wiring complete, real camera validated, pilot
+complete, hardware certified, commercial-ready, Software 1.0 READY.

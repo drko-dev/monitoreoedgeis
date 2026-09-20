@@ -46,7 +46,11 @@ type Manager struct {
 	stopped atomic.Bool
 	doneCh  chan struct{}
 
-	mu          sync.Mutex
+	mu             sync.Mutex
+	limitSkips     atomic.Int64
+	limitSkippedMu sync.Mutex
+	limitSkipped   []string
+
 	pipelines   map[string]*cameraPipeline
 	unsupported map[string]bool
 	router      *Router
@@ -177,6 +181,7 @@ func (m *Manager) OnPacket(candidateKey string, payload []byte, recvAt time.Time
 		}
 		if len(m.pipelines) >= m.cfg.MaxConcurrentPipelines {
 			m.mu.Unlock()
+			m.recordLimitSkip(candidateKey)
 			return
 		}
 		desc, resolved := m.rtsp.DescriptorFor(candidateKey)
@@ -235,11 +240,15 @@ func (m *Manager) publishStatus() {
 		routerQueues = m.router.QueueStats()
 	}
 
+	skipped, skippedKeys := m.limitSkipSnapshot()
 	m.health.SetVideoPipeline(VideoPipelineSummary{
-		CameraCount:  len(statuses),
-		Cameras:      statuses,
-		CloudBuffer:  m.cloudBufferStats(),
-		RouterQueues: routerQueues,
+		CameraCount:      len(statuses),
+		Cameras:          statuses,
+		CloudBuffer:      m.cloudBufferStats(),
+		RouterQueues:     routerQueues,
+		PipelineLimit:    m.cfg.MaxConcurrentPipelines,
+		SkippedLimit:     skipped,
+		SkippedLimitKeys: skippedKeys,
 	})
 }
 
@@ -428,4 +437,50 @@ func (m *Manager) SetConfig(cfg Config) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cfg = cfg
+}
+
+// maxReportedSkippedKeys bounds how many distinct candidate keys the admission
+// ceiling diagnostic remembers. The counter itself is unbounded (it is a plain
+// count), but the key set is capped so a site far over the limit cannot grow
+// this map without bound — and so /status stays a fixed size.
+const maxReportedSkippedKeys = 32
+
+// recordLimitSkip counts one frame dropped because the pipeline admission
+// ceiling was already reached, and remembers the candidate key (up to
+// maxReportedSkippedKeys) so the operator can tell WHICH cameras are not being
+// decoded.
+//
+// It logs only on the first sighting of each key, so a camera streaming past
+// the limit produces one line, not one per frame.
+func (m *Manager) recordLimitSkip(candidateKey string) {
+	m.limitSkips.Add(1)
+
+	m.limitSkippedMu.Lock()
+	defer m.limitSkippedMu.Unlock()
+	for _, k := range m.limitSkipped {
+		if k == candidateKey {
+			return
+		}
+	}
+	if len(m.limitSkipped) >= maxReportedSkippedKeys {
+		return
+	}
+	m.limitSkipped = append(m.limitSkipped, candidateKey)
+	m.logger.Warn("video pipeline admission ceiling reached, camera will not be decoded",
+		"candidate_key", candidateKey,
+		"pipeline_limit", m.cfg.MaxConcurrentPipelines,
+		"active_pipelines", len(m.pipelines))
+}
+
+// limitSkipSnapshot returns the current skip counter and a copy of the bounded
+// key set.
+func (m *Manager) limitSkipSnapshot() (int64, []string) {
+	m.limitSkippedMu.Lock()
+	defer m.limitSkippedMu.Unlock()
+	if len(m.limitSkipped) == 0 {
+		return m.limitSkips.Load(), nil
+	}
+	out := make([]string, len(m.limitSkipped))
+	copy(out, m.limitSkipped)
+	return m.limitSkips.Load(), out
 }
