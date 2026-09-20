@@ -120,8 +120,18 @@ func New(cfg *config.Config) *Agent {
 	// Built before the video pipeline block below (K1->K8 wiring): the
 	// vision Sink constructed there needs a live fullEdgeService to hand
 	// real detections to via a vision.EventConsumer adapter — see
-	// fulledge_wiring.go. newFullEdgeService itself still returns nil
-	// outside ModeEdge, same gate as always.
+	// fulledge_wiring.go.
+	//
+	// Corrected in Hito Z: newFullEdgeService does NOT return nil outside
+	// ModeEdge. It gates on DataDir only, deliberately, so that a
+	// remote-config runtime transition from cloud/hybrid into edge mode has a
+	// service to hand over to. Consequence, verified and recorded in
+	// docs/product/COMMERCIAL_MODES.md (gap D1): in cloud and hybrid modes the
+	// fulledge service exists and publishes its status, so /status carries a
+	// `full_edge` block of zeros (plus a `queues.vision` entry) even though no
+	// local inference can run. The accessor Agent.FullEdgeService() *is*
+	// mode-gated and returns nil outside edge, which is the field to read if
+	// you need "is Full Edge active".
 	a.fullEdgeService = newFullEdgeService(cfg, ident, creds, reporter, log)
 	if a.fullEdgeService != nil {
 		// a.localEvents (the backlog) is nil for an unenrolled Edge;
@@ -462,7 +472,24 @@ func (a *Agent) logStartup() {
 		slog.String("saas_url", a.cfg.SaaSURL),
 		slog.Duration("heartbeat_interval", a.cfg.HeartbeatInterval),
 		slog.String("data_dir", a.cfg.DataDir),
+		slog.String("processing_mode", a.cfg.ProcessingMode.String()),
+		slog.String("profile", a.cfg.Profile().String()),
+		slog.Bool("video_pipeline_enabled", a.cfg.VideoPipelineEnabled),
 	)
+	// ProcessingMode is a request; the effective profile is what the agent
+	// will actually build. Say so out loud when the two disagree, because
+	// /status reports the requested mode and would otherwise read as a claim
+	// about a product that is not running (see internal/config/profile.go and
+	// docs/product/COMMERCIAL_MODES.md).
+	if !a.cfg.Honored() {
+		a.log.Warn("processing mode cannot be honored without the local video pipeline",
+			slog.String("processing_mode", a.cfg.ProcessingMode.String()),
+			slog.String("profile", a.cfg.Profile().String()),
+			slog.String("reason", "GEOCAM_VIDEO_PIPELINE_ENABLED is false, so no local decode, "+
+				"sampling, motion gating or local inference is constructed; this Edge "+
+				"runs discovery, camera connectivity, health, control and OTA only"),
+		)
+	}
 	if a.identityErr != nil {
 		a.log.Error("identity resolution failed", slog.Any("error", a.identityErr))
 	} else {

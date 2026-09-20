@@ -42,18 +42,25 @@ func (s State) String() string { return string(s) }
 
 // Snapshot is a point-in-time view of agent health and runtime info.
 type Snapshot struct {
-	Status           State             `json:"status"`
-	Version          string            `json:"version"`
-	EdgeID           string            `json:"edge_id"`
-	EnrollmentStatus string            `json:"enrollment_status"`
-	CredentialStatus string            `json:"credential_status"`
-	Hostname         string            `json:"hostname"`
-	OS               string            `json:"os"`
-	Architecture     string            `json:"architecture"`
-	ProcessingMode   string            `json:"processing_mode"`
-	UptimeSeconds    int64             `json:"uptime_seconds"`
-	Uptime           string            `json:"uptime"`
-	Modules          map[string]string `json:"modules"`
+	Status           State  `json:"status"`
+	Version          string `json:"version"`
+	EdgeID           string `json:"edge_id"`
+	EnrollmentStatus string `json:"enrollment_status"`
+	CredentialStatus string `json:"credential_status"`
+	Hostname         string `json:"hostname"`
+	OS               string `json:"os"`
+	Architecture     string `json:"architecture"`
+	ProcessingMode   string `json:"processing_mode"`
+	// Profile is the *effective* commercial profile, derived from
+	// ProcessingMode plus whether the local video pipeline is enabled
+	// (config.ProfileFor). ProcessingMode alone is the request; it does not
+	// say whether the local video stages it names are actually built, so
+	// this is the field to read to know what the Edge really does. See
+	// docs/product/COMMERCIAL_MODES.md.
+	Profile       config.Profile    `json:"profile"`
+	UptimeSeconds int64             `json:"uptime_seconds"`
+	Uptime        string            `json:"uptime"`
+	Modules       map[string]string `json:"modules"`
 	// Heartbeat is the SaaS-heartbeat module's own state. It is omitted when
 	// the module is not running (unenrolled Edge, or no SaaS URL set). It
 	// carries timings, counters and an error class only — never the
@@ -354,6 +361,15 @@ func (r *Reporter) Snapshot() Snapshot {
 		pm = r.cfg.ProcessingMode.String()
 	}
 
+	// The effective profile is derived from the *live* mode string, not from
+	// r.cfg.ProcessingMode: a remote-config apply can change the mode at
+	// runtime (see Reporter.SetProcessingMode) and the profile must follow it.
+	// VideoPipelineEnabled does not change at runtime — the runtime applier
+	// itself only exists when the pipeline was enabled at startup — so reading
+	// it from the config stays correct.
+	videoEnabled := r.cfg != nil && r.cfg.VideoPipelineEnabled
+	profile := config.ProfileFor(config.ProcessingMode(pm), videoEnabled)
+
 	return Snapshot{
 		Status:              r.state,
 		Version:             r.version,
@@ -364,6 +380,7 @@ func (r *Reporter) Snapshot() Snapshot {
 		OS:                  r.host.OS,
 		Architecture:        r.host.GOARCH,
 		ProcessingMode:      pm,
+		Profile:             profile,
 		UptimeSeconds:       int64(uptime.Seconds()),
 		Uptime:              uptime.Round(time.Second).String(),
 		Modules:             modules,
@@ -443,6 +460,15 @@ func (r *Reporter) VisionStatus() *vision.Status {
 // narrow, since the package doc's "local health independent of SaaS
 // reachability" rule still holds for everything else (RTSP, heartbeat,
 // discovery).
+//
+// It is also trivially satisfied when the video pipeline is disabled, even in
+// edge mode: internal/agent only constructs the local-inference Sink (and
+// therefore ever records a vision status) inside its VideoPipelineEnabled
+// gate, so no vision worker can exist to wait for. Requiring one anyway pinned
+// /readyz to 503 *forever* for a configuration that /status reports as READY —
+// and since the appliance's update.sh rolls a release back when /readyz never
+// becomes ready, that turned a deliberate "edge mode staged before the
+// Vision Worker is provisioned" configuration into a failed upgrade.
 func (r *Reporter) EdgeVisionReady() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -451,6 +477,9 @@ func (r *Reporter) EdgeVisionReady() bool {
 		mode = r.cfg.ProcessingMode.String()
 	}
 	if mode != string(config.ModeEdge) {
+		return true
+	}
+	if r.cfg != nil && !r.cfg.VideoPipelineEnabled {
 		return true
 	}
 	return r.vision != nil && r.vision.Worker.State == vision.StateReady
