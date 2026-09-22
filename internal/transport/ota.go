@@ -36,7 +36,7 @@ func (c *Client) GetNextOTARelease(ctx context.Context, deviceID, credential str
 	if status == http.StatusTooManyRequests {
 		return nil, &RateLimitError{RetryAfter: parseRetryAfter(header)}
 	}
-	if status == http.StatusRequestTimeout || status >= 500 {
+	if isRetryableStatus(status) {
 		return nil, fmt.Errorf("%w (status %d)", ErrRetryableStatus, status)
 	}
 	if status != http.StatusOK {

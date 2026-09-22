@@ -352,6 +352,35 @@ func TestPostFrameUnauthorized(t *testing.T) {
 // I6's offline buffer depends on to decide what is worth retrying:
 // classification is by HTTP status alone, never inferred from the response
 // body (see classifyFrameStatus).
+// TestIsRetryableStatus exercises the single helper every classification
+// call site in this package shares (PostFrame, heartbeat, control next,
+// control report, OTA next, remote-config next, remote-config ack) so the
+// 500..599 boundary cannot drift between them again.
+func TestIsRetryableStatus(t *testing.T) {
+	tests := []struct {
+		status int
+		want   bool
+	}{
+		{http.StatusRequestTimeout, true}, // 408
+		{http.StatusTooManyRequests, false},
+		{http.StatusInternalServerError, true}, // 500
+		{http.StatusServiceUnavailable, true},  // 503
+		{599, true},
+		{600, false},
+		{700, false},
+		{http.StatusUnauthorized, false},
+		{http.StatusForbidden, false},
+		{http.StatusBadRequest, false},
+		{http.StatusUnprocessableEntity, false},
+		{http.StatusOK, false},
+	}
+	for _, tt := range tests {
+		if got := isRetryableStatus(tt.status); got != tt.want {
+			t.Errorf("isRetryableStatus(%d) = %v, want %v", tt.status, got, tt.want)
+		}
+	}
+}
+
 func TestPostFrameStatusClassification(t *testing.T) {
 	tests := []struct {
 		status int
@@ -364,6 +393,12 @@ func TestPostFrameStatusClassification(t *testing.T) {
 		{http.StatusBadGateway, ErrRetryableStatus},
 		{http.StatusServiceUnavailable, ErrRetryableStatus},
 		{http.StatusGatewayTimeout, ErrRetryableStatus},
+		{599, ErrRetryableStatus},
+		// Never retryable: 600+ is outside the 5xx range the contract
+		// defines as transient, even though it is still >= 400 (see
+		// isRetryableStatus).
+		{600, ErrInvalidRequest},
+		{700, ErrInvalidRequest},
 		// Never retryable: the credential is rejected.
 		{http.StatusUnauthorized, ErrUnauthorized},
 		{http.StatusForbidden, ErrUnauthorized},
