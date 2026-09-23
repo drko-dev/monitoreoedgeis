@@ -249,3 +249,103 @@ func TestOpenStore_CorruptFile(t *testing.T) {
 		t.Fatal("expected error opening corrupt camera_credentials.json")
 	}
 }
+
+func TestStore_Apply_SameRevisionDerivedCandidateIdentitiesConverge(t *testing.T) {
+	dir := t.TempDir()
+	key := testKey(t)
+	store, err := OpenStore(dir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	legacyCandidateHash := "11e9edbf00a0291a250e1fa707a4a8fc4ede60d8cdf024719d41ba34109dbe30"
+	stableIdentity := "epr:uuid:3fa1fe68-b915-4053-a3e1-5ca6e67f02cd"
+
+	// 1. Pre-existing cached state: id="6", revision=1, candidate_keys=[legacyCandidateHash]
+	initial := Credential{
+		ID:            "6",
+		Scope:         ScopeDevice,
+		CandidateKeys: []string{legacyCandidateHash},
+		Username:      "admin",
+		Password:      "tapo-pass-123",
+		Revision:      1,
+	}
+	if _, err := store.Apply([]Credential{initial}); err != nil {
+		t.Fatalf("initial Apply: %v", err)
+	}
+
+	provider := NewProvider(store)
+	if _, ok := provider.Resolve(legacyCandidateHash); !ok {
+		t.Fatal("expected legacy candidate hash to resolve before update")
+	}
+	if _, ok := provider.Resolve(stableIdentity); ok {
+		t.Fatal("stable identity should not resolve before update")
+	}
+
+	// 2. Incoming authoritative snapshot with SAME revision=1, but projected candidate_keys=[stableIdentity]
+	updatedSnapshot := Credential{
+		ID:            "6",
+		Scope:         ScopeDevice,
+		CandidateKeys: []string{stableIdentity},
+		Username:      "admin",
+		Password:      "tapo-pass-123",
+		Revision:      1,
+	}
+	stats, err := store.Apply([]Credential{updatedSnapshot})
+	if err != nil {
+		t.Fatalf("Apply with projected identities: %v", err)
+	}
+	if !stats.Changed() || stats.Updated != 1 {
+		t.Fatalf("expected 1 updated entry, got stats: %+v", stats)
+	}
+
+	// 3. Provider now resolves by stable identity, NOT legacy hash
+	if cred, ok := provider.Resolve(stableIdentity); !ok || cred.Password != "tapo-pass-123" {
+		t.Fatalf("expected stable identity to resolve to tapo-pass-123, got ok=%v, cred=%+v", ok, cred)
+	}
+	if _, ok := provider.Resolve(legacyCandidateHash); ok {
+		t.Fatal("legacy hash must no longer resolve after convergence")
+	}
+
+	// 4. Repeated apply of same snapshot is idempotent (changed=false)
+	statsRepeat, err := store.Apply([]Credential{updatedSnapshot})
+	if err != nil {
+		t.Fatalf("repeat Apply: %v", err)
+	}
+	if statsRepeat.Changed() {
+		t.Fatalf("repeated Apply should be no-op, got stats: %+v", statsRepeat)
+	}
+
+	// 5. Stale incoming lower revision (revision=0) does NOT overwrite revision=1
+	stale := Credential{
+		ID:            "6",
+		Scope:         ScopeDevice,
+		CandidateKeys: []string{"some-other-key"},
+		Username:      "admin",
+		Password:      "stale-pass",
+		Revision:      0,
+	}
+	statsStale, err := store.Apply([]Credential{stale})
+	if err != nil {
+		t.Fatalf("stale Apply: %v", err)
+	}
+	if statsStale.Changed() {
+		t.Fatalf("stale revision should be ignored, got stats: %+v", statsStale)
+	}
+	if cred, ok := provider.Resolve(stableIdentity); !ok || cred.Password != "tapo-pass-123" {
+		t.Fatalf("stale payload mutated cache! got ok=%v, cred=%+v", ok, cred)
+	}
+
+	// 6. Persistence across restart: re-opening store from disk retains converged state
+	reopened, err := OpenStore(dir, key)
+	if err != nil {
+		t.Fatalf("OpenStore after restart: %v", err)
+	}
+	providerReopened := NewProvider(reopened)
+	if cred, ok := providerReopened.Resolve(stableIdentity); !ok || cred.Password != "tapo-pass-123" {
+		t.Fatalf("reopened store failed to resolve stable identity: ok=%v, cred=%+v", ok, cred)
+	}
+	if _, ok := providerReopened.Resolve(legacyCandidateHash); ok {
+		t.Fatal("reopened store still resolves legacy hash")
+	}
+}
