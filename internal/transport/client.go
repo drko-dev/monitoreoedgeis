@@ -336,8 +336,8 @@ func (c *Client) PostFrameWithMetadata(ctx context.Context, deviceID, credential
 // but some test doubles and misbehaving intermediaries emit it) and every
 // other 4xx, which are permanent per-request failures, not transient ones.
 // Every retry-classification call site in this package shares this helper
-// so the retryable range cannot drift between PostFrame, control, OTA and
-// remote-config.
+// so the retryable range cannot drift between PostFrame, heartbeat, control,
+// OTA and remote-config.
 func isRetryableStatus(status int) bool {
 	return status == http.StatusRequestTimeout || (status >= 500 && status <= 599)
 }
