@@ -70,6 +70,24 @@ func buildCameraTargets(
 			continue
 		}
 
+		var username, password string
+		var credOk bool
+		if resolve != nil {
+			username, password, credOk = resolve(candidateKey)
+		}
+
+		if dev.AuthRequired && (!credOk || username == "") {
+			// The device rejected anonymous access and no credential
+			// resolved: never emit a target that is known in advance to
+			// fail authentication, and never guess a default
+			// username/password. This must be evaluated before VideoSources
+			// checks so an un-enriched auth-required device with 0 sources
+			// is correctly reported as auth_required_no_credential rather
+			// than multichannel_not_supported. Other cameras still reconcile.
+			skips = append(skips, TargetSkip{CandidateKey: candidateKey, Reason: SkipAuthRequiredNoCredential})
+			continue
+		}
+
 		// Hito Z G1 is single-source only: DVR/NVR/multichannel is
 		// NOT_VALIDATED and deliberately out of scope. Never collapse two
 		// channels under one CandidateKey.
@@ -99,22 +117,8 @@ func buildCameraTargets(
 			Width:        profile.Width,
 			Height:       profile.Height,
 			FPS:          profile.FPS,
-		}
-
-		if resolve != nil {
-			if username, password, ok := resolve(candidateKey); ok {
-				target.Username = username
-				target.Password = password
-			}
-		}
-
-		if dev.AuthRequired && target.Username == "" {
-			// The device rejected anonymous access and no credential
-			// resolved: never emit a target that is known in advance to
-			// fail authentication, and never guess a default
-			// username/password. Other cameras still reconcile normally.
-			skips = append(skips, TargetSkip{CandidateKey: candidateKey, Reason: SkipAuthRequiredNoCredential})
-			continue
+			Username:     username,
+			Password:     password,
 		}
 
 		targets = append(targets, target)

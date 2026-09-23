@@ -206,6 +206,29 @@ func TestBuildCameraTargets_AuthRequiredNoCredentialSkipped(t *testing.T) {
 	}
 }
 
+func TestBuildCameraTargets_AuthRequiredZeroSourcesNoCredentialSkipped(t *testing.T) {
+	// A device that rejected anonymous access and has no VideoSources yet
+	// (because authenticated enrichment could not run without credentials)
+	// must be reported as SkipAuthRequiredNoCredential, NOT as
+	// SkipMultichannelNotSupported.
+	dev := discovery.DiscoveredDevice{
+		StableIdentity: "epr:uuid:3fa1fe68-b915-4053-a3e1-5ca6e67f02cd",
+		AuthRequired:   true,
+		VideoSources:   nil,
+	}
+
+	targets, skips := buildCameraTargets([]discovery.DiscoveredDevice{dev}, nil, "sub")
+	if len(targets) != 0 {
+		t.Fatalf("expected no targets, got %+v", targets)
+	}
+	if len(skips) != 1 {
+		t.Fatalf("expected 1 skip, got %d", len(skips))
+	}
+	if skips[0].Reason != SkipAuthRequiredNoCredential {
+		t.Fatalf("skip reason = %q, want %q", skips[0].Reason, SkipAuthRequiredNoCredential)
+	}
+}
+
 func TestBuildCameraTargets_NoAuthRequiredWorksWithoutCredential(t *testing.T) {
 	// A device that never required auth still gets a target even if no
 	// credential resolves for it — absence of a credential is not itself a
