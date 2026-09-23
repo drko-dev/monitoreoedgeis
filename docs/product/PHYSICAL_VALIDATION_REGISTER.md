@@ -6,8 +6,8 @@ development is never read as a physical gap.
 
 | | |
 | --- | --- |
-| **Register date** | 2026-09-20 (register content) / verified against `main` again for Hito 2A |
-| **`main`** | `6617322549e4d9ac815317a0724b92d3e4613045` |
+| **Register date** | 2026-09-22 (verified against `origin/main` for GEO CAM closeout) |
+| **`origin/main`** | `f4ab26185275a19b80b64aef03737cbc7d5c0bbf` |
 | **SOFTWARE 1.0** | **READY** — see `docs/product/RELEASE_1_0_READINESS.md` |
 | **FIELD / HARDWARE VALIDATION** | **PENDING** — every row below is `NOT_VALIDATED` |
 
@@ -175,6 +175,51 @@ Physical validation is **not** a software blocker, and its absence does not
 silently reopen a blocker that was implemented and tested locally. Conversely,
 "the software exists" never converts a `NOT_VALIDATED` physical row into a
 passing one.
+
+## 7. NEXT-05 — executable camera-to-audit run sheet
+
+This run sheet extends this canonical physical register; it is not a second
+validation record. Execute only against an explicitly approved test/staging
+tenant and test camera. Before each test, capture commit/image versions,
+device/camera identifiers (non-secret), topology, model/threshold settings and
+clock synchronization. Redact credentials, RTSP URLs, customer identifiers and
+raw personal evidence from attached logs. Each test row needs a separate
+evidence artifact and operator/date. All results below remain `NOT_RUN` until
+observed on physical hardware.
+
+| ID | PRECONDITION | ACTION | EXPECTED | METRICS | RESULT | EVIDENCE |
+|---|---|---|---|---|---|---|
+| E2E-01 | Approved test tenant, Edge identity active, operator and target camera identified | Verify device enrollment and Cloud identity read-only; confirm tenant/site/camera association | Edge reports the intended identity; Cloud derives the same owner without exposing credentials | enrollment status, device ID, organization/site association, credential version (never secret) | NOT_RUN | Redacted `/edge/me` response + operator checklist |
+| E2E-02 | Camera powered, network route available, credentials provisioned through the approved secret channel | Probe camera connectivity and authenticate with the configured camera credential | Reachable/authorized camera is distinguished from unreachable or unauthorized | probe latency, result class, camera model/firmware, reconnect counter | NOT_RUN | Redacted probe output and camera model/firmware |
+| E2E-03 | RTSP URL is available locally and excluded from report | Start the configured RTSP stream and observe the Edge pipeline | Stream reaches online state and decodes frames; no claim from metadata alone | input/decoded/output FPS, codec, resolution, read failures, reconnects, p50/p95 decode latency | NOT_RUN | Sanitized Edge logs/status snapshot |
+| E2E-04 | Controlled real scene with an authorized person present and configured person model | Observe the scene for the documented test window | Person event is generated only if the configured detector actually detects it | inference count/FPS, confidence, inference p50/p95, event latency | NOT_RUN | Event ID, timestamp, sanitized model/result evidence |
+| E2E-05 | Controlled real scene with an authorized vehicle present and configured vehicle model | Observe the scene for the documented test window | Vehicle event is generated only if the configured detector actually detects it | inference count/FPS, confidence, inference p50/p95, event latency | NOT_RUN | Event ID, timestamp, sanitized model/result evidence |
+| E2E-06 | E2E-04 or E2E-05 produced a real event | Confirm the event is present in the Cloud tenant through its authenticated API/UI | Event identity, camera and time match; no cross-tenant visibility | event creation timestamp, end-to-end event latency, worker persistence count | NOT_RUN | Redacted event view/API response + audit reference |
+| E2E-07 | Event has a real capture/clip attached | Open the evidence through authorized SaaS review | Evidence is retrievable, tenant-scoped and corresponds to the event | evidence availability latency, size, content type, checksum, read status | NOT_RUN | Redacted evidence metadata/checksum and review screenshot without unnecessary PII |
+| E2E-08 | Authorized reviewer account and test event | Review/acknowledge the event using the supported review flow | Review state persists and actor/action is auditable | review transition, actor role, audit event ID, response latency | NOT_RUN | Review state and matching audit record |
+| E2E-09 | Approved false-alarm test scene and documented expected classification | Submit the observed event to the configured false-alarm review process | False alarm is recorded as a review outcome, not silently deleted or relabeled | review outcome, actor, event ID, audit trail | NOT_RUN | Redacted review/audit record |
+| E2E-10 | Edge and SaaS available; test telemetry enabled | Observe multiple heartbeat intervals and compare Edge values with Cloud read model | Cloud marks liveness by server arrival time and stores only values the Edge measured | heartbeat age, CPU/RAM/disk/temp, per-camera FPS, packets/bytes, reconnect count | NOT_RUN | Redacted heartbeat and Cloud status snapshots |
+| E2E-11 | Test tenant/camera; operator can safely interrupt only the test WAN path | Disconnect WAN/SaaS reachability while leaving camera/Edge LAN connected | Edge processing continues; durable outbox accumulates eligible events without loss or false acknowledgement | outage start/end, outbox pending/in-flight/retry/blocked counts, local event count | NOT_RUN | Edge status and redacted local backlog metrics |
+| E2E-12 | E2E-11 outage state recorded | Restore WAN and observe reconnect/flush | Edge reconnects with backoff and flushes buffered events once; Cloud idempotency avoids duplicates | reconnect count, flush duration/FPS, queued/acked/blocked, duplicate conflicts | NOT_RUN | Before/after outbox snapshot, Cloud event IDs and logs |
+| E2E-13 | Test Edge appliance and approved maintenance window | Restart only the test Edge service/device using its documented non-destructive procedure | Device returns to ready state; identity, encrypted credentials and durable backlog remain valid | restart duration, readiness/heartbeat time, recovered queue size, errors | NOT_RUN | Service journal excerpt and before/after status |
+| E2E-14 | Test Cloud worker replica/process and approved staging access | Restart only the test worker using the staging operator procedure | Worker returns ready; queued/latest-frame processing resumes according to documented semantics | restart duration, readiness, queue depth/drops, inference/event/evidence latency | NOT_RUN | Worker logs and status snapshots |
+| E2E-15 | Test tenant and test SaaS endpoint; no customer traffic | Make SaaS unavailable without affecting production | Edge remains operational locally, reports transport failure honestly, and buffers eligible records | outage duration, retry/backoff sequence, outbox growth, resource use | NOT_RUN | Sanitized client logs and backlog snapshot |
+| E2E-16 | Test camera can be safely powered off or isolated | Interrupt camera connectivity, then restore it | Camera state becomes offline/degraded, reconnects when restored, and no fabricated frames/events appear | offline detection delay, reconnect count, read failures, recovery time | NOT_RUN | Sanitized camera/Edge status and timestamps |
+| E2E-17 | Test-only camera credential can be safely revoked/replaced | Use an intentionally invalid test credential, then restore the correct one | Authentication failure is distinct from network failure; no credential is logged; recovery succeeds after correction | auth-failure state, retry behavior, reconnect count, recovery time | NOT_RUN | Redacted error category and corrected recovery state |
+| E2E-18 | Supported remote-config version and harmless test setting chosen | Apply one approved, reversible test setting and observe acknowledgement | Edge applies or safely rejects the version; Cloud reports the exact terminal status | desired/applied version, apply latency, status/error code, rollback state | NOT_RUN | Redacted config version and ACK/audit record |
+| E2E-19 | Supported non-destructive command (e.g. request status/rediscovery) queued for test device | Poll, execute and report the command | Command is claimed once and reaches a terminal result; unsupported commands fail safely | poll/execute/report latency, command state, retries, audit event | NOT_RUN | Command ID and sanitized report/audit entry |
+| E2E-20 | Signed, approved test release; rollback plan and isolated test Edge; explicit operator authorization | Exercise OTA only if the exact artifact/signature/rollback path is safe for the test unit | Signature/checksum/compatibility checks pass, update is observable, and rollback is available | version before/after, verification result, update duration, restart/readiness, rollback result | NOT_RUN | Release digest/signature verification (no secret), version/status logs |
+
+### End-to-end chain and exit rule
+
+```text
+CAMERA → RTSP → EDGE / CLOUD WORKER → YOLO → EVENT → EVIDENCE → SAAS → REVIEW → AUDIT
+```
+
+Report each ID independently. `PASS` requires the expected state plus the
+listed measured metrics and attached evidence. `NOT_RUN` is not failure and is
+not pass. Do not run destructive purge/offboarding, change production Legal
+Hold, or use OTA on a production unit as part of this physical test sheet.
 
 ## Software blockers found while normalizing this register
 
