@@ -161,6 +161,13 @@ func (s *Store) Apply(incoming []Credential) (ApplyStats, error) {
 			stats.Updated++
 			continue
 		}
+		if c.Revision == existing.Revision {
+			if !candidateKeysEqual(c.CandidateKeys, existing.CandidateKeys) || c.Scope != existing.Scope {
+				next[c.ID] = c
+				stats.Updated++
+				continue
+			}
+		}
 		// Same or stale revision: keep what's already cached.
 		next[c.ID] = existing
 	}
@@ -211,4 +218,26 @@ func (s *Store) persistLocked() error {
 		return fmt.Errorf("cameracreds: encode camera credentials: %w", err)
 	}
 	return writeFileAtomic(s.dataDir, fileName, data)
+}
+
+func candidateKeysEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	count := make(map[string]int, len(a))
+	for _, x := range a {
+		count[x]++
+	}
+	for _, y := range b {
+		count[y]--
+		if count[y] < 0 {
+			return false
+		}
+	}
+	for _, v := range count {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
 }

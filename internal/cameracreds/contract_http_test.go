@@ -274,3 +274,94 @@ func TestContract_NoSecretInSyncLogs(t *testing.T) {
 		}
 	}
 }
+
+// TestContract_PhysicalPilotTapoTC70_WirePayloadResolution proves that the
+// wire payload from GET /api/v1/gateway/camera-credentials (which now projects
+// candidate_keys to Edge StableIdentity "epr:uuid:...") resolves exactly the
+// physical camera discovered on LAN, while rejecting resolution against the
+// SaaS internal SHA-256 hash.
+func TestContract_PhysicalPilotTapoTC70_WirePayloadResolution(t *testing.T) {
+	dir := t.TempDir()
+	key := testKey(t)
+	store, err := OpenStore(dir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const physicalPilotWireJSON = `{
+  "credentials": [
+    {
+      "id": 101,
+      "name": "Tapo TC70 Pilot",
+      "scope": "device",
+      "candidate_keys": ["epr:uuid:3fa1fe68-b915-4053-a3e1-5ca6e67f02cd"],
+      "username": "tapo_pilot_user",
+      "password": "tapo_pilot_password",
+      "revision": 1
+    },
+    {
+      "id": 102,
+      "name": "Fallback Group",
+      "scope": "group",
+      "candidate_keys": ["endpoint:192.168.0.6:2020/onvif/device_service"],
+      "username": "fallback_user",
+      "password": "fallback_password",
+      "revision": 1
+    }
+  ]
+}`
+
+	client := newTransportAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(physicalPilotWireJSON))
+	})
+
+	syncer, err := NewSyncer(SyncOptions{
+		Client:     client,
+		Store:      store,
+		DeviceID:   "edg_5ac7ccb708bc",
+		Credential: "pilot-gateway-token",
+		Log:        slog.Default(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatalf("syncer.Sync: %v", err)
+	}
+
+	provider := NewProvider(store)
+
+	// 1. Physical pilot camera with StableIdentity
+	tapoIdentity := "epr:uuid:3fa1fe68-b915-4053-a3e1-5ca6e67f02cd"
+	cred, ok := provider.Resolve(tapoIdentity)
+	if !ok {
+		t.Fatalf("expected provider.Resolve(%q) to succeed", tapoIdentity)
+	}
+	if cred.Username != "tapo_pilot_user" || cred.Password != "tapo_pilot_password" {
+		t.Errorf("unexpected cred: got %s / %s", cred.Username, cred.Password)
+	}
+	if cred.Scope != ScopeDevice {
+		t.Errorf("scope = %v, want ScopeDevice", cred.Scope)
+	}
+
+	// 2. SaaS internal candidate key MUST NOT resolve
+	saasInternalHash := "11e9edbf00a0291a250e1fa707a4a8fc4ede60d8cdf024719d41ba34109dbe30"
+	if _, ok := provider.Resolve(saasInternalHash); ok {
+		t.Fatalf("provider.Resolve(%q) unexpectedly succeeded: wire payload should not resolve internal hash", saasInternalHash)
+	}
+
+	// 3. Fallback endpoint StableIdentity resolves
+	endpointIdentity := "endpoint:192.168.0.6:2020/onvif/device_service"
+	credFallback, ok := provider.Resolve(endpointIdentity)
+	if !ok {
+		t.Fatalf("expected provider.Resolve(%q) to succeed", endpointIdentity)
+	}
+	if credFallback.Username != "fallback_user" || credFallback.Password != "fallback_password" {
+		t.Errorf("unexpected fallback cred: got %s / %s", credFallback.Username, credFallback.Password)
+	}
+	if credFallback.Scope != ScopeGroup {
+		t.Errorf("scope = %v, want ScopeGroup", credFallback.Scope)
+	}
+}
