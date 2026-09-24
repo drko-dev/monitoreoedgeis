@@ -9,6 +9,7 @@ import (
 
 	"github.com/drko-dev/monitoreoedgeis/internal/cameracreds"
 	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
+	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/rtsp"
 )
 
@@ -33,6 +34,7 @@ type cameraTargetReconciler struct {
 	rtspMgr     *rtsp.Manager
 	desiredRole string
 	log         *slog.Logger
+	onStatus    func(health.CameraTargetsStatus)
 
 	// rediscovering guards against stacking background rediscoveries (see
 	// maybeTriggerRediscovery) if several sync successes land in quick
@@ -95,8 +97,10 @@ func (r *cameraTargetReconciler) reconcile() {
 	}
 	devices := r.disc.Engine().Inventory().List()
 	targets, skips := buildCameraTargets(devices, r.resolve, r.desiredRole)
+	skipCounts := make(map[string]int)
 
 	for _, s := range skips {
+		skipCounts[string(s.Reason)]++
 		r.log.Debug("camera target reconciler: device skipped",
 			slog.String("candidate_key", s.CandidateKey),
 			slog.String("reason", string(s.Reason)),
@@ -109,6 +113,15 @@ func (r *cameraTargetReconciler) reconcile() {
 	)
 
 	r.rtspMgr.SetTargets(targets)
+	if r.onStatus != nil {
+		r.onStatus(health.CameraTargetsStatus{
+			State:                 "reconciled",
+			DiscoveredDeviceCount: len(devices),
+			ExpectedCameraCount:   len(targets),
+			SkippedByReason:       skipCounts,
+			LastReconciledAt:      time.Now().UTC(),
+		})
+	}
 }
 
 // onDiscoverySuccess is discovery.ModuleOptions.OnScanSuccess.

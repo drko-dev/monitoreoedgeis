@@ -203,12 +203,24 @@ eviction, refcount-aware, pending-aware. Operational reference:
 
 ## 21. Health / status
 
-`GET /healthz`, `/readyz`, `/status` on `127.0.0.1:8091` by default
+`GET /healthz`, `/readyz`, `/operationalz`, `/status` on `127.0.0.1:8091` by default
 (`GEOCAM_HEALTH_ADDR`, `internal/agent/health_module.go`) — loopback-only,
 deliberately. `geocam-edge check` wraps `/status` into a human-readable
-summary (`cmd/geocam-edge/main.go`). Under systemd, `Type=notify` +
-`WatchdogSec=60` tie the same health surface into process supervision
-(`deploy/appliance/systemd/geocam-edge.service.in`).
+summary (`cmd/geocam-edge/main.go`). Process readiness and camera/video
+operational readiness are distinct: an offline camera does not make the agent
+process unhealthy, while the separate operational endpoint and CLI report
+unavailable configured targets.
+
+The standalone lifecycle command (`geocam-edge service`) uses the native
+service manager: the existing systemd appliance unit on Linux, a per-user
+LaunchAgent on macOS, and SCM on Windows. macOS/Windows instances also use an
+OS-owned exclusive lock per canonical data directory and a bounded in-process
+retry supervisor. Linux retains the package-owned unit and its existing
+`Type=notify`, `WatchdogSec=60`, and start-rate limits
+(`deploy/appliance/systemd/geocam-edge.service.in`). Camera, RTSP and SaaS
+retries remain inside their respective modules; they do not trigger whole-agent
+restarts. Operational setup and recovery: `docs/operations/EDGE_SERVICE_LIFECYCLE.md`
+and `docs/operations/EDGE_RECOVERY_RUNBOOK.md`.
 
 ---
 

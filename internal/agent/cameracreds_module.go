@@ -7,6 +7,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/cameracreds"
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
+	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
 
@@ -38,9 +39,13 @@ func newCameraCredsModule(
 	creds credentials.Credentials,
 	log *slog.Logger,
 	onSuccess func(),
+	onStatus func(health.CameraCredentialsStatus),
 ) (*cameracreds.Module, *cameracreds.Provider, error) {
 	if cfg.SaaSURL == "" || !creds.IsEnrolled() || creds.Credential == "" || creds.DeviceID == "" {
 		log.Info("camera credentials disabled: Edge is unenrolled or SaaS URL is not configured")
+		if onStatus != nil {
+			onStatus(health.CameraCredentialsStatus{State: "disabled_unenrolled"})
+		}
 		return nil, nil, nil
 	}
 
@@ -66,9 +71,23 @@ func newCameraCredsModule(
 		Credential: creds.Credential,
 		Log:        log,
 		OnSuccess:  onSuccess,
+		OnStatus: func(status cameracreds.SyncStatus) {
+			if onStatus == nil {
+				return
+			}
+			onStatus(health.CameraCredentialsStatus{
+				State:                 status.State,
+				CachedCredentialCount: status.CachedCredentialCount,
+				LastSuccessAt:         status.LastSuccessAt,
+				LastErrorClass:        status.LastErrorClass,
+			})
+		},
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("camera credentials: syncer: %w", err)
+	}
+	if onStatus != nil {
+		onStatus(health.CameraCredentialsStatus{State: "starting", CachedCredentialCount: len(store.Snapshot())})
 	}
 
 	// interval <= 0 selects cameracreds.DefaultSyncInterval (5 minutes).

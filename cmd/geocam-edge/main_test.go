@@ -37,7 +37,14 @@ func TestIdentityReportNoSecrets(t *testing.T) {
 }
 
 func TestCheckReportReady(t *testing.T) {
-	snap := health.Snapshot{Status: health.StateReady, EdgeID: "edge-1", Version: "0.1.0"}
+	snap := health.Snapshot{
+		Status:  health.StateReady,
+		EdgeID:  "edge-1",
+		Version: "0.1.0",
+		Operational: health.OperationalReadiness{
+			State: "READY", ExpectedCameraCount: 1, PipelineCameraCount: 1, ActivePipelineCameraCount: 1,
+		},
+	}
 
 	report, ready := checkReport(snap)
 
@@ -46,6 +53,28 @@ func TestCheckReportReady(t *testing.T) {
 	}
 	if !strings.Contains(report, "READY") {
 		t.Errorf("report missing status:\n%s", report)
+	}
+}
+
+func TestCheckReportRejectsFalseProcessReadyWhenCameraPipelineMissing(t *testing.T) {
+	snap := health.Snapshot{
+		Status:  health.StateReady,
+		EdgeID:  "edge-1",
+		Version: "0.1.0",
+		Operational: health.OperationalReadiness{
+			State: "DEGRADED", ExpectedCameraCount: 1, PipelineCameraCount: 0,
+			Reasons: []string{"expected_camera_pipeline_missing"},
+		},
+	}
+
+	report, ready := checkReport(snap)
+	if ready {
+		t.Fatal("checkReport ready=true while an expected camera has no pipeline")
+	}
+	for _, want := range []string{"operational:      DEGRADED", "expected_cameras: 1", "pipeline_cameras: 0", "expected_camera_pipeline_missing"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("report missing %q:\n%s", want, report)
+		}
 	}
 }
 

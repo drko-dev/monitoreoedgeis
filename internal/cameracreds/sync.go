@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
@@ -32,13 +34,26 @@ type SyncOptions struct {
 	// unauthorized response, malformed payload, or persist failure — those
 	// paths return early and keep the last-good cache untouched.
 	OnSuccess func()
+	// OnStatus receives a sanitized cache-sync summary; it never carries
+	// candidate keys, credential IDs, usernames or secrets.
+	OnStatus func(SyncStatus)
+}
+
+// SyncStatus is safe for local /status and service-manager diagnostics.
+type SyncStatus struct {
+	State                 string
+	CachedCredentialCount int
+	LastSuccessAt         time.Time
+	LastErrorClass        string
 }
 
 // Syncer performs one fetch-decode-validate-apply cycle against the SaaS.
 // It never mutates Store on a failed fetch or an invalid payload: the last
 // good cache is always left exactly as it was.
 type Syncer struct {
-	opts SyncOptions
+	opts   SyncOptions
+	mu     sync.RWMutex
+	status SyncStatus
 }
 
 // NewSyncer builds a Syncer.
@@ -55,7 +70,7 @@ func NewSyncer(opts SyncOptions) (*Syncer, error) {
 	if opts.Log == nil {
 		opts.Log = slog.Default()
 	}
-	return &Syncer{opts: opts}, nil
+	return &Syncer{opts: opts, status: SyncStatus{State: "not_started"}}, nil
 }
 
 // Sync fetches the current camera-credentials snapshot, validates it, and
@@ -69,15 +84,25 @@ func NewSyncer(opts SyncOptions) (*Syncer, error) {
 //   - A well-formed payload is merged via Store.Apply (revision/idempotency
 //     and revoke semantics live there).
 func (s *Syncer) Sync(ctx context.Context) error {
+	s.setStatus(func(status *SyncStatus) { status.State = "syncing" })
 	resp, err := s.opts.Client.FetchCameraCredentials(ctx, s.opts.DeviceID, s.opts.Credential)
 	if err != nil {
+		errorClass := classifyFetchError(err)
+		s.setStatus(func(status *SyncStatus) {
+			status.State = "degraded"
+			status.LastErrorClass = errorClass
+		})
 		s.opts.Log.Warn("cameracreds: sync fetch failed, keeping cached credentials",
-			slog.String("error_class", classifyFetchError(err)))
+			slog.String("error_class", errorClass))
 		return err
 	}
 
 	creds, err := decodePayload(resp)
 	if err != nil {
+		s.setStatus(func(status *SyncStatus) {
+			status.State = "degraded"
+			status.LastErrorClass = "malformed_payload"
+		})
 		s.opts.Log.Error("cameracreds: sync payload invalid, keeping cached credentials",
 			slog.String("reason", "malformed_payload"))
 		return err
@@ -85,6 +110,10 @@ func (s *Syncer) Sync(ctx context.Context) error {
 
 	stats, err := s.opts.Store.Apply(creds)
 	if err != nil {
+		s.setStatus(func(status *SyncStatus) {
+			status.State = "degraded"
+			status.LastErrorClass = "persist_failed"
+		})
 		s.opts.Log.Error("cameracreds: failed to persist synced credentials",
 			slog.String("reason", "persist_failed"))
 		return err
@@ -97,10 +126,32 @@ func (s *Syncer) Sync(ctx context.Context) error {
 			slog.Int("removed", stats.Removed),
 			slog.Int("active", len(creds)))
 	}
+	s.setStatus(func(status *SyncStatus) {
+		status.State = "synced"
+		status.CachedCredentialCount = len(s.opts.Store.Snapshot())
+		status.LastSuccessAt = time.Now().UTC()
+		status.LastErrorClass = ""
+	})
 	if s.opts.OnSuccess != nil {
 		s.opts.OnSuccess()
 	}
 	return nil
+}
+
+func (s *Syncer) Status() SyncStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.status
+}
+
+func (s *Syncer) setStatus(update func(*SyncStatus)) {
+	s.mu.Lock()
+	update(&s.status)
+	status := s.status
+	s.mu.Unlock()
+	if s.opts.OnStatus != nil {
+		s.opts.OnStatus(status)
+	}
 }
 
 // decodePayload validates every entry in resp and converts it from the SaaS

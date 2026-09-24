@@ -83,6 +83,11 @@ func New(cfg *config.Config) *Agent {
 	componentLog := logging.Component(log, "agent")
 	reporter := health.New(Version, cfg, ident, host)
 	reporter.SetCredentialStatus(creds.Status.String())
+	if creds.IsEnrolled() {
+		reporter.SetCameraCredentials(health.CameraCredentialsStatus{State: "starting"})
+	} else {
+		reporter.SetCameraCredentials(health.CameraCredentialsStatus{State: "disabled_unenrolled"})
+	}
 
 	a := &Agent{
 		cfg:            cfg,
@@ -333,13 +338,23 @@ func New(cfg *config.Config) *Agent {
 		}
 	}
 
-	camCredsMod, camCredsProvider, camCredsErr := newCameraCredsModule(cfg, creds, logging.Component(log, "cameracreds"), onCredentialsSynced)
+	camCredsMod, camCredsProvider, camCredsErr := newCameraCredsModule(
+		cfg,
+		creds,
+		logging.Component(log, "cameracreds"),
+		onCredentialsSynced,
+		reporter.SetCameraCredentials,
+	)
+	if camCredsErr != nil {
+		reporter.SetCameraCredentials(health.CameraCredentialsStatus{State: "configuration_error"})
+	}
 	a.cameraCredsProvider = camCredsProvider
 
 	disc, discErr := newDiscoveryModule(cfg, creds, reporter, logging.Component(log, "discovery"), resolveCameraCredential, onDiscoverySuccess)
 	a.discovery = disc
 
 	reconciler = newCameraTargetReconciler(disc, camCredsProvider, a.rtspManager, cfg.StreamRole, logging.Component(log, "camera-target-reconciler"))
+	reconciler.onStatus = reporter.SetCameraTargets
 
 	// Camera credentials must start after RTSP/video (see above) and, among
 	// themselves, before discovery: a late-arriving credential's own
@@ -518,6 +533,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	// sent when the health surface came up (see onModuleState); both are no-ops
 	// outside a unit that sets NOTIFY_SOCKET / WATCHDOG_USEC.
 	a.startWatchdog(ctx, a.livenessProbe)
+	serviceWatchdogFailure := a.startServiceProcessWatchdog(ctx, a.livenessProbe)
 	if initial == health.StateReady {
 		a.log.Info("agent ready", slog.String("status", initial.String()))
 	} else {
@@ -526,9 +542,14 @@ func (a *Agent) Run(ctx context.Context) error {
 			slog.String("reason", "startup fault; a restart is required to clear it"))
 	}
 
-	<-ctx.Done()
-
-	return a.shutdown()
+	select {
+	case <-ctx.Done():
+		return a.shutdown()
+	case err := <-serviceWatchdogFailure:
+		a.log.Error("service supervisor detected a hung Edge process", slog.Any("error", err))
+		_ = a.shutdown()
+		return err
+	}
 }
 
 func (a *Agent) logStartup() {
