@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -373,5 +374,32 @@ func TestAgentDegradedStillNotifiesReady(t *testing.T) {
 	})
 	if got := l.recv(t, 10*time.Second); got != "READY=1" {
 		t.Fatalf("a DEGRADED agent sent %q as its first notification, want READY=1 so systemd does not restart-loop it", got)
+	}
+}
+
+func TestServiceProcessWatchdogReturnsFailureAfterConsecutiveHealthProbeMisses(t *testing.T) {
+	probe := &scriptedProbe{}
+	probe.failing.Store(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fatal := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		runServiceProcessWatchdog(ctx, time.Millisecond, time.Millisecond, 3, probe, fatal, testLogger())
+		close(done)
+	}()
+
+	select {
+	case err := <-fatal:
+		if err == nil || !strings.Contains(err.Error(), "3 consecutive times") {
+			t.Fatalf("fatal error=%v, want three consecutive probe failures", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("service watchdog did not report a persistently hung health endpoint")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("service watchdog did not exit after reporting its failure")
 	}
 }

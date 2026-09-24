@@ -37,6 +37,53 @@ physical row there is `NOT_VALIDATED`: none of them is a software blocker, none
 may be recorded as `FAILED`, and "the software exists" never converts a physical
 row into a passing one.
 
+## Active local branch — Edge runtime resilience (UNMERGED)
+
+| Field | Value |
+| --- | --- |
+| **Branch** | `feature/edge-runtime-resilience` |
+| **Base** | `origin/main` at `a72bdfac49c733ecb07f9f23d75ba06ea95d20f8` |
+| **State** | Local implementation and tests in progress; not committed, pushed, reviewed, or merged |
+| **Production** | Not touched |
+
+Candidate implementation adds non-secret persistent operator config, an OS
+exclusive lock per canonical data directory, process-vs-operational readiness,
+camera-target/camera-credential health details, a process liveness watchdog,
+bounded managed-process retries, and native macOS LaunchAgent / Windows SCM
+lifecycle commands. Linux remains integrated with the existing package-owned
+systemd unit. See `docs/operations/EDGE_SERVICE_LIFECYCLE.md` and
+`docs/operations/EDGE_RECOVERY_RUNBOOK.md`.
+
+**TESTED locally:** `go test ./...`, `go vet ./...`, race tests for config,
+instance, health, service and CLI, plus macOS/Windows test-binary
+cross-compilation all pass on the development host. These checks do not validate
+service-manager behavior on Windows or Linux PID 1, nor do they validate a
+physical camera stream. The branch is still unmerged and requires review before
+it can be considered implementation-complete.
+
+### Current physical gateway diagnosis
+
+- The existing gateway process remained alive and its loopback health endpoint
+  answered, but camera discovery found no usable pipeline target; process READY
+  was not evidence of an operational camera.
+- The current listener's existing Edge identity is not SaaS-enrolled and has no
+  local credential file. A different locally stored credential is rejected by
+  the SaaS. The **canonical SaaS identity is NOT CONFIRMED**: no token or
+  authenticated read-only access was available to verify it.
+- The camera requires authentication. Therefore camera recovery is **BLOCKED**
+  on authorized recovery for the existing Edge identity; no re-enrollment,
+  credential rotation, identity replacement, data deletion, or SaaS mutation was
+  performed. The physical camera is **NOT RECOVERED**.
+- The cause of the earlier process termination was not established from local
+  logs or host evidence; do not describe it as a confirmed crash, sleep, or
+  reboot.
+- The candidate service lifecycle has **NOT been physically installed or tested**
+  under LaunchAgent, Windows SCM, or a Linux systemd host. Automated tests and
+  cross-compilation are software checks only.
+
+The previous Hito Z `main` snapshot below remains historical truth for `main`;
+the unmerged branch state above must not be represented as a merged release.
+
 ## Hito A — what was implemented (MERGED)
 
 - `cmd/geocam-edge` — thin entrypoint

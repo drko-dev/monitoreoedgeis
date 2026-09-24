@@ -2,10 +2,17 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/systemd"
+)
+
+const (
+	processWatchdogPeriod       = 10 * time.Second
+	processWatchdogProbeTimeout = 3 * time.Second
+	processWatchdogMissLimit    = 3
 )
 
 // livenessProbe reports whether the process can still do the one thing that
@@ -39,6 +46,58 @@ func (a *Agent) startWatchdog(ctx context.Context, probe livenessProbe) {
 		slog.Duration("watchdog_interval", interval),
 		slog.Duration("ping_period", watchdogPeriod(interval)))
 	go runWatchdogLoop(ctx, interval, probe, a.log)
+}
+
+// startServiceProcessWatchdog is the fallback for launchd/Windows SCM, which
+// restart a process after exit but cannot probe a Go process that is still
+// alive and hung. A missed local /healthz probe makes Agent.Run return a
+// failure; the native manager then applies its bounded restart policy. Camera,
+// RTSP and SaaS health are deliberately not part of this probe.
+func (a *Agent) startServiceProcessWatchdog(ctx context.Context, probe livenessProbe) <-chan error {
+	if a.cfg == nil || !a.cfg.ServiceManaged || systemd.Enabled() || probe == nil {
+		return nil
+	}
+	fatal := make(chan error, 1)
+	go runServiceProcessWatchdog(ctx, processWatchdogPeriod, processWatchdogProbeTimeout, processWatchdogMissLimit, probe, fatal, a.log)
+	return fatal
+}
+
+func runServiceProcessWatchdog(
+	ctx context.Context,
+	period, probeTimeout time.Duration,
+	missLimit int,
+	probe livenessProbe,
+	fatal chan<- error,
+	log *slog.Logger,
+) {
+	ticker := time.NewTicker(period)
+	defer ticker.Stop()
+	missed := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+		err := probe.Probe(probeCtx)
+		cancel()
+		if err == nil {
+			missed = 0
+			continue
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		missed++
+		if log != nil {
+			log.Warn("service liveness probe failed", slog.Int("consecutive_failures", missed), slog.String("error_type", fmt.Sprintf("%T", err)))
+		}
+		if missed >= missLimit {
+			fatal <- fmt.Errorf("service liveness probe failed %d consecutive times", missed)
+			return
+		}
+	}
 }
 
 // watchdogPeriod is how often the loop re-checks liveness and pings. systemd's
