@@ -37,29 +37,34 @@ physical row there is `NOT_VALIDATED`: none of them is a software blocker, none
 may be recorded as `FAILED`, and "the software exists" never converts a physical
 row into a passing one.
 
-## Active local branch — Edge runtime resilience (UNMERGED)
+## Feature branch candidate — Edge runtime resilience (UNMERGED)
 
 | Field | Value |
 | --- | --- |
 | **Branch** | `feature/edge-runtime-resilience` |
 | **Base** | `origin/main` at `a72bdfac49c733ecb07f9f23d75ba06ea95d20f8` |
-| **State** | Local implementation and tests in progress; not committed, pushed, reviewed, or merged |
+| **State** | Feature-branch candidate for final adversarial review; no PR, merge, or deployment |
 | **Production** | Not touched |
 
 Candidate implementation adds non-secret persistent operator config, an OS
 exclusive lock per canonical data directory, process-vs-operational readiness,
 camera-target/camera-credential health details, a process liveness watchdog,
-bounded managed-process retries, and native macOS LaunchAgent / Windows SCM
-lifecycle commands. Linux remains integrated with the existing package-owned
-systemd unit. See `docs/operations/EDGE_SERVICE_LIFECYCLE.md` and
+bounded managed-process retries, macOS LaunchAgent support for development and
+validation, managed identity/credential fail-closed startup, SaaS URL secret
+rejection/redaction, and disabled Windows SCM installation. Linux amd64/arm64
+remains integrated with the existing package-owned systemd unit and is the
+supported product target. See `docs/operations/EDGE_SERVICE_LIFECYCLE.md` and
 `docs/operations/EDGE_RECOVERY_RUNBOOK.md`.
 
-**TESTED locally:** `go test ./...`, `go vet ./...`, race tests for config,
-instance, health, service and CLI, plus macOS/Windows test-binary
-cross-compilation all pass on the development host. These checks do not validate
-service-manager behavior on Windows or Linux PID 1, nor do they validate a
-physical camera stream. The branch is still unmerged and requires review before
-it can be considered implementation-complete.
+**TESTED locally:** `go test ./...`, `go vet ./...`, and all requested race
+tests pass. Full-repository builds pass for Linux amd64, Linux arm64, and Darwin
+arm64. Windows command/service packages cross-compile, but the full
+`GOOS=windows GOARCH=amd64 go build ./...` fails in the unchanged
+`internal/perf/scale.go` because its `syscall.Getrusage` symbols are unavailable
+on Windows (Go 1.27.1). Windows SCM
+installation is disabled and Windows is not a product target. These checks do
+not validate a physical camera stream or systemd PID 1 behavior. The branch is
+still unmerged and requires final adversarial review.
 
 ### Current physical gateway diagnosis
 

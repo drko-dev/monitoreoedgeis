@@ -56,6 +56,72 @@ func TestCheckReportReady(t *testing.T) {
 	}
 }
 
+func TestCheckReportRequiresKnownOperationalState(t *testing.T) {
+	for _, state := range []string{"", "FUTURE_STATE", "DEGRADED", "WAITING", "NOT_CONFIGURED"} {
+		t.Run(state, func(t *testing.T) {
+			snap := health.Snapshot{
+				Status:      health.StateReady,
+				Operational: health.OperationalReadiness{State: state},
+			}
+			if _, ready := checkReport(snap); ready {
+				t.Fatalf("checkReport accepted operational state %q", state)
+			}
+		})
+	}
+}
+
+func TestCheckReportAcceptsOnlyReadyOrIntentionalNoMedia(t *testing.T) {
+	tests := []struct {
+		name      string
+		state     string
+		profile   config.Profile
+		wantReady bool
+	}{
+		{name: "ready workload", state: "READY", profile: config.ProfileGateway, wantReady: true},
+		{name: "deliberate no-media profile", state: "NOT_CONFIGURED", profile: config.ProfileGatewayNoMedia, wantReady: true},
+		{name: "not configured with media profile", state: "NOT_CONFIGURED", profile: config.ProfileGateway},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snap := health.Snapshot{
+				Status:      health.StateReady,
+				Profile:     tt.profile,
+				Operational: health.OperationalReadiness{State: tt.state},
+			}
+			if _, ready := checkReport(snap); ready != tt.wantReady {
+				t.Fatalf("checkReport ready=%v, want %v", ready, tt.wantReady)
+			}
+		})
+	}
+}
+
+func TestConfigReportRedactsUnsafeSaaSURL(t *testing.T) {
+	cfg := &config.Config{
+		SaaSURL:        "https://dummy-user:dummy-pass@example.test/?token=dummy-token",
+		ProcessingMode: config.ModeCloud,
+	}
+	report := configReport(cfg, platform.Info{}, credentials.Credentials{}, false)
+	for _, secret := range []string{"dummy-user", "dummy-pass", "dummy-token"} {
+		if strings.Contains(report, secret) {
+			t.Fatalf("config report leaked %q:\n%s", secret, report)
+		}
+	}
+	if !strings.Contains(report, "example.test") || !strings.Contains(report, "%5Bredacted%5D") {
+		t.Fatalf("config report lost safe URL or redaction:\n%s", report)
+	}
+}
+
+func TestWindowsManagedServiceInstallIsDisabled(t *testing.T) {
+	if serviceInstallSupported("windows") {
+		t.Fatal("native Windows service installation must remain disabled")
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		if !serviceInstallSupported(goos) {
+			t.Errorf("service installation unexpectedly disabled for declared platform %q", goos)
+		}
+	}
+}
+
 func TestCheckReportRejectsFalseProcessReadyWhenCameraPipelineMissing(t *testing.T) {
 	snap := health.Snapshot{
 		Status:  health.StateReady,

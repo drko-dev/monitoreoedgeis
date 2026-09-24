@@ -9,7 +9,14 @@
 // association) is a later milestone (Hito C) and is not modeled here.
 package identity
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrManagedEdgeIDOverride indicates that a managed agent attempted to select
+// its identity from GEOCAM_EDGE_ID instead of the persisted identity file.
+var ErrManagedEdgeIDOverride = errors.New("identity: GEOCAM_EDGE_ID override is forbidden in managed mode")
 
 // EnrollmentStatus reflects whether this agent has a resolved edge_id, not
 // whether it is registered with the SaaS (that is Hito C's concern).
@@ -63,4 +70,10 @@ func Load(dataDir, envEdgeID string) (Identity, error) {
 		return Identity{EdgeID: envEdgeID, Status: StatusEnrolled, Source: SourceEnvOverride}, nil
 	}
 	return loadOrCreate(dataDir)
+}
+
+// LoadExisting returns the persisted identity only. It never honors an
+// environment override and never creates or repairs identity.json.
+func LoadExisting(dataDir string) (Identity, error) {
+	return loadExisting(dataDir)
 }

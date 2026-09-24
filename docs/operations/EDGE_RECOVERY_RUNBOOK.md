@@ -3,6 +3,10 @@
 Use this sequence when the Edge service is stopped, repeatedly restarting, or
 ready as a process but not operational for its cameras.
 
+Linux amd64/arm64 is the supported product target. macOS LaunchAgent recovery is
+for development/validation only. Native Windows service installation is
+disabled; use the foreground `geocam-edge run` command there.
+
 ## 1. Capture state without changing it
 
 ```text

@@ -24,6 +24,9 @@ ExecStart=@GEOCAM_EXEC_PATH@ run
 # below still wins (later systemd definitions override earlier ones).
 @GEOCAM_VISION_ENV_LINE@
 EnvironmentFile=@GEOCAM_ENV_FILE@
+# Managed mode requires pre-existing identity and matching enrolled credentials;
+# unlike first-run CLI bootstrap, the daemon must never create a replacement ID.
+Environment=GEOCAM_SERVICE_MODE=true
 User=@GEOCAM_SERVICE_USER@
 Group=@GEOCAM_SERVICE_GROUP@
 

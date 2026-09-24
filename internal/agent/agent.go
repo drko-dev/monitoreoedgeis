@@ -7,6 +7,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
 	"github.com/drko-dev/monitoreoedgeis/internal/remoteconfig"
 	"github.com/drko-dev/monitoreoedgeis/internal/rtsp"
+	"github.com/drko-dev/monitoreoedgeis/internal/systemd"
 	"github.com/drko-dev/monitoreoedgeis/internal/vision"
 )
 
@@ -71,12 +73,31 @@ type Agent struct {
 // New wires the agent from configuration. It performs no network I/O beyond
 // resolving/persisting the local identity file.
 //
-// A failed identity resolution (see internal/identity) is not fatal here:
-// the agent still starts so its health surface stays reachable for
-// diagnosis, but Run never reaches READY — see logStartup/Run.
+// In foreground/bootstrap mode, failed identity resolution is recorded so the
+// local health surface can stay available for diagnosis. Managed mode uses
+// LoadExisting and rejects invalid identity/credential state before building
+// runtime modules; Run returns that error to its service manager.
 func New(cfg *config.Config) *Agent {
-	ident, identErr := identity.Load(cfg.DataDir, cfg.EdgeID)
+	managed := managedRuntime(cfg)
+	var ident identity.Identity
+	var identErr error
+	if managed {
+		ident, identErr = identity.LoadExisting(cfg.DataDir)
+		if cfg.EdgeID != "" {
+			identErr = errors.Join(identity.ErrManagedEdgeIDOverride, identErr)
+		}
+	} else {
+		ident, identErr = identity.Load(cfg.DataDir, cfg.EdgeID)
+	}
 	creds, credErr := credentials.Load(cfg.DataDir)
+	if managed && credErr == nil {
+		switch {
+		case !creds.IsEnrolled() || creds.DeviceID == "" || creds.Credential == "":
+			credErr = errors.New("managed service requires an existing enrolled credential")
+		case identErr == nil && creds.EdgeID != ident.EdgeID:
+			credErr = errors.New("managed service credential EdgeID does not match persisted identity")
+		}
+	}
 	host := platform.Detect()
 
 	log := logging.New(cfg.LogLevel, Version, ident.EdgeID, cfg.ProcessingMode.String())
@@ -102,6 +123,13 @@ func New(cfg *config.Config) *Agent {
 	}
 	healthModule := newHealthServerModule(cfg.HealthAddr, reporter, logging.Component(log, "health-http"))
 	a.livenessProbe = healthModule
+	if managed && (a.identityErr != nil || a.credentialsErr != nil) {
+		// Do not construct outbound modules or camera credential storage when
+		// managed identity state fails validation. Run() returns the validation
+		// error to the OS supervisor without creating or repairing identity.
+		a.modules = newModuleManager(a.onModuleState)
+		return a
+	}
 	mods := []Module{
 		healthModule,
 	}
@@ -474,8 +502,14 @@ func (a *Agent) LocalEventProducer() edgebacklog.Producer { return a.localEvents
 // The agent only reaches READY when identity resolved cleanly and every
 // module started. Otherwise it stays DEGRADED but keeps running: the health
 // server module still starts so /status and `geocam-edge check` can report
-// the problem instead of the process going dark.
+// ordinary foreground startup problems instead of the process going dark.
+// Managed identity/credential validation failures are the exception: they
+// return before any runtime module starts and never create or repair identity.
 func (a *Agent) Run(ctx context.Context) error {
+	if err := a.managedStartupError(); err != nil {
+		a.log.Error("managed agent startup rejected", slog.Any("error", err))
+		return err
+	}
 	a.logStartup()
 
 	moduleErr := a.modules.Start(ctx)
@@ -550,6 +584,23 @@ func (a *Agent) Run(ctx context.Context) error {
 		_ = a.shutdown()
 		return err
 	}
+}
+
+func managedRuntime(cfg *config.Config) bool {
+	return cfg != nil && (cfg.ServiceManaged || systemd.Enabled())
+}
+
+func (a *Agent) managedStartupError() error {
+	if a.cfg == nil || !managedRuntime(a.cfg) {
+		return nil
+	}
+	if a.identityErr != nil {
+		return fmt.Errorf("managed identity validation failed: %w", a.identityErr)
+	}
+	if a.credentialsErr != nil {
+		return fmt.Errorf("managed credential validation failed: %w", a.credentialsErr)
+	}
+	return nil
 }
 
 func (a *Agent) logStartup() {
