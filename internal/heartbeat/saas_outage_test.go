@@ -291,7 +291,7 @@ func TestW5_OutageIsClassifiedAndTheModuleRecovers(t *testing.T) {
 
 	h.waitForRequests(t, 3)
 	h.waitForStatus(t, "the unreachable class", func(s heartbeat.Status) bool {
-		return s.LastError == "unreachable"
+		return s.LastError == "unreachable" && s.ConsecutiveFailures >= 3
 	})
 
 	down := h.status()

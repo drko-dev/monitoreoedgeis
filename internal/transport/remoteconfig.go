@@ -33,7 +33,7 @@ func (c *Client) GetDesiredConfig(ctx context.Context, deviceID, credential stri
 	if status == http.StatusTooManyRequests {
 		return nil, &RateLimitError{RetryAfter: parseRetryAfter(header)}
 	}
-	if status == http.StatusRequestTimeout || status >= 500 {
+	if isRetryableStatus(status) {
 		return nil, fmt.Errorf("%w (status %d)", ErrRetryableStatus, status)
 	}
 	if status != http.StatusOK {
@@ -68,7 +68,7 @@ func (c *Client) AckRemoteConfig(ctx context.Context, deviceID, credential strin
 	if respStatus == http.StatusTooManyRequests {
 		return &RateLimitError{RetryAfter: parseRetryAfter(header)}
 	}
-	if respStatus == http.StatusRequestTimeout || respStatus >= 500 {
+	if isRetryableStatus(respStatus) {
 		return fmt.Errorf("%w (status %d)", ErrRetryableStatus, respStatus)
 	}
 	return fmt.Errorf("%w: status %d", ErrUnexpectedStatus, respStatus)

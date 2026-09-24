@@ -330,6 +330,18 @@ func (c *Client) PostFrameWithMetadata(ctx context.Context, deviceID, credential
 	return classifyFrameStatusWithHeader(resp.StatusCode, resp.Header)
 }
 
+// isRetryableStatus reports whether an HTTP status code means "this exact
+// request may succeed later" per the Cloud↔Edge contract: 408 and the 5xx
+// range (500..599). It deliberately excludes 600+ (not a real HTTP status,
+// but some test doubles and misbehaving intermediaries emit it) and every
+// other 4xx, which are permanent per-request failures, not transient ones.
+// Every retry-classification call site in this package shares this helper
+// so the retryable range cannot drift between PostFrame, heartbeat, control,
+// OTA and remote-config.
+func isRetryableStatus(status int) bool {
+	return status == http.StatusRequestTimeout || (status >= 500 && status <= 599)
+}
+
 // classifyFrameStatus maps a PostFrame HTTP status to a sentinel error by
 // status code alone — never by inferring from the response body — so
 // cloudsink's I6 offline buffer can tell a transient failure (worth
@@ -363,7 +375,7 @@ func classifyFrameStatusWithHeader(status int, header http.Header) error {
 		return fmt.Errorf("%w (status %d)", ErrUnauthorized, status)
 	case status == http.StatusTooManyRequests:
 		return &RateLimitError{RetryAfter: parseRetryAfter(header)}
-	case status == http.StatusRequestTimeout || status >= 500:
+	case isRetryableStatus(status):
 		return fmt.Errorf("%w (status %d)", ErrRetryableStatus, status)
 	case status >= 400:
 		return fmt.Errorf("%w (status %d)", ErrInvalidRequest, status)

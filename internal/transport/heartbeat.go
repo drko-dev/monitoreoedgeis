@@ -80,8 +80,7 @@ type CameraStreamStatus struct {
 //   - ErrUnauthorized (401/403): credential revoked or device disabled. Never
 //     retry aggressively, never re-enroll, never discard the credential.
 //   - *RateLimitError (429): honour RetryAfter.
-//   - ErrTimeout / ErrSaaSUnavailable / ErrUnexpectedStatus (5xx): transient,
-//     apply backoff.
+//   - ErrRetryableStatus (408/500..599): transient; apply backoff.
 //   - ErrInvalidRequest (422): the payload does not match the server model.
 //     Retrying an identical body cannot help, so it is reported as its own
 //     class rather than hidden inside the transient bucket.
@@ -99,6 +98,8 @@ func (c *Client) Heartbeat(ctx context.Context, deviceID, credential string, req
 		return &RateLimitError{RetryAfter: parseRetryAfter(header)}
 	case status == http.StatusUnprocessableEntity:
 		return fmt.Errorf("%w (status %d): %s", ErrInvalidRequest, status, string(body))
+	case isRetryableStatus(status):
+		return fmt.Errorf("%w (status %d)", ErrRetryableStatus, status)
 	default:
 		return fmt.Errorf("%w: status %d", ErrUnexpectedStatus, status)
 	}
