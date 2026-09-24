@@ -152,6 +152,7 @@ func w5Config(t *testing.T, dataDir, saasURL string) *config.Config {
 	// developer's environment must not decide what this test exercises.
 	for _, key := range []string{
 		"GEOCAM_EDGE_ID",
+		"GEOCAM_SERVICE_MODE",
 		"GEOCAM_SAAS_URL",
 		"GEOCAM_ALLOW_INSECURE_HTTP",
 		"GEOCAM_SAAS_TIMEOUT",

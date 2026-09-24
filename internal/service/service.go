@@ -12,6 +12,7 @@ import (
 const Name = "geocam-edge"
 
 var ErrUnsupported = errors.New("service management is not supported on this operating system")
+var ErrWindowsServiceInstallUnsupported = errors.New("native Windows SCM installation is experimental and unsupported for production")
 
 type Options struct {
 	Executable string

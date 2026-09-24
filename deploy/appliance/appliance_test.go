@@ -738,6 +738,7 @@ func TestSystemdUnitTemplateStructure(t *testing.T) {
 		"WorkingDirectory=@GEOCAM_DATA_DIR_PLACEHOLDER@",
 		"ExecStart=@GEOCAM_EXEC_PATH@ run",
 		"EnvironmentFile=@GEOCAM_ENV_FILE@",
+		"Environment=GEOCAM_SERVICE_MODE=true",
 		"User=@GEOCAM_SERVICE_USER@",
 		"Group=@GEOCAM_SERVICE_GROUP@",
 		"Restart=on-failure",

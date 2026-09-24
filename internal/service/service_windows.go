@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
-	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -74,7 +73,7 @@ func windowsExitCode(err error) uint32 {
 func serviceCommand(action string, options Options) error {
 	switch action {
 	case "install":
-		return installWindowsService(options)
+		return ErrWindowsServiceInstallUnsupported
 	case "start":
 		return withWindowsService(func(service *mgr.Service) error { return service.Start() })
 	case "stop":
@@ -103,69 +102,6 @@ func serviceCommand(action string, options Options) error {
 	default:
 		return errors.New("unsupported Windows service action")
 	}
-}
-
-func installWindowsService(options Options) error {
-	if options.Executable == "" || !filepath.IsAbs(options.Executable) || options.DataDir == "" || options.ConfigFile == "" {
-		return errors.New("service install requires absolute executable, data-dir and config-file paths")
-	}
-	if err := os.MkdirAll(filepath.Join(options.DataDir, "logs"), 0o700); err != nil {
-		return fmt.Errorf("create service log directory: %w", err)
-	}
-	manager, err := mgr.Connect()
-	if err != nil {
-		return fmt.Errorf("connect Windows Service Control Manager: %w", err)
-	}
-	defer manager.Disconnect()
-	if existing, err := manager.OpenService(Name); err == nil {
-		_ = existing.Close()
-		return fmt.Errorf("Windows service %s is already installed", Name)
-	}
-	service, err := manager.CreateService(Name, options.Executable, mgr.Config{
-		StartType:    mgr.StartAutomatic,
-		ErrorControl: mgr.ErrorNormal,
-		DisplayName:  "GEO CAM Edge",
-		Description:  "GEO CAM Edge camera gateway and processing agent",
-	}, "run")
-	if err != nil {
-		return fmt.Errorf("create Windows service: %w", err)
-	}
-	defer service.Close()
-	if err := service.SetRecoveryActions([]mgr.RecoveryAction{
-		{Type: mgr.ServiceRestart, Delay: 2 * time.Second},
-		{Type: mgr.ServiceRestart, Delay: 10 * time.Second},
-		{Type: mgr.ServiceRestart, Delay: 30 * time.Second},
-		{Type: mgr.NoAction, Delay: 0},
-	}, 300); err != nil {
-		_ = service.Delete()
-		return fmt.Errorf("configure bounded Windows service recovery: %w", err)
-	}
-	if err := service.SetRecoveryActionsOnNonCrashFailures(true); err != nil {
-		_ = service.Delete()
-		return fmt.Errorf("enable recovery for non-crash service failures: %w", err)
-	}
-	if err := setWindowsServiceEnvironment(options); err != nil {
-		_ = service.Delete()
-		return fmt.Errorf("configure Windows service environment: %w", err)
-	}
-	fmt.Printf("Windows service %s installed as automatic; start with `geocam-edge service start`. Data and config are preserved on uninstall.\n", Name)
-	return nil
-}
-
-func setWindowsServiceEnvironment(options Options) error {
-	key, _, err := registry.CreateKey(registry.LOCAL_MACHINE,
-		`SYSTEM\CurrentControlSet\Services\`+Name, registry.SET_VALUE)
-	if err != nil {
-		return err
-	}
-	defer key.Close()
-	values := []string{
-		"GEOCAM_CONFIG_FILE=" + options.ConfigFile,
-		"GEOCAM_DATA_DIR=" + options.DataDir,
-		"GEOCAM_SERVICE_MODE=true",
-		"GEOCAM_LOG_FILE=" + filepath.Join(options.DataDir, "logs", "geocam-edge.log"),
-	}
-	return key.SetStringsValue("Environment", values)
 }
 
 func withWindowsService(fn func(*mgr.Service) error) error {

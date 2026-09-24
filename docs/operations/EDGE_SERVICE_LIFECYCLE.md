@@ -2,6 +2,10 @@
 
 This guide covers the local OS service wrapper for the standalone Edge agent.
 It does not change the SaaS lifecycle or the Linux appliance package contract.
+Linux amd64/arm64 is the supported product target. macOS LaunchAgent support is
+for development and physical-validation convenience. Native Windows SCM
+installation is experimental and disabled; ordinary foreground execution stays
+available.
 
 ## Before installing
 
@@ -25,18 +29,27 @@ For service installation, the required effective values must also match the
 persisted file so a later login or reboot cannot silently select another data
 directory, SaaS endpoint, or processing profile.
 
+Managed startup reads an existing, valid `identity.json` without a create path,
+rejects `GEOCAM_EDGE_ID`, and requires an enrolled credential whose `EdgeID`
+matches that persisted identity. Missing/corrupt identity, missing credentials,
+or an identity mismatch fail before runtime modules start. Foreground first-run
+bootstrap behavior is unchanged. `GEOCAM_SAAS_URL` must not contain URL userinfo
+or secret-bearing query parameters; `geocam-edge config` redacts those fields as
+a defense in depth.
+
 ## Platform behavior
 
 | Platform | Service manager | Start behavior | Recovery |
 | --- | --- | --- | --- |
-| Linux appliance | Existing `geocam-edge.service` systemd unit | `install` enables the package-installed unit; use `start` separately | Existing `Restart=on-failure`, `WatchdogSec`, and start-rate limits |
-| macOS | Per-user LaunchAgent | Runs at user login; `start` loads and kicks the agent | launchd restarts unexpected exits with throttling; an in-process bounded supervisor retries startup failures |
-| Windows | Windows Service Control Manager | Automatic service registration; use `start` to start immediately | SCM recovery actions restart failures with increasing delays and a bounded recovery window; an in-process bounded supervisor retries startup failures |
+| Linux appliance (supported target) | Existing `geocam-edge.service` systemd unit | `install` enables the package-installed unit; use `start` separately | Existing `Restart=on-failure`, `WatchdogSec`, and start-rate limits |
+| macOS (development / validation host) | Per-user LaunchAgent | Runs at user login; `start` loads and kicks the agent | launchd throttles unexpected exits; an in-process bounded supervisor retries failed attempts |
+| Windows (unsupported for managed production) | Native SCM install is disabled | `geocam-edge service install` fails closed; foreground `geocam-edge run` remains available | No product support claim; cross-compilation is not SCM validation |
 
-The macOS and Windows service entrypoints acquire an OS lock scoped to the
-canonical data directory. Only one process may operate on that directory at a
-time; another data directory can run independently. The OS releases the lock
-after a crash, so the persistent lock file is not a stale-process blocker.
+The macOS LaunchAgent and Linux systemd-managed process acquire an OS lock
+scoped to the canonical data directory. Only one process may operate on that
+directory at a time; another data directory can run independently. The OS
+releases the lock after a crash, so the persistent lock file is not a
+stale-process blocker.
 
 The in-process supervisor uses increasing delays and pauses for five minutes
 after five consecutive failed starts. A failed camera, stream, or SaaS request
@@ -70,8 +83,10 @@ geocam-edge service stop
 geocam-edge service uninstall
 ```
 
-Uninstall removes a macOS LaunchAgent or Windows service registration. On Linux
-it disables the package-owned systemd unit without removing its unit file.
+Uninstall removes a macOS LaunchAgent or disables the package-owned Linux
+systemd unit without removing its unit file. Windows service installation is
+disabled; control commands apply only if an operator already registered a
+service outside this installer.
 None of these actions deletes the data directory, identity, credentials,
 persistent config, or logs. For recovery steps, see
 `docs/operations/EDGE_RECOVERY_RUNBOOK.md`.

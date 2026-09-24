@@ -102,3 +102,64 @@ func TestPersistentConfigRejectsMalformedAndDuplicateSettings(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadRejectsSaaSURLCredentialsAndSensitiveQuery(t *testing.T) {
+	for name, rawURL := range map[string]string{
+		"userinfo":            "https://dummy-user:dummy-pass@example.test/",
+		"token query":         "https://example.test/?token=dummy-token",
+		"API key query":       "https://example.test/?api-key=dummy-key",
+		"access token query":  "https://example.test/?access_token=dummy-token",
+		"password query":      "https://example.test/?password=dummy-password",
+		"client secret query": "https://example.test/?client_secret=dummy-secret",
+		"signed query":        "https://example.test/?X-Amz-Signature=dummy-signature",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "edge.env")
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			t.Setenv(ConfigFileEnv, path)
+			t.Setenv("GEOCAM_SAAS_URL", rawURL)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatal("Load() accepted a SaaS URL containing credentials")
+			}
+			for _, secret := range []string{"dummy-user", "dummy-pass", "dummy-token", "dummy-key", "dummy-password", "dummy-secret", "dummy-signature"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("configuration error leaked URL secret %q: %v", secret, err)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsNormalSaaSBaseURL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "edge.env")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv(ConfigFileEnv, path)
+	t.Setenv("GEOCAM_SAAS_URL", "https://example.test")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() rejected normal SaaS URL: %v", err)
+	}
+	if cfg.SaaSURL != "https://example.test" {
+		t.Fatalf("SaaSURL=%q, want https://example.test", cfg.SaaSURL)
+	}
+}
+
+func TestSanitizeSaaSURLRedactsCredentialsAndSensitiveQuery(t *testing.T) {
+	const raw = "https://dummy-user:dummy-pass@example.test/api?token=dummy-token&mode=cloud"
+	got := SanitizeSaaSURL(raw)
+	for _, secret := range []string{"dummy-user", "dummy-pass", "dummy-token"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("SanitizeSaaSURL leaked %q in %q", secret, got)
+		}
+	}
+	if !strings.Contains(got, "example.test") || !strings.Contains(got, "mode=cloud") || !strings.Contains(got, "token=%5Bredacted%5D") {
+		t.Errorf("SanitizeSaaSURL lost safe fields or did not redact token: %q", got)
+	}
+}

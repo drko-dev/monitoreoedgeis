@@ -327,7 +327,12 @@ func TestAgentNotifiesReadyWhenTheHealthSurfaceComesUpAndStoppingOnShutdown(t *t
 	dataDir := t.TempDir()
 	cfg := w5Config(t, dataDir, saas.url())
 	enrolled := w5Enroll(t, dataDir)
-	cfg.EdgeID = enrolled.EdgeID
+	if cfg.EdgeID != "" {
+		t.Fatalf("w5Config EdgeID=%q, want managed mode to use identity.json", cfg.EdgeID)
+	}
+	if enrolled.EdgeID == "" {
+		t.Fatal("w5Enroll returned an empty EdgeID")
+	}
 
 	a := New(cfg)
 	stop := startAgent(t, a)
@@ -343,11 +348,10 @@ func TestAgentNotifiesReadyWhenTheHealthSurfaceComesUpAndStoppingOnShutdown(t *t
 	}
 }
 
-// TestAgentDegradedStillNotifiesReady is the restart-loop guard at the agent
-// level: an agent that cannot become READY must still complete systemd startup.
-// Not doing so would have systemd kill and restart it every TimeoutStartSec
-// forever, over a fault (a corrupt credential file) that only an operator fixes.
-func TestAgentDegradedStillNotifiesReady(t *testing.T) {
+// TestAgentDegradedModuleStillNotifiesReady is the restart-loop guard for
+// recoverable module-construction faults: an agent with valid managed identity
+// and credentials must complete systemd startup so operators can diagnose it.
+func TestAgentDegradedModuleStillNotifiesReady(t *testing.T) {
 	l := newSDListener(t)
 	t.Setenv("NOTIFY_SOCKET", l.path)
 	t.Setenv("WATCHDOG_USEC", "")
@@ -356,15 +360,16 @@ func TestAgentDegradedStillNotifiesReady(t *testing.T) {
 	dataDir := t.TempDir()
 	cfg := w5Config(t, dataDir, saas.url())
 
-	// Enroll, then corrupt the credentials file: a startup fault.
+	// Keep managed identity/credentials valid but corrupt the camera credential
+	// master key to exercise a non-identity module-construction failure.
 	w5Enroll(t, dataDir)
-	if err := os.WriteFile(filepath.Join(dataDir, "credentials.json"), []byte("{not json"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dataDir, "camera_master.key"), []byte("bad-key"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	a := New(cfg)
-	if a.credentialsErr == nil {
-		t.Fatal("the agent did not record the credentials error")
+	if a.cameraCredsErr == nil {
+		t.Fatal("the agent did not record the camera credential module error")
 	}
 	stop := startAgent(t, a)
 	defer stop()

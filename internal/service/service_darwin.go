@@ -14,6 +14,10 @@ import (
 
 const macOSLabel = "io.geocam.edge"
 
+var launchctlRun = func(args ...string) ([]byte, error) {
+	return exec.Command("launchctl", args...).CombinedOutput()
+}
+
 func runIfWindowsService(func(context.Context) error) (bool, error) { return false, nil }
 
 func serviceCommand(action string, options Options) error {
@@ -24,15 +28,7 @@ func serviceCommand(action string, options Options) error {
 	target := domain + "/" + macOSLabel
 	switch action {
 	case "install":
-		if err := validateMacOSOptions(options); err != nil {
-			return err
-		}
-		if err := writeMacOSPlist(plistPath, options); err != nil {
-			return err
-		}
-		fmt.Printf("LaunchAgent installed for current user login; start with `geocam-edge service start`.\n")
-		fmt.Printf("plist: %s\nlogs: %s\n", plistPath, filepath.Join(options.DataDir, "logs"))
-		return nil
+		return installMacOSService(plistPath, domain, target, options)
 	case "start":
 		if !macOSJobLoaded(target) {
 			if _, err := os.Stat(plistPath); err != nil {
@@ -87,6 +83,29 @@ func serviceCommand(action string, options Options) error {
 	}
 }
 
+func installMacOSService(plistPath, domain, target string, options Options) error {
+	if err := validateMacOSOptions(options); err != nil {
+		return err
+	}
+	loaded := macOSJobLoaded(target)
+	if loaded {
+		if err := launchctl("bootout", target); err != nil {
+			return fmt.Errorf("unload existing LaunchAgent before reinstall: %w", err)
+		}
+	}
+	if err := writeMacOSPlist(plistPath, options); err != nil {
+		return err
+	}
+	if loaded {
+		if err := launchctl("bootstrap", domain, plistPath); err != nil {
+			return fmt.Errorf("load updated LaunchAgent: %w", err)
+		}
+	}
+	fmt.Printf("LaunchAgent installed for current user login; start with `geocam-edge service start`.\n")
+	fmt.Printf("plist: %s\nlogs: %s\n", plistPath, filepath.Join(options.DataDir, "logs"))
+	return nil
+}
+
 func validateMacOSOptions(options Options) error {
 	if options.Executable == "" || !filepath.IsAbs(options.Executable) {
 		return errors.New("service install requires an absolute Edge executable path")
@@ -123,11 +142,12 @@ func macOSServicePaths() (plistPath, domain string, err error) {
 }
 
 func macOSJobLoaded(target string) bool {
-	return exec.Command("launchctl", "print", target).Run() == nil
+	_, err := launchctlRun("print", target)
+	return err == nil
 }
 
 func launchctl(args ...string) error {
-	out, err := exec.Command("launchctl", args...).CombinedOutput()
+	out, err := launchctlRun(args...)
 	if err != nil {
 		return fmt.Errorf("launchctl %s failed (%s)", strings.Join(args, " "), commandOutputSummary(out))
 	}

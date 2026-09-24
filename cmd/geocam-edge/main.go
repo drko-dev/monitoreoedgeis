@@ -143,6 +143,10 @@ func runServiceCmd(args []string) {
 		return
 	}
 	action := args[0]
+	if action == "install" && !serviceInstallSupported(runtime.GOOS) {
+		fmt.Fprintf(os.Stderr, "geocam-edge service install: %v; use foreground `geocam-edge run`\n", service.ErrWindowsServiceInstallUnsupported)
+		os.Exit(1)
+	}
 	if action == "supervise" {
 		if len(args) != 1 {
 			fmt.Fprintln(os.Stderr, "geocam-edge service supervise does not accept arguments")
@@ -168,7 +172,7 @@ func runServiceCmd(args []string) {
 		options.DataDir = cfg.DataDir
 		options.ConfigFile = cfg.ConfigFilePath
 	}
-	if action == "install" && runtime.GOOS != "linux" {
+	if action == "install" && runtime.GOOS == "darwin" {
 		if err := validatePersistentServiceInstall(options); err != nil {
 			fmt.Fprintf(os.Stderr, "geocam-edge service install: %v\n", err)
 			os.Exit(1)
@@ -224,6 +228,9 @@ func validatePersistentServiceInstall(options service.Options) error {
 	if cfg.Profile() != config.ProfileGateway {
 		return fmt.Errorf("camera service requires processing_mode=cloud and video_pipeline_enabled=true; effective profile is %s", cfg.Profile())
 	}
+	if cfg.EdgeID != "" {
+		return errors.New("GEOCAM_EDGE_ID override is forbidden for managed services; the persisted identity.json is authoritative")
+	}
 	for key, effective := range map[string]string{
 		"GEOCAM_DATA_DIR":               cfg.DataDir,
 		"GEOCAM_SAAS_URL":               cfg.SaaSURL,
@@ -242,11 +249,11 @@ func validatePersistentServiceInstall(options service.Options) error {
 			return fmt.Errorf("%s environment override differs from persistent config; remove override or update edge.env", key)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(cfg.DataDir, "identity.json")); err != nil {
-		return errors.New("existing identity.json is required; service installer will not create or replace an Edge identity")
-	}
-	ident, err := identity.Load(cfg.DataDir, "")
+	ident, err := identity.LoadExisting(cfg.DataDir)
 	if err != nil {
+		if errors.Is(err, identity.ErrMissing) {
+			return errors.New("existing identity.json is required; service installer will not create or replace an Edge identity")
+		}
 		return fmt.Errorf("load existing Edge identity: %w", err)
 	}
 	creds, err := credentials.Load(cfg.DataDir)
@@ -272,6 +279,8 @@ func validatePersistentServiceInstall(options service.Options) error {
 	}
 	return nil
 }
+
+func serviceInstallSupported(goos string) bool { return goos == "linux" || goos == "darwin" }
 
 func acquireDataDirLock(command, dataDir string) (*instance.Lock, error) {
 	lock, err := instance.Acquire(dataDir)
@@ -425,8 +434,9 @@ func checkReport(snap health.Snapshot) (report string, ready bool) {
 		snap.Operational.ActivePipelineCameraCount,
 		reasons,
 	)
-	operationalBlocked := snap.Operational.State == "DEGRADED" || snap.Operational.State == "WAITING"
-	return report, snap.Status == health.StateReady && !operationalBlocked
+	operationalAccepted := snap.Operational.State == "READY" ||
+		(snap.Operational.State == "NOT_CONFIGURED" && snap.Profile == config.ProfileGatewayNoMedia)
+	return report, snap.Status == health.StateReady && operationalAccepted
 }
 
 // runEnrollCmd claims a one-time enrollment token against the SaaS and
@@ -1033,7 +1043,7 @@ func configReport(cfg *config.Config, host platform.Info, creds credentials.Cred
 			"stream_timeout:       %s\n"+
 			"enrollment_token:     %s\n"+
 			"enrolled:             %s\n",
-		agent.Version, host.GOARCH, cfg.SaaSURL, cfg.ProcessingMode, cfg.Profile(), cfg.VideoPipelineEnabled, cfg.DataDir, cfg.ConfigFilePath, cfg.HealthAddr,
+		agent.Version, host.GOARCH, config.SanitizeSaaSURL(cfg.SaaSURL), cfg.ProcessingMode, cfg.Profile(), cfg.VideoPipelineEnabled, cfg.DataDir, cfg.ConfigFilePath, cfg.HealthAddr,
 		cfg.HeartbeatInterval, cfg.DiscoveryEnabled, cfg.DiscoveryInterval, cfg.DiscoveryTimeout,
 		interfaces, cfg.ConnectivityEnabled, cfg.StreamRole, cfg.StreamTimeout, tokenState, enrolledState,
 	)
@@ -1520,7 +1530,7 @@ const serviceUsage = `Usage: geocam-edge service install|start|stop|restart|stat
 Manage the OS-native Edge background service.
 - Linux: controls the existing systemd unit installed by the appliance installer.
 - macOS: installs a per-user LaunchAgent that starts at login and survives terminal closure.
-- Windows: installs a native automatic-start service in the Service Control Manager.
+- Windows: native SCM installation is experimental and disabled; foreground geocam-edge run remains available.
 
 Uninstall removes/disables only the service registration. Edge data, identity,
 credentials, persistent configuration and logs are preserved.

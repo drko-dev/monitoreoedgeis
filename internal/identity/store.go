@@ -15,6 +15,9 @@ const schemaVersion = 1
 
 const fileName = "identity.json"
 
+// ErrMissing is returned by LoadExisting when identity.json is absent.
+var ErrMissing = errors.New("identity: stored identity is missing")
+
 // fileRecord is the on-disk schema of identity.json. No secrets, ever.
 type fileRecord struct {
 	EdgeID        string `json:"edge_id"`
@@ -33,13 +36,22 @@ func identityPath(dataDir string) string {
 // loadOrCreate reads the persisted identity from dataDir, generating and
 // persisting one on first run. A malformed file is a hard error.
 func loadOrCreate(dataDir string) (Identity, error) {
-	path := identityPath(dataDir)
-
-	data, err := os.ReadFile(path)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
+	ident, err := loadExisting(dataDir)
+	if errors.Is(err, ErrMissing) {
 		return create(dataDir)
-	case err != nil:
+	}
+	return ident, err
+}
+
+// loadExisting reads and validates the persisted identity without creating or
+// changing any file. Managed services use this fail-closed path.
+func loadExisting(dataDir string) (Identity, error) {
+	path := identityPath(dataDir)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return Identity{}, fmt.Errorf("%w: %s", ErrMissing, path)
+	}
+	if err != nil {
 		return Identity{}, fmt.Errorf("identity: read %s: %w", path, err)
 	}
 
