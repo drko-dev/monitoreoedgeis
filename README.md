@@ -279,6 +279,45 @@ geocam-edge check
 geocam-edge discovery scan
 ```
 
+## Quick setup / camera onboarding
+
+`./geocam-up` is a generic, idempotent onboarding wizard that takes a fresh
+(or already-enrolled) Edge from zero to a working camera connected to GEO CAM
+IA, for **any** ONVIF/RTSP camera and **any** authorized organization/site —
+nothing about it is specific to any particular camera model, network, or
+operator.
+
+Requirements:
+- `bin/geocam-edge` built (see "Build" above).
+- `ffmpeg` available on `PATH` (found via `shutil.which`, no fixed install
+  prefix assumed).
+- Network access to the SaaS and to the camera's LAN segment.
+- SaaS admin credentials (asked interactively, never stored).
+
+Run it from the repo root:
+
+```bash
+./geocam-up
+```
+
+It will: verify prerequisites, reuse a valid local Edge identity/credential
+if one exists (or enroll a new one), start the Edge, run camera discovery,
+let you pick a camera credential (creating one in the SaaS only if needed),
+recover or create the SaaS camera record, link it to the Edge's real pipeline
+identity, and validate end-to-end — RTSP online **and** frames actually
+accepted by the Cloud, not just a local stream.
+
+Running it again on an already-configured install is a no-op beyond a status
+refresh: it does not re-enroll, duplicate credentials, or create a second
+camera.
+
+Read-only variants (never mutate local or remote state):
+
+```bash
+./geocam-up --status      # quick summary: processes, identity, SaaS check, /status
+./geocam-up --diagnose    # extended: preflight checks + status + recent log tail
+```
+
 ## Local health HTTP
 
 ```bash

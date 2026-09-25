@@ -97,12 +97,46 @@ type Snapshot struct {
 	// Resources exposes whole-host CPU, memory and disk metrics (Milestone N).
 	Resources *ResourcesStatus `json:"resources,omitempty"`
 	// Queues consolidates queue depth and backpressure telemetry per component (Milestone N).
-	Queues *QueuesStatus `json:"queues,omitempty"`
+	Queues            *QueuesStatus            `json:"queues,omitempty"`
+	CameraTargets     *CameraTargetsStatus     `json:"camera_targets,omitempty"`
+	CameraCredentials *CameraCredentialsStatus `json:"camera_credentials,omitempty"`
+	Operational       OperationalReadiness     `json:"operational_readiness"`
 	// InsecureHTTPAllowed is true only when GEOCAM_ALLOW_INSECURE_HTTP has
 	// been explicitly set, permitting an http:// (not https://) SaaS URL.
 	// Omitted (false) in the normal, secure case so the field only ever
 	// shows up on /status when this dev-only escape hatch is actually live.
 	InsecureHTTPAllowed bool `json:"insecure_http_allowed,omitempty"`
+}
+
+// CameraTargetsStatus describes the last discovery/credential reconciliation
+// without exposing candidate keys, stream URIs, usernames or passwords.
+type CameraTargetsStatus struct {
+	State                 string         `json:"state"`
+	DiscoveredDeviceCount int            `json:"discovered_device_count"`
+	ExpectedCameraCount   int            `json:"expected_camera_count"`
+	SkippedByReason       map[string]int `json:"skipped_by_reason,omitempty"`
+	LastReconciledAt      time.Time      `json:"last_reconciled_at,omitzero"`
+}
+
+// CameraCredentialsStatus summarizes the encrypted camera credential cache.
+// It never contains credential identifiers, usernames, passwords, or keys.
+type CameraCredentialsStatus struct {
+	State                 string    `json:"state"`
+	CachedCredentialCount int       `json:"cached_credential_count"`
+	LastSuccessAt         time.Time `json:"last_success_at,omitzero"`
+	LastErrorClass        string    `json:"last_error_class,omitempty"`
+}
+
+// OperationalReadiness distinguishes actual camera/video operation from the
+// process lifecycle state. Service watchdogs must use /healthz, never this
+// camera-specific verdict, so a single offline camera cannot restart the Edge.
+type OperationalReadiness struct {
+	State                     string   `json:"state"`
+	Reasons                   []string `json:"reasons,omitempty"`
+	DiscoveredDeviceCount     int      `json:"discovered_device_count"`
+	ExpectedCameraCount       int      `json:"expected_camera_count"`
+	PipelineCameraCount       int      `json:"pipeline_camera_count"`
+	ActivePipelineCameraCount int      `json:"active_pipeline_camera_count"`
 }
 
 // ResourcesStatus exposes real host resource telemetry (Milestone N).
@@ -167,6 +201,8 @@ type Reporter struct {
 	discovery         *discovery.ModuleStatus
 	cameras           []rtsp.CameraStreamStatus
 	videoPipeline     *processing.VideoPipelineSummary
+	cameraTargets     *CameraTargetsStatus
+	cameraCredentials *CameraCredentialsStatus
 	cloud             *cloudsink.Status
 	vision            *vision.Status
 	fullEdge          *fulledge.Status
@@ -255,11 +291,38 @@ func (r *Reporter) SetCameras(cameras []rtsp.CameraStreamStatus) {
 	copy(r.cameras, cameras)
 }
 
+func (r *Reporter) SetCameraTargets(status CameraTargetsStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	copied := status
+	if status.SkippedByReason != nil {
+		copied.SkippedByReason = make(map[string]int, len(status.SkippedByReason))
+		for reason, count := range status.SkippedByReason {
+			copied.SkippedByReason[reason] = count
+		}
+	}
+	r.cameraTargets = &copied
+}
+
+func (r *Reporter) SetCameraCredentials(status CameraCredentialsStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	copied := status
+	r.cameraCredentials = &copied
+}
+
 // State returns the current state.
 func (r *Reporter) State() State {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.state
+}
+
+// OperationalReady reports camera/video operation independently of process
+// liveness. It is suitable for `geocam-edge check` and operational readiness,
+// never for deciding whether the service manager should restart the process.
+func (r *Reporter) OperationalReady() bool {
+	return r.Snapshot().Operational.State == "READY"
 }
 
 // Uptime returns how long the agent has been running.
@@ -300,6 +363,22 @@ func (r *Reporter) Snapshot() Snapshot {
 	if r.videoPipeline != nil {
 		copied := *r.videoPipeline
 		vp = &copied
+	}
+	var cameraTargets *CameraTargetsStatus
+	if r.cameraTargets != nil {
+		copied := *r.cameraTargets
+		if r.cameraTargets.SkippedByReason != nil {
+			copied.SkippedByReason = make(map[string]int, len(r.cameraTargets.SkippedByReason))
+			for reason, count := range r.cameraTargets.SkippedByReason {
+				copied.SkippedByReason[reason] = count
+			}
+		}
+		cameraTargets = &copied
+	}
+	var cameraCredentials *CameraCredentialsStatus
+	if r.cameraCredentials != nil {
+		copied := *r.cameraCredentials
+		cameraCredentials = &copied
 	}
 	var cloud *cloudsink.Status
 	if r.cloud != nil {
@@ -369,6 +448,7 @@ func (r *Reporter) Snapshot() Snapshot {
 	// it from the config stays correct.
 	videoEnabled := r.cfg != nil && r.cfg.VideoPipelineEnabled
 	profile := config.ProfileFor(config.ProcessingMode(pm), videoEnabled)
+	operational := calculateOperationalReadiness(r.cfg, profile, vp, cams, cameraTargets)
 
 	// fullEdge is preconstructed so runtime mode transitions can enter Edge
 	// without rebuilding the service, but its status is only truthful while
@@ -403,6 +483,9 @@ func (r *Reporter) Snapshot() Snapshot {
 		RemoteConfig:        rc,
 		Resources:           res,
 		Queues:              q,
+		CameraTargets:       cameraTargets,
+		CameraCredentials:   cameraCredentials,
+		Operational:         operational,
 		InsecureHTTPAllowed: r.cfg.AllowInsecureHTTP,
 	}
 }
@@ -677,4 +760,108 @@ func buildQueuesStatus(
 		return nil
 	}
 	return qs
+}
+
+func calculateOperationalReadiness(
+	cfg *config.Config,
+	profile config.Profile,
+	vp *processing.VideoPipelineSummary,
+	cameras []rtsp.CameraStreamStatus,
+	targets *CameraTargetsStatus,
+) OperationalReadiness {
+	result := OperationalReadiness{State: "NOT_CONFIGURED"}
+	if cfg == nil || !cfg.VideoPipelineEnabled || profile == config.ProfileGatewayNoMedia {
+		result.Reasons = []string{"video_pipeline_disabled"}
+		return result
+	}
+	if targets == nil {
+		result.State = "WAITING"
+		result.Reasons = []string{"camera_target_reconciliation_pending"}
+		return result
+	}
+	result.DiscoveredDeviceCount = targets.DiscoveredDeviceCount
+	result.ExpectedCameraCount = targets.ExpectedCameraCount
+	if vp != nil {
+		result.PipelineCameraCount = vp.CameraCount
+	}
+	if result.ExpectedCameraCount == 0 {
+		if targets.SkippedByReason["auth_required_no_credential"] > 0 {
+			result.State = "DEGRADED"
+			result.Reasons = append(result.Reasons, "camera_credentials_unavailable")
+		}
+		if result.DiscoveredDeviceCount > 0 && len(result.Reasons) == 0 {
+			result.State = "DEGRADED"
+			result.Reasons = append(result.Reasons, "discovered_devices_have_no_usable_stream_targets")
+		}
+		if result.DiscoveredDeviceCount == 0 && len(result.Reasons) == 0 {
+			result.State = "DEGRADED"
+			result.Reasons = append(result.Reasons, "no_camera_targets_discovered")
+		}
+		return result
+	}
+	if result.PipelineCameraCount < result.ExpectedCameraCount {
+		result.State = "DEGRADED"
+		result.Reasons = append(result.Reasons, "expected_camera_pipeline_missing")
+	}
+	if vp != nil {
+		for _, camera := range vp.Cameras {
+			switch camera.State {
+			case "running":
+				result.ActivePipelineCameraCount++
+			case "stalled", "error", "skipped_limit":
+				result.State = "DEGRADED"
+				result.Reasons = append(result.Reasons, "camera_pipeline_unhealthy")
+			case "starting":
+				if result.State != "DEGRADED" {
+					result.State = "WAITING"
+				}
+			}
+		}
+	}
+	for _, camera := range cameras {
+		switch camera.Status {
+		case rtsp.StateAuthFailed:
+			result.State = "DEGRADED"
+			result.Reasons = append(result.Reasons, "camera_authentication_failed")
+		case rtsp.StateOffline, rtsp.StateDegraded:
+			result.State = "DEGRADED"
+			result.Reasons = append(result.Reasons, "camera_stream_unavailable")
+		case rtsp.StateConnecting:
+			if result.State != "DEGRADED" {
+				result.State = "WAITING"
+			}
+		case rtsp.StateOnline:
+			// Connectivity alone is not processing readiness; the pipeline
+			// must also have an active camera below.
+		}
+	}
+	if result.State == "DEGRADED" {
+		result.Reasons = dedupeStrings(result.Reasons)
+		return result
+	}
+	if result.ActivePipelineCameraCount < result.ExpectedCameraCount {
+		if result.State != "WAITING" {
+			result.State = "WAITING"
+		}
+		result.Reasons = append(result.Reasons, "video_pipeline_not_active_yet")
+		return result
+	}
+	result.State = "READY"
+	return result
+}
+
+func dedupeStrings(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }

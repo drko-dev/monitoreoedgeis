@@ -42,6 +42,10 @@ document.
 - [`operations/OFFLINE_AND_RECOVERY.md`](operations/OFFLINE_AND_RECOVERY.md) —
   operational reference (see `resilience/RESILIENCE_MATRIX.md` for the full
   failure-mode matrix).
+- [`operations/EDGE_SERVICE_LIFECYCLE.md`](operations/EDGE_SERVICE_LIFECYCLE.md) —
+  persistent OS service setup, lifecycle commands and health signals.
+- [`operations/EDGE_RECOVERY_RUNBOOK.md`](operations/EDGE_RECOVERY_RUNBOOK.md) —
+  process-vs-camera diagnosis and safe service recovery.
 - [`observability/n-resources-queues.md`](observability/n-resources-queues.md).
 
 ## Troubleshooting

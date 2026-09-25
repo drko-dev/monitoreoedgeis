@@ -9,13 +9,17 @@ import (
 	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
+	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
+	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 )
 
 var errBoom = errors.New("boom")
 
 func testConfig(t *testing.T) *config.Config {
 	t.Helper()
+	t.Setenv("NOTIFY_SOCKET", "")
+	t.Setenv("GEOCAM_LOG_FILE", "")
 	return &config.Config{
 		EdgeID:            "edge-test",
 		ProcessingMode:    config.ModeCloud,
@@ -136,6 +140,154 @@ func TestAgentDegradedOnCorruptCredentials(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run() did not return after context cancellation")
+	}
+}
+
+func TestManagedStartupMissingIdentityFailsWithoutCreatingIt(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ServiceManaged = true
+	cfg.EdgeID = ""
+	initial, err := identity.Load(cfg.DataDir, "")
+	if err != nil {
+		t.Fatalf("create bootstrap identity: %v", err)
+	}
+	saveManagedCredential(t, cfg.DataDir, initial.EdgeID)
+	if err := os.Remove(filepath.Join(cfg.DataDir, "identity.json")); err != nil {
+		t.Fatalf("simulate missing managed identity: %v", err)
+	}
+	credentialsPath := filepath.Join(cfg.DataDir, "credentials.json")
+	credentialsBefore, err := os.ReadFile(credentialsPath)
+	if err != nil {
+		t.Fatalf("ReadFile credentials: %v", err)
+	}
+
+	a := New(cfg)
+	if a.identityErr == nil {
+		t.Fatal("managed startup accepted missing identity.json")
+	}
+	if err := a.Run(t.Context()); err == nil {
+		t.Fatal("managed Run() succeeded without an existing identity")
+	}
+	if _, err := os.Stat(filepath.Join(cfg.DataDir, "identity.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("managed startup created identity.json: %v", err)
+	}
+	credentialsAfter, err := os.ReadFile(credentialsPath)
+	if err != nil {
+		t.Fatalf("ReadFile credentials after startup: %v", err)
+	}
+	if string(credentialsAfter) != string(credentialsBefore) {
+		t.Fatal("managed startup changed credentials.json")
+	}
+}
+
+func TestManagedStartupCorruptIdentityFailsWithoutReplacingIt(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ServiceManaged = true
+	cfg.EdgeID = ""
+	path := filepath.Join(cfg.DataDir, "identity.json")
+	corrupt := []byte("{not json")
+	if err := os.WriteFile(path, corrupt, 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	a := New(cfg)
+	if a.identityErr == nil {
+		t.Fatal("managed startup accepted corrupt identity.json")
+	}
+	if err := a.Run(t.Context()); err == nil {
+		t.Fatal("managed Run() succeeded with corrupt identity")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile after managed startup: %v", err)
+	}
+	if string(after) != string(corrupt) {
+		t.Fatalf("managed startup replaced corrupt identity: %q", after)
+	}
+}
+
+func TestManagedStartupRejectsEdgeIDOverride(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ServiceManaged = true
+	cfg.EdgeID = ""
+	persisted, err := identity.Load(cfg.DataDir, "")
+	if err != nil {
+		t.Fatalf("create persisted identity: %v", err)
+	}
+	saveManagedCredential(t, cfg.DataDir, persisted.EdgeID)
+	before, err := os.ReadFile(filepath.Join(cfg.DataDir, "identity.json"))
+	if err != nil {
+		t.Fatalf("ReadFile identity: %v", err)
+	}
+
+	cfg.EdgeID = "11111111-1111-4111-8111-111111111111"
+	a := New(cfg)
+	if !errors.Is(a.identityErr, identity.ErrManagedEdgeIDOverride) {
+		t.Fatalf("identity error=%v, want managed override rejection", a.identityErr)
+	}
+	if a.identity.EdgeID != persisted.EdgeID {
+		t.Fatalf("managed identity=%q, want persisted %q", a.identity.EdgeID, persisted.EdgeID)
+	}
+	if err := a.Run(t.Context()); err == nil {
+		t.Fatal("managed Run() accepted GEOCAM_EDGE_ID override")
+	}
+	after, err := os.ReadFile(filepath.Join(cfg.DataDir, "identity.json"))
+	if err != nil {
+		t.Fatalf("ReadFile identity after startup: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("managed startup changed persisted identity")
+	}
+}
+
+func TestManagedStartupRejectsCredentialIdentityMismatch(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ServiceManaged = true
+	cfg.EdgeID = ""
+	persisted, err := identity.Load(cfg.DataDir, "")
+	if err != nil {
+		t.Fatalf("create persisted identity: %v", err)
+	}
+	saveManagedCredential(t, cfg.DataDir, "11111111-1111-4111-8111-111111111111")
+	before, err := os.ReadFile(filepath.Join(cfg.DataDir, "identity.json"))
+	if err != nil {
+		t.Fatalf("ReadFile identity: %v", err)
+	}
+	credentialsPath := filepath.Join(cfg.DataDir, "credentials.json")
+	credentialsBefore, err := os.ReadFile(credentialsPath)
+	if err != nil {
+		t.Fatalf("ReadFile credentials: %v", err)
+	}
+
+	a := New(cfg)
+	if a.credentialsErr == nil {
+		t.Fatal("managed startup accepted a credential for another EdgeID")
+	}
+	if err := a.Run(t.Context()); err == nil {
+		t.Fatal("managed Run() succeeded with mismatched credential identity")
+	}
+	after, err := os.ReadFile(filepath.Join(cfg.DataDir, "identity.json"))
+	if err != nil {
+		t.Fatalf("ReadFile identity after startup: %v", err)
+	}
+	if string(after) != string(before) || persisted.EdgeID == "" {
+		t.Fatal("managed startup changed or lost persisted identity")
+	}
+	credentialsAfter, err := os.ReadFile(credentialsPath)
+	if err != nil {
+		t.Fatalf("ReadFile credentials after startup: %v", err)
+	}
+	if string(credentialsAfter) != string(credentialsBefore) {
+		t.Fatal("managed startup changed credentials.json")
+	}
+}
+
+func saveManagedCredential(t *testing.T, dataDir, edgeID string) {
+	t.Helper()
+	if err := credentials.Save(dataDir, credentials.Credentials{
+		EdgeID: edgeID, DeviceID: "device-test", Credential: "dummy-device-credential", EnrolledAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("save managed test credential: %v", err)
 	}
 }
 

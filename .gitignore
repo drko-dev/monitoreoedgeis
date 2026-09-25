@@ -22,3 +22,7 @@ __pycache__/
 # Agent tooling state (local only)
 /.codegraph/
 /.omc/
+/.claude/
+
+# geocam-up local onboarding backups (never part of the product)
+/geocam-up.bak-*

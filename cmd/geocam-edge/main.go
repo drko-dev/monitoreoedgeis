@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -24,8 +26,11 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/factoryreset"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
+	"github.com/drko-dev/monitoreoedgeis/internal/instance"
+	"github.com/drko-dev/monitoreoedgeis/internal/logging"
 	"github.com/drko-dev/monitoreoedgeis/internal/ota"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
+	"github.com/drko-dev/monitoreoedgeis/internal/service"
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
 
@@ -66,6 +71,8 @@ func main() {
 		runSaasCmd(args)
 	case "ota":
 		runOTACmd(args)
+	case "service":
+		runServiceCmd(args)
 	default:
 		fmt.Fprintf(os.Stderr, "geocam-edge: unknown command %q\n", cmd)
 		fmt.Fprintln(os.Stderr, "Run 'geocam-edge --help' for usage.")
@@ -96,14 +103,194 @@ func runAgentCmd(args []string) {
 		fmt.Fprintf(os.Stderr, "geocam-edge: configuration error: %v\n", err)
 		os.Exit(1)
 	}
+	instanceLock, err := instance.Acquire(cfg.DataDir)
+	if err != nil {
+		if errors.Is(err, instance.ErrAlreadyRunning) {
+			fmt.Fprintf(os.Stderr, "geocam-edge run: already running for data directory %s\n", cfg.DataDir)
+		} else {
+			fmt.Fprintf(os.Stderr, "geocam-edge run: instance lock error: %v\n", err)
+		}
+		os.Exit(1)
+	}
+	defer instanceLock.Release()
+
+	handled, serviceErr := service.RunIfWindowsService(func(ctx context.Context) error {
+		cfg.ServiceManaged = true
+		defer logging.Close()
+		return agent.New(cfg).Run(ctx)
+	})
+	if handled {
+		if serviceErr != nil {
+			fmt.Fprintf(os.Stderr, "geocam-edge Windows service: %v\n", serviceErr)
+			os.Exit(1)
+		}
+		return
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	defer logging.Close()
 	if err := agent.New(cfg).Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "geocam-edge: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func runServiceCmd(args []string) {
+	if isHelpRequest(args) || len(args) == 0 {
+		printServiceUsage(os.Stdout)
+		return
+	}
+	action := args[0]
+	if action == "install" && !serviceInstallSupported(runtime.GOOS) {
+		fmt.Fprintf(os.Stderr, "geocam-edge service install: %v; use foreground `geocam-edge run`\n", service.ErrWindowsServiceInstallUnsupported)
+		os.Exit(1)
+	}
+	if action == "supervise" {
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "geocam-edge service supervise does not accept arguments")
+			os.Exit(1)
+		}
+		if err := runManagedServiceAgent(); err != nil {
+			fmt.Fprintf(os.Stderr, "geocam-edge service supervisor: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(args) > 1 {
+		fmt.Fprintln(os.Stderr, "geocam-edge service accepts one lifecycle action")
+		os.Exit(1)
+	}
+	options := service.Options{}
+	if action == "install" || action == "logs" {
+		cfg, err := config.Load()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "geocam-edge service: configuration error: %v\n", err)
+			os.Exit(1)
+		}
+		options.DataDir = cfg.DataDir
+		options.ConfigFile = cfg.ConfigFilePath
+	}
+	if action == "install" && runtime.GOOS == "darwin" {
+		if err := validatePersistentServiceInstall(options); err != nil {
+			fmt.Fprintf(os.Stderr, "geocam-edge service install: %v\n", err)
+			os.Exit(1)
+		}
+		executable, err := os.Executable()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "geocam-edge service install: resolve executable: %v\n", err)
+			os.Exit(1)
+		}
+		options.Executable, err = filepath.Abs(executable)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "geocam-edge service install: resolve executable path: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	if err := service.Command(action, options); err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge service %s: %v\n", action, err)
+		os.Exit(1)
+	}
+}
+
+func runManagedServiceAgent() error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return service.RunSupervisor(ctx, func(ctx context.Context) error {
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		cfg.ServiceManaged = true
+		lock, err := acquireDataDirLock("service supervise", cfg.DataDir)
+		if err != nil {
+			return err
+		}
+		defer lock.Release()
+		defer logging.Close()
+		return agent.New(cfg).Run(ctx)
+	}, slog.Default())
+}
+
+func validatePersistentServiceInstall(options service.Options) error {
+	for _, key := range []string{"GEOCAM_DATA_DIR", "GEOCAM_SAAS_URL", "GEOCAM_PROCESSING_MODE", "GEOCAM_VIDEO_PIPELINE_ENABLED"} {
+		if _, ok, err := config.PersistentFileValue(key); err != nil {
+			return err
+		} else if !ok {
+			return fmt.Errorf("persistent config file must explicitly set %s before service installation", key)
+		}
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if cfg.Profile() != config.ProfileGateway {
+		return fmt.Errorf("camera service requires processing_mode=cloud and video_pipeline_enabled=true; effective profile is %s", cfg.Profile())
+	}
+	if cfg.EdgeID != "" {
+		return errors.New("GEOCAM_EDGE_ID override is forbidden for managed services; the persisted identity.json is authoritative")
+	}
+	for key, effective := range map[string]string{
+		"GEOCAM_DATA_DIR":               cfg.DataDir,
+		"GEOCAM_SAAS_URL":               cfg.SaaSURL,
+		"GEOCAM_PROCESSING_MODE":        cfg.ProcessingMode.String(),
+		"GEOCAM_VIDEO_PIPELINE_ENABLED": strconv.FormatBool(cfg.VideoPipelineEnabled),
+	} {
+		persisted, _, err := config.PersistentFileValue(key)
+		if err != nil {
+			return err
+		}
+		if key == "GEOCAM_DATA_DIR" {
+			if filepath.Clean(persisted) != filepath.Clean(effective) {
+				return errors.New("GEOCAM_DATA_DIR environment override differs from persistent config; remove override or update edge.env")
+			}
+		} else if strings.TrimSpace(persisted) != effective {
+			return fmt.Errorf("%s environment override differs from persistent config; remove override or update edge.env", key)
+		}
+	}
+	ident, err := identity.LoadExisting(cfg.DataDir)
+	if err != nil {
+		if errors.Is(err, identity.ErrMissing) {
+			return errors.New("existing identity.json is required; service installer will not create or replace an Edge identity")
+		}
+		return fmt.Errorf("load existing Edge identity: %w", err)
+	}
+	creds, err := credentials.Load(cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("load existing Edge credential metadata: %w", err)
+	}
+	if !creds.IsEnrolled() || creds.EdgeID != ident.EdgeID || creds.DeviceID == "" || creds.Credential == "" {
+		return errors.New("existing identity and enrolled credential must match before service installation; no credential was changed")
+	}
+	client, err := transport.New(cfg.SaaSURL, cfg.AllowInsecureHTTP, cfg.SaaSTimeout, agent.Version)
+	if err != nil {
+		return err
+	}
+	me, err := client.Me(context.Background(), creds.DeviceID, creds.Credential)
+	if err != nil {
+		return fmt.Errorf("read-only SaaS authentication check failed: %s", saasErrorMessage(err))
+	}
+	if me.DeviceID != creds.DeviceID || (me.EdgeID != "" && me.EdgeID != ident.EdgeID) {
+		return errors.New("read-only SaaS identity check does not match the local Edge identity")
+	}
+	if options.DataDir != cfg.DataDir {
+		return errors.New("service data directory does not match effective persistent configuration")
+	}
+	return nil
+}
+
+func serviceInstallSupported(goos string) bool { return goos == "linux" || goos == "darwin" }
+
+func acquireDataDirLock(command, dataDir string) (*instance.Lock, error) {
+	lock, err := instance.Acquire(dataDir)
+	if errors.Is(err, instance.ErrAlreadyRunning) {
+		return nil, fmt.Errorf("%s: already running for data directory %s", command, dataDir)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: instance lock error: %w", command, err)
+	}
+	return lock, nil
 }
 
 // runVersionCmd implements `geocam-edge version`. --version (the flag) keeps
@@ -150,6 +337,12 @@ func runIdentityCmd(args []string) {
 		fmt.Fprintf(os.Stderr, "geocam-edge identity: configuration error: %v\n", err)
 		os.Exit(1)
 	}
+	lock, err := acquireDataDirLock("identity", cfg.DataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge identity: %v\n", err)
+		os.Exit(1)
+	}
+	defer lock.Release()
 
 	ident, err := identity.Load(cfg.DataDir, cfg.EdgeID)
 	if err != nil {
@@ -217,6 +410,10 @@ func runCheckCmd(args []string) {
 // checkReport formats the output of `geocam-edge check` and reports whether
 // the agent is READY. Kept pure (no I/O) so it is directly testable.
 func checkReport(snap health.Snapshot) (report string, ready bool) {
+	reasons := "none"
+	if len(snap.Operational.Reasons) > 0 {
+		reasons = strings.Join(snap.Operational.Reasons, ",")
+	}
 	report = fmt.Sprintf(
 		"status:           %s\n"+
 			"edge_id:          %s\n"+
@@ -225,7 +422,21 @@ func checkReport(snap health.Snapshot) (report string, ready bool) {
 			"uptime:           %s\n",
 		snap.Status, snap.EdgeID, snap.Version, snap.ProcessingMode, snap.Uptime,
 	)
-	return report, snap.Status == health.StateReady
+	report += fmt.Sprintf(
+		"operational:      %s\n"+
+			"expected_cameras: %d\n"+
+			"pipeline_cameras: %d\n"+
+			"active_cameras:   %d\n"+
+			"degraded_reasons: %s\n",
+		snap.Operational.State,
+		snap.Operational.ExpectedCameraCount,
+		snap.Operational.PipelineCameraCount,
+		snap.Operational.ActivePipelineCameraCount,
+		reasons,
+	)
+	operationalAccepted := snap.Operational.State == "READY" ||
+		(snap.Operational.State == "NOT_CONFIGURED" && snap.Profile == config.ProfileGatewayNoMedia)
+	return report, snap.Status == health.StateReady && operationalAccepted
 }
 
 // runEnrollCmd claims a one-time enrollment token against the SaaS and
@@ -247,6 +458,12 @@ func runEnrollCmd(args []string) {
 		fmt.Fprintf(os.Stderr, "geocam-edge enroll: configuration error: %v\n", err)
 		os.Exit(1)
 	}
+	lock, err := acquireDataDirLock("enroll", cfg.DataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer lock.Release()
 
 	ident, err := identity.Load(cfg.DataDir, cfg.EdgeID)
 	if err != nil {
@@ -448,6 +665,12 @@ func runFactoryResetCmd(args []string) {
 		fmt.Fprintf(os.Stderr, "geocam-edge factory-reset: configuration error: %v\n", err)
 		os.Exit(1)
 	}
+	lock, err := acquireDataDirLock("factory-reset", cfg.DataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer lock.Release()
 	if err := factoryreset.Reset(cfg.DataDir, *confirmed); err != nil {
 		// S11 security event log: never logs DataDir contents, only the
 		// outcome and the (non-secret) data directory path.
@@ -498,6 +721,12 @@ func runCredentialRotateCmd(args []string) {
 		fmt.Fprintf(os.Stderr, "geocam-edge credential rotate: configuration error: %v\n", err)
 		os.Exit(1)
 	}
+	lock, err := acquireDataDirLock("credential rotate", cfg.DataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer lock.Release()
 
 	creds, err := credentials.Load(cfg.DataDir)
 	if err != nil {
@@ -799,7 +1028,10 @@ func configReport(cfg *config.Config, host platform.Info, creds credentials.Cred
 			"architecture:         %s\n"+
 			"saas_url:             %s\n"+
 			"processing_mode:      %s\n"+
+			"profile:              %s\n"+
+			"video_pipeline:       %t\n"+
 			"data_dir:             %s\n"+
+			"config_file:          %s\n"+
 			"health_addr:          %s\n"+
 			"heartbeat_interval:   %s\n"+
 			"discovery_enabled:    %t\n"+
@@ -811,7 +1043,7 @@ func configReport(cfg *config.Config, host platform.Info, creds credentials.Cred
 			"stream_timeout:       %s\n"+
 			"enrollment_token:     %s\n"+
 			"enrolled:             %s\n",
-		agent.Version, host.GOARCH, cfg.SaaSURL, cfg.ProcessingMode, cfg.DataDir, cfg.HealthAddr,
+		agent.Version, host.GOARCH, config.SanitizeSaaSURL(cfg.SaaSURL), cfg.ProcessingMode, cfg.Profile(), cfg.VideoPipelineEnabled, cfg.DataDir, cfg.ConfigFilePath, cfg.HealthAddr,
 		cfg.HeartbeatInterval, cfg.DiscoveryEnabled, cfg.DiscoveryInterval, cfg.DiscoveryTimeout,
 		interfaces, cfg.ConnectivityEnabled, cfg.StreamRole, cfg.StreamTimeout, tokenState, enrolledState,
 	)
@@ -1082,6 +1314,7 @@ Commands:
   identity             Print this Edge's identity (edge_id, source, version, data dir)
   config               Print effective, non-secret configuration
   check                Check a running agent's health over its local HTTP surface
+  service              Install/control the OS-native background service
   enroll               Enroll this Edge against the SaaS using a one-time token
   factory-reset        Remove local device state after explicit confirmation
   credential rotate    Rotate the locally stored SaaS credential
@@ -1101,9 +1334,14 @@ Typical flow:
   geocam-edge identity
   geocam-edge enroll
   geocam-edge saas check
-  geocam-edge run              # in one terminal
-  geocam-edge check            # in another terminal
+  geocam-edge service install  # after selecting the existing enrolled identity
+  geocam-edge service status
   geocam-edge discovery scan
+
+geocam-edge run remains a foreground diagnostic command. Persistent settings
+are read from config_file (defaults to the OS user config directory); explicit
+environment variables override that file. The service installer refuses to
+select or generate an identity and requires existing, SaaS-authenticated state.
 
 Environment variables (all optional unless noted):
   GEOCAM_SAAS_URL               SaaS base URL (required for enroll/credential rotate/saas check)
@@ -1286,6 +1524,19 @@ Never prints the stored credential.
 `
 
 func printSaasCheckUsage(w io.Writer) { fmt.Fprint(w, saasCheckUsage) }
+
+const serviceUsage = `Usage: geocam-edge service install|start|stop|restart|status|logs|uninstall
+
+Manage the OS-native Edge background service.
+- Linux: controls the existing systemd unit installed by the appliance installer.
+- macOS: installs a per-user LaunchAgent that starts at login and survives terminal closure.
+- Windows: native SCM installation is experimental and disabled; foreground geocam-edge run remains available.
+
+Uninstall removes/disables only the service registration. Edge data, identity,
+credentials, persistent configuration and logs are preserved.
+`
+
+func printServiceUsage(w io.Writer) { fmt.Fprint(w, serviceUsage) }
 
 const otaUsage = `Usage: geocam-edge ota <subcommand>
 

@@ -28,7 +28,13 @@ type Config struct {
 	// recovery without waiting for the production cadence.
 	HeartbeatAuthFailureInterval time.Duration
 	DataDir                      string
-	HealthAddr                   string
+	// ConfigFilePath records the source path for non-secret persisted runtime
+	// settings. It is metadata only and may be shown in the safe `config` view.
+	ConfigFilePath string
+	// ServiceManaged is set by launchd/SCM/systemd integration and enables
+	// the process self-watchdog where the OS manager cannot probe HTTP health.
+	ServiceManaged bool
+	HealthAddr     string
 	// AllowInsecureHTTP permits SaaSURL to use http:// instead of https://.
 	// It never weakens TLS verification for an https:// URL — see
 	// internal/transport. Development only; defaults to false.
@@ -351,6 +357,19 @@ var validLogLevels = []string{"debug", "info", "warn", "error"}
 // Load reads configuration from the environment, applying safe defaults.
 // An invalid value is a hard startup error.
 func Load() (*Config, error) {
+	path, err := PersistentConfigPath()
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := withPersistentEnvironment(loadFromEnvironment)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ConfigFilePath = path
+	return cfg, nil
+}
+
+func loadFromEnvironment() (*Config, error) {
 	cfg := &Config{
 		EdgeID:              strings.TrimSpace(os.Getenv("GEOCAM_EDGE_ID")),
 		ProcessingMode:      DefaultProcessingMode,
@@ -358,6 +377,7 @@ func Load() (*Config, error) {
 		SaaSURL:             strings.TrimSpace(os.Getenv("GEOCAM_SAAS_URL")),
 		HeartbeatInterval:   DefaultHeartbeatInterval,
 		DataDir:             DefaultDataDir,
+		ServiceManaged:      strings.EqualFold(strings.TrimSpace(os.Getenv("GEOCAM_SERVICE_MODE")), "true") || strings.TrimSpace(os.Getenv("GEOCAM_SERVICE_MODE")) == "1",
 		HealthAddr:          DefaultHealthAddr,
 		SaaSTimeout:         DefaultSaaSTimeout,
 		DiscoveryEnabled:    DefaultDiscoveryEnabled,
@@ -944,12 +964,15 @@ func Load() (*Config, error) {
 	if err := parseRetentionEnv(cfg); err != nil {
 		return nil, err
 	}
+	if err := ValidateSaaSURL(cfg.SaaSURL); err != nil {
+		return nil, err
+	}
 
 	// Fail-fast: reject an insecure http:// SaaS URL here, before any
 	// request is ever attempted, unless explicitly allowed for development.
 	if cfg.SaaSURL != "" && strings.HasPrefix(strings.ToLower(cfg.SaaSURL), "http://") && !cfg.AllowInsecureHTTP {
 		return nil, fmt.Errorf("insecure GEOCAM_SAAS_URL %q: http:// is disabled by default; "+
-			"set GEOCAM_ALLOW_INSECURE_HTTP=true to allow it in development", cfg.SaaSURL)
+			"set GEOCAM_ALLOW_INSECURE_HTTP=true to allow it in development", SanitizeSaaSURL(cfg.SaaSURL))
 	}
 
 	return cfg, nil

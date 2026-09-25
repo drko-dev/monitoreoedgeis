@@ -1,0 +1,904 @@
+#!/usr/bin/env python3
+import argparse
+import getpass
+import http.cookiejar
+import json
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+DEFAULT_SAAS = "https://vps-6387636-x.dattaweb.com"
+DEFAULT_DATA_DIR = Path.home() / "geocam-edge-data"
+DEFAULT_LOG = Path.home() / "geocam-edge.log"
+OLD_DATA_DIR = Path.home() / ".geocam-edge"
+ROLE_ORDER = {"visor": 1, "operador": 2, "supervisor": 3, "admin": 4, "superadmin": 5}
+
+
+class ApiError(RuntimeError):
+    def __init__(self, status, detail, body=None):
+        super().__init__(f"HTTP {status}: {detail}")
+        self.status = status
+        self.detail = detail
+        self.body = body
+
+
+class SaaS:
+    def __init__(self, base_url):
+        self.base = base_url.rstrip("/")
+        self.jar = http.cookiejar.CookieJar()
+        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar))
+
+    def request(self, method, path, payload=None, query=None, timeout=20):
+        url = self.base + path
+        if query:
+            qs = urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
+            if qs:
+                url += ("&" if "?" in url else "?") + qs
+        data = None
+        headers = {"Accept": "application/json"}
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with self.opener.open(req, timeout=timeout) as resp:
+                raw = resp.read()
+                if not raw:
+                    return resp.status, {}
+                ctype = resp.headers.get("Content-Type", "")
+                if "json" in ctype or raw[:1] in (b"{", b"["):
+                    return resp.status, json.loads(raw.decode("utf-8"))
+                return resp.status, {"raw": raw.decode("utf-8", "replace")}
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            body = None
+            detail = e.reason
+            if raw:
+                try:
+                    body = json.loads(raw.decode("utf-8"))
+                    detail = body.get("detail", body)
+                except Exception:
+                    detail = raw.decode("utf-8", "replace")[:500]
+            raise ApiError(e.code, detail, body) from None
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"No se pudo conectar al SaaS: {e.reason}") from None
+
+    def login_admin(self):
+        print("\n== Autenticación SaaS ==")
+        user = input("Usuario administrador SaaS: ").strip()
+        password = getpass.getpass("Password administrador SaaS: ")
+        _, profile = self.request("POST", "/api/auth/login", {"username": user, "password": password})
+        del password
+        role = (profile.get("user") or {}).get("rol", "")
+        if ROLE_ORDER.get(role, 0) < ROLE_ORDER["admin"]:
+            raise RuntimeError(f"El usuario '{user}' tiene rol '{role}' y se necesita admin o superadmin.")
+        print(f"OK: sesión SaaS iniciada como {user} ({role}).")
+        return profile
+
+
+def run_cmd(args, env=None, cwd=None, input_text=None, check=False, capture=True):
+    return subprocess.run(
+        args,
+        env=env,
+        cwd=cwd,
+        input=input_text,
+        text=True,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.STDOUT if capture else None,
+        check=check,
+    )
+
+
+def binary_path(repo):
+    p = repo / "bin" / "geocam-edge"
+    if not p.exists():
+        raise RuntimeError(f"No existe el binario esperado: {p}")
+    return p
+
+
+def find_ffmpeg():
+    """Locate ffmpeg portably (no assumption about /opt/homebrew or any
+    other fixed prefix). Returns an absolute path or None."""
+    return shutil.which("ffmpeg")
+
+
+def edge_env(data_dir, saas_url, ffmpeg_path):
+    env = os.environ.copy()
+    env.update({
+        "GEOCAM_DATA_DIR": str(data_dir),
+        "GEOCAM_SAAS_URL": saas_url,
+        "GEOCAM_PROCESSING_MODE": "cloud",
+        "GEOCAM_VIDEO_PIPELINE_ENABLED": "true",
+        "GEOCAM_LOG_LEVEL": "debug",
+        "GEOCAM_DISCOVERY_ENABLED": "true",
+        "GEOCAM_CONNECTIVITY_ENABLED": "true",
+    })
+    if ffmpeg_path:
+        env["GEOCAM_VIDEO_FFMPEG_PATH"] = ffmpeg_path
+    return env
+
+
+def load_json(path):
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return {}
+
+
+def safe_local_meta(data_dir):
+    ident = load_json(data_dir / "identity.json")
+    creds = load_json(data_dir / "credentials.json")
+    return {
+        "edge_id": ident.get("edge_id"),
+        "device_id": creds.get("device_id"),
+        "tenant_id": creds.get("tenant_id"),
+        "site_id": creds.get("site_id"),
+        "enrolled_at": creds.get("enrolled_at"),
+    }
+
+
+def old_hints():
+    c = load_json(OLD_DATA_DIR / "credentials.json")
+    i = load_json(OLD_DATA_DIR / "identity.json")
+    return {
+        "old_edge_id": i.get("edge_id"),
+        "old_device_id": c.get("device_id"),
+        "org_id": _to_int(c.get("tenant_id")),
+        "site_id": _to_int(c.get("site_id")),
+    }
+
+
+def _to_int(v):
+    try:
+        return int(v)
+    except Exception:
+        return None
+
+
+def edge_identity(binary, env, repo):
+    p = run_cmd([str(binary), "identity"], env=env, cwd=repo)
+    if p.returncode != 0:
+        raise RuntimeError(p.stdout.strip() or "No se pudo resolver la identidad Edge.")
+    print(p.stdout.strip())
+    for line in p.stdout.splitlines():
+        if line.startswith("edge_id:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def saas_check(binary, env, repo):
+    p = run_cmd([str(binary), "saas", "check"], env=env, cwd=repo)
+    return p.returncode == 0, (p.stdout or "").strip()
+
+
+def pgrep_edge():
+    p = run_cmd(["pgrep", "-f", "[g]eocam-edge run"])
+    if p.returncode != 0:
+        return []
+    out = []
+    for x in p.stdout.split():
+        try:
+            out.append(int(x))
+        except ValueError:
+            pass
+    return out
+
+
+def stop_edge():
+    pids = pgrep_edge()
+    if not pids:
+        print("OK: no había geocam-edge run activo.")
+        return
+    print("Deteniendo Edge activo:", ", ".join(map(str, pids)))
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        alive = [pid for pid in pids if _alive(pid)]
+        if not alive:
+            print("OK: Edge detenido.")
+            return
+        time.sleep(0.4)
+    for pid in pids:
+        if _alive(pid):
+            os.kill(pid, signal.SIGKILL)
+    print("WARN: fue necesario terminar un proceso Edge por SIGKILL.")
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def start_edge(binary, env, repo, log_path, data_dir):
+    stop_edge()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logf = open(log_path, "ab", buffering=0)
+    p = subprocess.Popen(
+        [str(binary), "run"],
+        cwd=repo,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=logf,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    (data_dir / "run.pid").write_text(str(p.pid) + "\n")
+    print(f"OK: Edge iniciado en background, PID={p.pid}")
+    print(f"Log: {log_path}")
+    return p.pid
+
+
+def local_status(timeout=3):
+    req = urllib.request.Request("http://127.0.0.1:8091/status", headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def wait_status(seconds=25):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        s = local_status()
+        if s:
+            return s
+        time.sleep(1)
+    raise RuntimeError("El Edge arrancó pero /status no respondió en 127.0.0.1:8091.")
+
+
+def choose_from_list(title, items, label_fn, id_fn=lambda x: x.get("id"), preferred=None):
+    if not items:
+        return None
+    if preferred is not None:
+        for item in items:
+            if str(id_fn(item)) == str(preferred):
+                print(f"OK: {title}: {label_fn(item)} [preferencia persistida]")
+                return item
+    if len(items) == 1:
+        print(f"OK: {title}: {label_fn(items[0])}")
+        return items[0]
+    print(f"\n{title}:")
+    for idx, item in enumerate(items, 1):
+        print(f"  {idx}) {label_fn(item)}")
+    while True:
+        raw = input("Elegí número: ").strip()
+        if raw.isdigit() and 1 <= int(raw) <= len(items):
+            return items[int(raw) - 1]
+        print("Opción inválida.")
+
+
+def resolve_org_site(api, profile, hints):
+    orgs = profile.get("organizations") or []
+    user = profile.get("user") or {}
+    direct_org = _to_int(user.get("organization_id"))
+    preferred_org = direct_org or hints.get("org_id") or _to_int(profile.get("default_organization_id"))
+    org = choose_from_list(
+        "Organización",
+        orgs,
+        lambda x: f"{x.get('name')} (id={x.get('id')})",
+        preferred=preferred_org,
+    )
+    if not org:
+        raise RuntimeError("No hay organizaciones operativas disponibles para este usuario.")
+    org_id = int(org["id"])
+
+    _, data = api.request("GET", "/api/sites", query={"organization_id": org_id})
+    sites = [s for s in (data.get("sites") or []) if s.get("active", True)]
+    site = choose_from_list(
+        "Sitio",
+        sites,
+        lambda x: f"{x.get('name')} (id={x.get('id')})",
+        preferred=hints.get("site_id"),
+    )
+    site_id = int(site["id"]) if site else None
+    if site_id is None:
+        print("WARN: no hay sitio activo; el Gateway quedará sin site.")
+    return org_id, site_id
+
+
+def ensure_enrollment(api, profile, binary, env, repo, data_dir, org_id, site_id):
+    creds_path = data_dir / "credentials.json"
+    if creds_path.exists():
+        ok, msg = saas_check(binary, env, repo)
+        if ok:
+            print("OK: credencial Edge existente aceptada por SaaS.")
+            return
+        print("WARN: la credencial local existe pero SaaS la rechaza/no valida:")
+        print(msg)
+        backup = creds_path.with_name(f"credentials.json.bak.{int(time.time())}")
+        shutil.move(str(creds_path), str(backup))
+        print(f"Backup de credencial inválida: {backup}")
+
+    name = f"{socket.gethostname()} Gateway"
+    payload = {
+        "name": name,
+        "organization_id": org_id,
+        "site_id": site_id,
+    }
+    print("Creando enrollment de Gateway en SaaS...")
+    _, data = api.request("POST", "/api/v1/gateway/enrollments", payload)
+    token = data.get("enrollment_token")
+    if not token:
+        raise RuntimeError("SaaS no devolvió enrollment_token.")
+    print("OK: token de un solo uso generado (no se muestra ni se guarda).")
+
+    p = run_cmd([str(binary), "enroll"], env=env, cwd=repo, input_text=token + "\n")
+    token = None
+    if p.returncode != 0:
+        raise RuntimeError("Enrollment Edge falló: " + (p.stdout or "").strip())
+    print((p.stdout or "").strip() or "OK: Edge enrolado.")
+
+    ok, msg = saas_check(binary, env, repo)
+    if not ok:
+        raise RuntimeError("El enrollment terminó pero saas check falló:\n" + msg)
+    print(msg)
+
+
+def get_current_device(api, org_id, device_id):
+    _, data = api.request("GET", "/api/v1/edge/devices", query={"organization_id": org_id})
+    for d in data.get("devices") or []:
+        if d.get("device_id") == device_id:
+            return d
+    return None
+
+
+def request_discovery(api, org_id, device_id):
+    print("Solicitando discovery SaaS...")
+    try:
+        api.request(
+            "POST",
+            f"/api/v1/edge/devices/{urllib.parse.quote(device_id)}/discovery/runs",
+            query={"organization_id": org_id},
+        )
+        print("OK: discovery solicitado.")
+    except ApiError as e:
+        if e.status == 409:
+            print("INFO: ya había un discovery activo; se reutiliza.")
+        else:
+            raise
+
+
+def wait_candidates(api, org_id, device_id, seconds=65):
+    deadline = time.time() + seconds
+    last = []
+    while time.time() < deadline:
+        try:
+            _, data = api.request(
+                "GET",
+                f"/api/v1/edge/devices/{urllib.parse.quote(device_id)}/discovery/candidates",
+                query={"organization_id": org_id},
+            )
+            last = data.get("candidates") or []
+            if last:
+                return last
+        except Exception:
+            pass
+        time.sleep(3)
+    return last
+
+
+def select_candidate(candidates):
+    usable = [c for c in candidates if c.get("candidate_key")]
+    return choose_from_list(
+        "Cámara detectada",
+        usable,
+        lambda c: (
+            f"{c.get('endpoint_host') or '?'} "
+            f"{c.get('manufacturer') or ''} {c.get('model') or ''} "
+            f"[auth={'sí' if c.get('auth_required') else 'no'}, key={c.get('candidate_key')}]"
+        ).strip(),
+    )
+
+
+def camera_credential_already_assigned(api, org_id, gateway_db_id, candidate_key):
+    _, data = api.request("GET", "/api/v1/camera-credentials", query={"organization_id": org_id})
+    for cred in data.get("credentials") or []:
+        if cred.get("status") != "active":
+            continue
+        for a in cred.get("assignments") or []:
+            if str(a.get("gateway_device_id")) == str(gateway_db_id) and a.get("candidate_key") == candidate_key:
+                return True, cred
+    return False, None
+
+
+def configure_camera_credential(api, org_id, site_id, device_id, gateway_db_id, candidate):
+    key = candidate["candidate_key"]
+    assigned, cred = camera_credential_already_assigned(api, org_id, gateway_db_id, key)
+    if assigned:
+        print(f"OK: la cámara ya tiene credencial SaaS asignada ({cred.get('name')}).")
+        return False
+
+    print("\n== Credenciales de la cámara ==")
+    cam_user = input("Usuario ONVIF/RTSP de la cámara: ").strip()
+    cam_pass = getpass.getpass("Password ONVIF/RTSP de la cámara: ")
+    if not cam_user or not cam_pass:
+        raise RuntimeError("Usuario/password de cámara vacíos.")
+
+    name = f"Camera {candidate.get('endpoint_host') or key[:12]} / {socket.gethostname()}"
+    _, data = api.request(
+        "POST",
+        "/api/v1/camera-credentials",
+        {
+            "name": name[:128],
+            "scope": "device",
+            "username": cam_user,
+            "password": cam_pass,
+            "site_id": site_id,
+        },
+        query={"organization_id": org_id},
+    )
+    cam_pass = None
+    cred_id = (data.get("credential") or {}).get("id")
+    if not cred_id:
+        raise RuntimeError("SaaS creó la credencial pero no devolvió su id.")
+
+    api.request(
+        "POST",
+        f"/api/v1/camera-credentials/{cred_id}/assignments",
+        {"device_id": device_id, "candidate_key": key},
+        query={"organization_id": org_id},
+    )
+    print("OK: credencial de cámara cifrada en SaaS y asignada al candidato.")
+    return True
+
+
+def local_identifier_from_candidate(candidate):
+    """Identifier emitted by the Edge video pipeline.
+
+    SaaS discovery exposes a server-side SHA-256 candidate_key. That key is
+    correct for camera-credential assignment, but Edge frame ingest uses the
+    Edge's local StableIdentity (e.g. epr:uuid:...). Keep the two contracts
+    separate or every frame is rejected with 404.
+    """
+    epr = (candidate.get("epr_address") or "").strip()
+    if epr:
+        return epr if epr.startswith("epr:") else "epr:" + epr
+    return (candidate.get("candidate_key") or "").strip()
+
+
+def find_existing_camera_by_identifier(api, org_id, local_identifier):
+    """Recover an already-known SaaS camera by its prior Edge binding.
+
+    This is the recovery path: never creates a second camera just because the
+    current Gateway is new.
+    """
+    if not local_identifier:
+        return None
+    _, dev_data = api.request(
+        "GET", "/api/v1/edge/devices", query={"organization_id": org_id}
+    )
+    matches = []
+    for dev in dev_data.get("devices") or []:
+        did = dev.get("device_id")
+        if not did:
+            continue
+        try:
+            _, bound = api.request(
+                "GET",
+                f"/api/v1/edge/devices/{urllib.parse.quote(did)}/cameras",
+                query={"organization_id": org_id},
+            )
+        except Exception:
+            continue
+        for cam in bound.get("cameras") or []:
+            if cam.get("edge_camera_identifier") == local_identifier:
+                matches.append((dev, cam))
+    # Prefer a single exact physical-camera match. If duplicates exist, make
+    # the operator choose rather than guessing.
+    if len(matches) == 1:
+        dev, cam = matches[0]
+        print(
+            f"OK: cámara SaaS existente recuperada por identidad física: "
+            f"{cam.get('camera_nombre') or cam.get('nombre')} "
+            f"(id={cam.get('camera_id') or cam.get('id')}, vínculo previo={dev.get('name')})"
+        )
+        return {
+            "id": cam.get("camera_id") or cam.get("id"),
+            "nombre": cam.get("camera_nombre") or cam.get("nombre"),
+            "slot": cam.get("slot"),
+        }
+    if len(matches) > 1:
+        choices = [
+            {
+                "id": cam.get("camera_id") or cam.get("id"),
+                "nombre": cam.get("camera_nombre") or cam.get("nombre"),
+                "slot": cam.get("slot"),
+                "source": dev.get("name"),
+            }
+            for dev, cam in matches
+        ]
+        return choose_from_list(
+            "Cámara SaaS previamente vinculada a esta cámara física",
+            choices,
+            lambda c: f"{c.get('nombre')} (id={c.get('id')}, antes en {c.get('source')})",
+        )
+    return None
+
+
+def list_org_cameras(api, org_id):
+    _, data = api.request(
+        "GET", "/api/cameras", query={"organization_id": org_id, "activa": "true"}
+    )
+    return data.get("cameras") or []
+
+
+def next_free_slot(cams):
+    used = {c.get("slot") for c in cams if c.get("slot") is not None}
+    slot = 1
+    while slot in used:
+        slot += 1
+    return slot
+
+
+def create_new_camera(api, org_id, site_id, candidate):
+    cams = list_org_cameras(api, org_id)
+    slot = next_free_slot(cams)
+    default_name = f"{candidate.get('manufacturer') or ''} {candidate.get('model') or ''}".strip()
+    default_name = default_name or candidate.get("endpoint_host") or "Cámara"
+    name = input(f"Nombre visible de la cámara [{default_name}]: ").strip() or default_name
+    payload = {
+        "nombre": name,
+        "organization_id": org_id,
+        "site_id": site_id,
+        "slot": slot,
+        "processing_mode": "cloud",
+        "activa": True,
+    }
+    print(f"Creando cámara SaaS '{name}' (slot={slot})...")
+    _, data = api.request("POST", "/api/cameras", payload, query={"organization_id": org_id})
+    cam = data.get("camera") or data
+    if not cam or not cam.get("id"):
+        raise RuntimeError("SaaS creó la cámara pero no devolvió su id.")
+    print(f"OK: cámara SaaS creada (id={cam.get('id')}, slot={cam.get('slot') or slot}).")
+    return cam
+
+
+def select_saas_camera(api, org_id, site_id, local_identifier, candidate):
+    recovered = find_existing_camera_by_identifier(api, org_id, local_identifier)
+    if recovered:
+        return recovered
+
+    # Recovery must never manufacture a duplicate camera by guessing. Ask
+    # the operator explicitly whether this is a brand-new camera or one
+    # that already exists in the SaaS under a different binding.
+    print("\nNo se encontró una cámara SaaS vinculada a esta identidad física.")
+    print("  1) Crear nueva cámara")
+    print("  2) Vincular con cámara SaaS existente")
+    print("  3) Cancelar")
+    while True:
+        choice = input("Elegí número: ").strip()
+        if choice == "1":
+            return create_new_camera(api, org_id, site_id, candidate)
+        if choice == "2":
+            break
+        if choice == "3":
+            raise RuntimeError("Cancelado por el usuario: no se seleccionó ni creó cámara.")
+        print("Opción inválida.")
+
+    # Existing-camera path: show only cameras accessible in this org, and
+    # require explicit confirmation before touching a binding that could
+    # belong to another Gateway.
+    cams = list_org_cameras(api, org_id)
+    cam = choose_from_list(
+        "Cámara SaaS existente a vincular",
+        cams,
+        lambda c: f"{c.get('nombre')} (id={c.get('id')}, slot={c.get('slot')}, sitio={c.get('site_name') or 'sin sitio'})",
+    )
+    if not cam:
+        raise RuntimeError("No hay cámaras SaaS existentes para vincular en esta organización.")
+    confirm = input(
+        f"Confirmá: vincular '{cam.get('nombre')}' (id={cam.get('id')}) a este Gateway. "
+        "Esto puede reemplazar un vínculo de otro Gateway. [s/N]: "
+    ).strip().lower()
+    if confirm != "s":
+        raise RuntimeError("Cancelado por el usuario: vínculo no confirmado.")
+    return cam
+
+
+def link_camera(api, org_id, device_id, camera, candidate_key):
+    if not camera:
+        raise RuntimeError("No se pudo resolver/crear la cámara SaaS.")
+    try:
+        api.request(
+            "POST",
+            f"/api/v1/edge/devices/{urllib.parse.quote(device_id)}/cameras",
+            {"camera_id": int(camera["id"]), "edge_camera_identifier": candidate_key},
+            query={"organization_id": org_id},
+        )
+        print(f"OK: cámara SaaS '{camera.get('nombre')}' vinculada al candidate_key del Edge.")
+    except ApiError as e:
+        # El backend puede responder conflicto si el vínculo ya existe; consultar y aceptar si coincide.
+        _, current = api.request(
+            "GET",
+            f"/api/v1/edge/devices/{urllib.parse.quote(device_id)}/cameras",
+            query={"organization_id": org_id},
+        )
+        for c in current.get("cameras") or []:
+            if int(c.get("id", -1)) == int(camera["id"]) and c.get("edge_camera_identifier") == candidate_key:
+                print("OK: vínculo cámara↔Edge ya existente.")
+                return
+        raise
+
+
+def wait_camera_online(api, org_id, device_id, local_identifier, seconds=65):
+    """End-to-end gate: local stream AND at least one accepted Cloud upload.
+
+    Merely seeing RTSP online is insufficient; the regression we are repairing
+    had a healthy local pipeline while every Edge->Cloud frame was rejected 404.
+    """
+    deadline = time.time() + seconds
+    last_status = None
+    while time.time() < deadline:
+        st = local_status()
+        if st:
+            vp = st.get("video_pipeline") or {}
+            cams = vp.get("cameras") or []
+            local_ok = int(vp.get("camera_count") or 0) > 0 and any(
+                c.get("candidate_key") == local_identifier and c.get("state") == "running"
+                for c in cams
+            )
+            cloud = st.get("cloud") or {}
+            uploaded = int(cloud.get("frames_upload_succeeded") or 0)
+            failed = int(cloud.get("frames_upload_failed") or 0)
+            last_status = {
+                "local_ok": local_ok,
+                "uploaded": uploaded,
+                "failed": failed,
+            }
+            if local_ok and uploaded > 0:
+                return True, st
+        time.sleep(2)
+    return False, last_status
+
+
+def tail_log(path, n=40):
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+        return "\n".join(lines[-n:])
+    except Exception:
+        return ""
+
+
+def print_status_only(binary, env, repo, data_dir):
+    print("Procesos Edge:", pgrep_edge() or "ninguno")
+    print("Data dir:", data_dir)
+    print("Archivos:", ", ".join(p.name for p in data_dir.glob("*.json")) or "ninguno")
+    meta = safe_local_meta(data_dir)
+    print("edge_id:", meta.get("edge_id") or "N/A")
+    print("device_id:", meta.get("device_id") or "N/A")
+    ok, msg = saas_check(binary, env, repo)
+    print(msg or f"SaaS check: {'OK' if ok else 'FAIL'}")
+    st = local_status()
+    if st:
+        print(json.dumps(st, indent=2, ensure_ascii=False))
+    else:
+        print("Local /status: no disponible")
+
+
+def saas_reachable(saas_url, timeout=5):
+    """Read-only reachability probe. Never raises."""
+    try:
+        req = urllib.request.Request(saas_url, headers={"Accept": "application/json"})
+        urllib.request.urlopen(req, timeout=timeout).close()
+        return True, "OK"
+    except urllib.error.HTTPError as e:
+        # Any HTTP response (even 401/404) means the SaaS is reachable.
+        return True, f"HTTP {e.code}"
+    except Exception as e:
+        return False, str(e)
+
+
+def preflight(repo, saas_url, data_dir):
+    """Read-only checks that must pass before doing anything else."""
+    print("\n== Preflight ==")
+    binary = binary_path(repo)
+    print(f"OK: binario Edge encontrado en {binary}")
+
+    ffmpeg_path = find_ffmpeg()
+    if ffmpeg_path:
+        print(f"OK: ffmpeg encontrado en {ffmpeg_path}")
+    else:
+        print("WARN: ffmpeg no está en PATH; el pipeline de video no podrá decodificar streams.")
+
+    ok, detail = saas_reachable(saas_url)
+    print(f"{'OK' if ok else 'WARN'}: SaaS ({saas_url}) {'accesible' if ok else 'no accesible'}: {detail}")
+
+    if data_dir.exists():
+        mode = oct(data_dir.stat().st_mode & 0o777)
+        print(f"Data dir existente: {data_dir} (permisos {mode})")
+    else:
+        print(f"Data dir a crear: {data_dir}")
+
+    running = pgrep_edge()
+    if running:
+        print(f"INFO: geocam-edge run ya está corriendo (PID {', '.join(map(str, running))}); se reiniciará para dejar una sola instancia limpia.")
+    else:
+        print("INFO: no hay geocam-edge run corriendo actualmente.")
+
+    return binary, ffmpeg_path
+
+
+def diagnose(binary, env, repo, data_dir, saas_url):
+    """Read-only, deeper diagnostic. Never mutates local or remote state."""
+    print("GEO CAM Edge - Diagnóstico")
+    print("==========================")
+    b, ffmpeg_path = preflight(repo, saas_url, data_dir)
+    print("\n== Estado local ==")
+    print_status_only(binary, env, repo, data_dir)
+    log_ok = DEFAULT_LOG.exists()
+    print(f"\nLog persistente: {DEFAULT_LOG} ({'existe' if log_ok else 'no existe todavía'})")
+    if log_ok:
+        print("Últimas líneas:")
+        print(tail_log(DEFAULT_LOG, n=20))
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Levanta y configura GEO CAM Edge local de punta a punta.")
+    parser.add_argument("--status", action="store_true", help="Solo diagnostica; no modifica ni inicia nada.")
+    parser.add_argument("--diagnose", action="store_true", help="Diagnóstico extendido; solo lectura, no modifica ni inicia nada.")
+    parser.add_argument("--saas-url", default=DEFAULT_SAAS)
+    parser.add_argument("--data-dir", default=str(DEFAULT_DATA_DIR))
+    args = parser.parse_args()
+
+    repo = Path(__file__).resolve().parent
+    data_dir = Path(args.data_dir).expanduser().resolve()
+
+    if args.diagnose:
+        binary = binary_path(repo)
+        env = edge_env(data_dir, args.saas_url, find_ffmpeg())
+        diagnose(binary, env, repo, data_dir, args.saas_url)
+        return 0
+
+    binary, ffmpeg_path = preflight(repo, args.saas_url, data_dir)
+    env = edge_env(data_dir, args.saas_url, ffmpeg_path)
+
+    print("\nGEO CAM Edge bootstrap local")
+    print("===========================")
+    print("Repo:    ", repo)
+    print("Binario: ", binary)
+    print("Data dir:", data_dir)
+    print("SaaS:    ", args.saas_url)
+
+    if args.status:
+        print_status_only(binary, env, repo, data_dir)
+        return 0
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(data_dir, 0o700)
+    hints = old_hints()
+
+    print("\n== Identidad local ==")
+    edge_id = edge_identity(binary, env, repo)
+    print(f"Identidad canónica: {edge_id}")
+
+    # Siempre detener una instancia previa para que el flujo sea determinista.
+    stop_edge()
+
+    api = SaaS(args.saas_url)
+    profile = None
+    org_id = None
+    site_id = None
+
+    creds_path = data_dir / "credentials.json"
+    creds_ok = False
+    if creds_path.exists():
+        creds_ok, msg = saas_check(binary, env, repo)
+        print(msg)
+    if not creds_ok:
+        profile = api.login_admin()
+        org_id, site_id = resolve_org_site(api, profile, hints)
+        ensure_enrollment(api, profile, binary, env, repo, data_dir, org_id, site_id)
+
+    meta = safe_local_meta(data_dir)
+    device_id = meta.get("device_id")
+    if not device_id:
+        raise RuntimeError("No quedó device_id en credentials.json después del enrollment.")
+
+    # Si ya estaba enrolado, necesitamos una sesión admin para discovery/configuración de cámara.
+    if profile is None:
+        profile = api.login_admin()
+        org_id, site_id = resolve_org_site(api, profile, {
+            **hints,
+            "org_id": _to_int(meta.get("tenant_id")) or hints.get("org_id"),
+            "site_id": _to_int(meta.get("site_id")) or hints.get("site_id"),
+        })
+
+    current_dev = get_current_device(api, org_id, device_id)
+    if not current_dev:
+        raise RuntimeError(f"El SaaS no lista el device_id recién enrolado: {device_id}")
+    gateway_db_id = current_dev.get("id")
+    print(f"OK: Gateway SaaS device_id={device_id}, db_id={gateway_db_id}")
+
+    print("\n== Primer arranque ==")
+    start_edge(binary, env, repo, DEFAULT_LOG, data_dir)
+    st = wait_status()
+    print(f"Estado local: {st.get('status')}; credential_status={st.get('credential_status')}")
+
+    request_discovery(api, org_id, device_id)
+    candidates = wait_candidates(api, org_id, device_id)
+    if not candidates:
+        raise RuntimeError(
+            "El discovery SaaS no recibió candidatos en 65s.\n"
+            "Últimos logs:\n" + tail_log(DEFAULT_LOG)
+        )
+    candidate = select_candidate(candidates)
+    if not candidate:
+        raise RuntimeError("No hay candidato de cámara utilizable.")
+    candidate_key = candidate["candidate_key"]
+    print(f"Candidate seleccionado: {candidate.get('endpoint_host')} / {candidate_key}")
+
+    changed_creds = False
+    if candidate.get("auth_required"):
+        changed_creds = configure_camera_credential(
+            api, org_id, site_id, device_id, gateway_db_id, candidate
+        )
+    else:
+        print("INFO: la cámara no reporta autenticación requerida; no se pide usuario/password.")
+
+    # IMPORTANT: SaaS discovery candidate_key is a server fingerprint used
+    # for credential assignment. Frames from the Edge carry its local stable
+    # identity (normally epr:uuid:...), which must be the binding identifier.
+    local_identifier = local_identifier_from_candidate(candidate)
+    if not local_identifier:
+        raise RuntimeError("No se pudo derivar la identidad local de la cámara.")
+    print(f"Identidad Edge para frames: {local_identifier}")
+
+    camera = select_saas_camera(api, org_id, site_id, local_identifier, candidate)
+    link_camera(api, org_id, device_id, camera, local_identifier)
+
+    # Forzar sync inmediato de camera credentials y reconciliación limpia.
+    print("\n== Arranque final ==")
+    if changed_creds:
+        print("Reiniciando Edge para forzar sync inmediato de credenciales de cámara...")
+    start_edge(binary, env, repo, DEFAULT_LOG, data_dir)
+    st = wait_status()
+    ok, detail = wait_camera_online(api, org_id, device_id, local_identifier)
+
+    print("\n===========================")
+    if ok:
+        final = local_status() or st
+        vp = final.get("video_pipeline") or {}
+        cloud = final.get("cloud") or {}
+        print("RESULTADO: OK")
+        print(f"Gateway: {device_id}")
+        print(f"Cámara: {camera.get('nombre') or candidate.get('endpoint_host')} / {candidate.get('endpoint_host')} / {candidate.get('model') or '?'}")
+        print("RTSP: ONLINE")
+        print("Pipeline: RUNNING")
+        print(f"Frames Cloud aceptados: {cloud.get('frames_upload_succeeded')}")
+        print("SaaS: OK")
+        print(f"Log: {DEFAULT_LOG}")
+        return 0
+
+    print("RESULTADO: INCOMPLETO")
+    print("El Edge está corriendo, pero la cámara no llegó a ONLINE dentro del timeout.")
+    print("Detalle:", detail)
+    print("\nÚltimos logs:")
+    print(tail_log(DEFAULT_LOG))
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\nCancelado por el usuario.")
+        sys.exit(130)
+    except Exception as e:
+        print(f"\nERROR: {e}", file=sys.stderr)
+        sys.exit(1)

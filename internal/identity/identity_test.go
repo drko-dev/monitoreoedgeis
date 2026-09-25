@@ -62,6 +62,36 @@ func TestLoadCreatesAndPersists(t *testing.T) {
 	}
 }
 
+func TestLoadExistingMissingDoesNotCreateIdentity(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := LoadExisting(dir); !errors.Is(err, ErrMissing) {
+		t.Fatalf("LoadExisting() error=%v, want ErrMissing", err)
+	}
+	if _, err := os.Stat(identityPath(dir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("LoadExisting created identity.json: %v", err)
+	}
+}
+
+func TestLoadExistingRejectsCorruptIdentityWithoutReplacingIt(t *testing.T) {
+	dir := t.TempDir()
+	path := identityPath(dir)
+	corrupt := []byte("{not json")
+	if err := os.WriteFile(path, corrupt, 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	if _, err := LoadExisting(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("LoadExisting() error=%v, want ErrCorrupt", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile after LoadExisting: %v", err)
+	}
+	if string(after) != string(corrupt) {
+		t.Fatalf("LoadExisting changed corrupt identity: %q", after)
+	}
+}
+
 func TestLoadCreatesDataDirRestrictive(t *testing.T) {
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "nested", "data")

@@ -37,7 +37,14 @@ func TestIdentityReportNoSecrets(t *testing.T) {
 }
 
 func TestCheckReportReady(t *testing.T) {
-	snap := health.Snapshot{Status: health.StateReady, EdgeID: "edge-1", Version: "0.1.0"}
+	snap := health.Snapshot{
+		Status:  health.StateReady,
+		EdgeID:  "edge-1",
+		Version: "0.1.0",
+		Operational: health.OperationalReadiness{
+			State: "READY", ExpectedCameraCount: 1, PipelineCameraCount: 1, ActivePipelineCameraCount: 1,
+		},
+	}
 
 	report, ready := checkReport(snap)
 
@@ -46,6 +53,94 @@ func TestCheckReportReady(t *testing.T) {
 	}
 	if !strings.Contains(report, "READY") {
 		t.Errorf("report missing status:\n%s", report)
+	}
+}
+
+func TestCheckReportRequiresKnownOperationalState(t *testing.T) {
+	for _, state := range []string{"", "FUTURE_STATE", "DEGRADED", "WAITING", "NOT_CONFIGURED"} {
+		t.Run(state, func(t *testing.T) {
+			snap := health.Snapshot{
+				Status:      health.StateReady,
+				Operational: health.OperationalReadiness{State: state},
+			}
+			if _, ready := checkReport(snap); ready {
+				t.Fatalf("checkReport accepted operational state %q", state)
+			}
+		})
+	}
+}
+
+func TestCheckReportAcceptsOnlyReadyOrIntentionalNoMedia(t *testing.T) {
+	tests := []struct {
+		name      string
+		state     string
+		profile   config.Profile
+		wantReady bool
+	}{
+		{name: "ready workload", state: "READY", profile: config.ProfileGateway, wantReady: true},
+		{name: "deliberate no-media profile", state: "NOT_CONFIGURED", profile: config.ProfileGatewayNoMedia, wantReady: true},
+		{name: "not configured with media profile", state: "NOT_CONFIGURED", profile: config.ProfileGateway},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snap := health.Snapshot{
+				Status:      health.StateReady,
+				Profile:     tt.profile,
+				Operational: health.OperationalReadiness{State: tt.state},
+			}
+			if _, ready := checkReport(snap); ready != tt.wantReady {
+				t.Fatalf("checkReport ready=%v, want %v", ready, tt.wantReady)
+			}
+		})
+	}
+}
+
+func TestConfigReportRedactsUnsafeSaaSURL(t *testing.T) {
+	cfg := &config.Config{
+		SaaSURL:        "https://dummy-user:dummy-pass@example.test/?token=dummy-token",
+		ProcessingMode: config.ModeCloud,
+	}
+	report := configReport(cfg, platform.Info{}, credentials.Credentials{}, false)
+	for _, secret := range []string{"dummy-user", "dummy-pass", "dummy-token"} {
+		if strings.Contains(report, secret) {
+			t.Fatalf("config report leaked %q:\n%s", secret, report)
+		}
+	}
+	if !strings.Contains(report, "example.test") || !strings.Contains(report, "%5Bredacted%5D") {
+		t.Fatalf("config report lost safe URL or redaction:\n%s", report)
+	}
+}
+
+func TestWindowsManagedServiceInstallIsDisabled(t *testing.T) {
+	if serviceInstallSupported("windows") {
+		t.Fatal("native Windows service installation must remain disabled")
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		if !serviceInstallSupported(goos) {
+			t.Errorf("service installation unexpectedly disabled for declared platform %q", goos)
+		}
+	}
+}
+
+func TestCheckReportRejectsFalseProcessReadyWhenCameraPipelineMissing(t *testing.T) {
+	snap := health.Snapshot{
+		Status:  health.StateReady,
+		EdgeID:  "edge-1",
+		Version: "0.1.0",
+		Operational: health.OperationalReadiness{
+			State: "DEGRADED", ExpectedCameraCount: 1, PipelineCameraCount: 0,
+			Reasons: []string{"expected_camera_pipeline_missing"},
+		},
+	}
+
+	report, ready := checkReport(snap)
+	if ready {
+		t.Fatal("checkReport ready=true while an expected camera has no pipeline")
+	}
+	for _, want := range []string{"operational:      DEGRADED", "expected_cameras: 1", "pipeline_cameras: 0", "expected_camera_pipeline_missing"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("report missing %q:\n%s", want, report)
+		}
 	}
 }
 
