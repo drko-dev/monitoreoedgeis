@@ -1,0 +1,23 @@
+{
+  "schema_version": "anpr_candidate_v1",
+  "camera_key": "cam-north-01",
+  "candidate_id": "cam-north-01:1001:0:cam-north-01|corr:evt-abc",
+  "burst_id": "cam-north-01|corr:evt-abc:1",
+  "frame_seq": 1001,
+  "timestamp": "2026-09-25T14:03:11.500Z",
+  "correlation_id": "evt-abc",
+  "vehicle_bbox": {"x0": 100, "y0": 200, "x1": 400, "y1": 500},
+  "plate_bbox": {"x0": 175, "y0": 410, "x1": 325, "y1": 470},
+  "quality_hints": {
+    "width": 300,
+    "height": 300,
+    "area": 90000,
+    "vehicle_confidence": 0.91,
+    "plate_region_confidence": 0.62
+  },
+  "processing_mode": "hybrid",
+  "source": "edge",
+  "payload_ref": "obj-store://crops/cam-north-01/1001-0.jpg",
+  "payload_content_type": "image/jpeg",
+  "payload_size_bytes": 18422
+}

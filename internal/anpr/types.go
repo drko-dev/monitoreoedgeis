@@ -12,8 +12,14 @@ import "time"
 // against a specific frame's bounds (fully or partially inside/outside) is a
 // separate concern handled by crop clamping (see crop.go) — a BBox can be
 // structurally Valid() yet still extend beyond a given frame's edges.
+// JSON field names are explicit lower-snake-case (cross-repo contract, C1):
+// the wire shape must not depend on Go's default capitalized-field
+// marshaling, which the SaaS side does not share.
 type BBox struct {
-	X0, Y0, X1, Y1 float64
+	X0 float64 `json:"x0"`
+	Y0 float64 `json:"y0"`
+	X1 float64 `json:"x1"`
+	Y1 float64 `json:"y1"`
 }
 
 // Valid reports whether b is structurally well-formed: non-inverted and
