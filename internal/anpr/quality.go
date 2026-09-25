@@ -5,17 +5,20 @@ import "sort"
 // QualityHints are technical hints only — never a final OCR/read-quality
 // decision (that remains the SaaS/OCR pipeline's job). Optional fields are
 // pointers so "not computed" is distinguishable from "computed as zero".
+// JSON field names are explicit lower-snake-case (cross-repo contract, C1),
+// matching BBox's rationale.
 type QualityHints struct {
-	Width, Height int
-	Area          int
+	Width  int `json:"width"`
+	Height int `json:"height"`
+	Area   int `json:"area"`
 	// BrightnessHint/BlurHint/RelativePlateSize/PlateRegionConfidence are
 	// optional adapter-supplied scores (no OpenCV dependency inside this
 	// package — PREP never computes them itself).
-	BrightnessHint        *float64
-	BlurHint              *float64
-	RelativePlateSize     *float64
-	VehicleConfidence     float64
-	PlateRegionConfidence *float64
+	BrightnessHint        *float64 `json:"brightness_hint,omitempty"`
+	BlurHint              *float64 `json:"blur_hint,omitempty"`
+	RelativePlateSize     *float64 `json:"relative_plate_size,omitempty"`
+	VehicleConfidence     float64  `json:"vehicle_confidence"`
+	PlateRegionConfidence *float64 `json:"plate_region_confidence,omitempty"`
 }
 
 // score returns a single deterministic ranking value from QualityHints.
