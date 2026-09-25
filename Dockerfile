@@ -10,8 +10,9 @@ ARG TARGETARCH
 
 WORKDIR /src
 
-# No third-party dependencies yet, so go.mod alone is the dependency layer.
-COPY go.mod ./
+# Keep the module checksum file in the dependency layer so Docker builds are
+# reproducible now that the runtime uses golang.org/x/sys.
+COPY go.mod go.sum ./
 RUN go mod download
 
 COPY cmd ./cmd
@@ -25,6 +26,13 @@ RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
       -X github.com/drko-dev/monitoreoedgeis/internal/agent.Commit=${COMMIT} \
       -X github.com/drko-dev/monitoreoedgeis/internal/agent.BuildDate=${BUILD_DATE}" \
     -o /out/geocam-edge ./cmd/geocam-edge
+RUN mkdir -p /out/geocam-data
+
+# Export only the deployment artifact for the CI multi-arch stage. Exporting
+# the whole golang base filesystem through BuildKit's local exporter can
+# fail on root-owned metadata unrelated to this binary.
+FROM scratch AS build-artifact
+COPY --from=build /out/geocam-edge /out/geocam-edge
 
 # Static, multi-arch (linux/amd64 + linux/arm64) ffmpeg binary for Hito H's
 # video decode pipeline (internal/processing), run as an OS subprocess via
@@ -111,6 +119,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=build /out/geocam-edge /usr/local/bin/geocam-edge
 COPY --from=ffmpeg-build /out/usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
+COPY --from=build --chown=nonroot:nonroot /out/geocam-data /var/lib/geocam-edge
 
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/geocam-edge"]
