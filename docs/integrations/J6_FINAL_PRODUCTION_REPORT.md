@@ -102,15 +102,50 @@ OCR-through-accepted-evidence chain is proven separately, same production code, 
   (`internal/transport` `PostANPRCandidate`, including a real `multipart.Reader` parse of the
   request server-side).
 
+## HIGH_SPEED_LPR (real, closed)
+
+Baseline -> burst -> automatic release, backed by the REAL `processing.Sampler` -- no
+`SetTargetFPS` hack, no second sampler.
+
+- **Baseline**: captured from the camera's live `TargetFPS` the moment its FIRST active burst
+  requests a boost (whatever J4/J5's adaptive sampler, or a prior remote-config apply, had already
+  set -- never assumed).
+- **Burst**: `anpr.BurstManager` calls `BurstSamplingHint.RequestBurstFPS(cameraKey, burstID, fps)`
+  exactly once when a burst genuinely opens (never repeated for later frames of the same burst),
+  and `ReleaseBurstFPS` on every terminal transition (FULL, CLOSED, EXPIRED, and the overflow-cap
+  early-FULL path) -- never duplicated, never orphaned. Dedupe/capacity-reject/unauthorized
+  candidates never reach burst creation, so they never request a boost, by construction.
+- **Composition**: `samplerBurstHint` (`internal/agent`) tracks every active burst's requested FPS
+  per camera and applies the MAX of them; releasing one burst never drops below what another still
+  needs; the last release restores the captured baseline deterministically.
+- **Source of `burst_fps`/`burst_duration_ms`**: the SaaS's own canonical
+  `plate_capture_burst` execution profile (`ai_capability_execution_profiles`, migration 053:
+  `burst_fps=15`, `burst_duration_ms=3000`), transported through `CameraANPRConfig` -- never
+  invented on the Edge.
+- **Ceiling**: every requested boost is clamped to `config.MaxVideoTargetFPS`, the SAME technical
+  ceiling remote-config itself already validates ordinary `TargetFPS` changes against.
+- **Remote config, real (not fixture-only)**: `GET /api/v1/edge/remote-config/next` on the SaaS
+  now computes and merges a live `anpr` block per linked camera on every poll, sourced from J3's
+  own canonical resolver (`effective_capabilities.resolve_effective_camera_configuration`) --
+  never admin-settable (`extra="forbid"` rejects a fabricated field), never a second authorization
+  source. A live plan/org/camera capability change (enable, disable, or a burst-profile edit)
+  reaches the Edge on its very next poll, via the existing already-idempotent
+  `save_edge_remote_config` (it only bumps the document version when the canonical content
+  genuinely changed) -- no second protocol, no second poll loop.
+- **Revocation / config-change-in-vivo**: verified -- disabling `plate_recognition` (or its
+  `HighSpeedLPR` flag) mid-burst is picked up by the projection immediately; on the Edge, the
+  authorizer denies new candidates on the very next tick and any active boost releases once its
+  burst closes/expires (no candidate ever opens a NEW boosted burst once denied).
+
 ## Known limitations
 
-- `HIGH_SPEED_LPR` sampling-hint wiring to the real frame sampler (item #36/#79) is scaffolded in
-  the remote-config schema (`CameraANPRConfig.HighSpeedLPR`) but not yet connected to
-  `processing.Sampler`'s actual FPS adjustment -- documented as a fast-follow, not silently claimed
-  done.
 - Edge-only ANPR is out of scope by design (final OCR/consensus lives in the SaaS); fails closed.
 - No physical camera was used anywhere in this integration -- every frame is either a real
-  synthetic fixture or a controlled replay, explicitly labeled as such throughout.
+  synthetic fixture or a controlled replay, explicitly labeled as such throughout. The real FPS
+  elevation logic (baseline capture, multi-burst composition, deterministic release) is proven
+  against a real `processing.Sampler`-shaped fake controller (`internal/agent`'s
+  `videoFPSController` seam) rather than a live RTSP-fed pipeline -- a live-camera FPS
+  measurement was not performed.
 
 ## Explicitly out of scope (J7/J8/J9/J10)
 
