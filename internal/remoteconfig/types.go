@@ -75,6 +75,26 @@ type CameraConfig struct {
 	OutputWidth  *int               `json:"output_width,omitempty"`
 	OutputHeight *int               `json:"output_height,omitempty"`
 	HybridROIs   []config.HybridROI `json:"hybrid_rois,omitempty"`
+
+	// ANPR carries the minimal desired effective state for Hito J6
+	// (plate_recognition) SaaS already resolved (catalog/entitlement/
+	// override/kill-switch) -- this field is only ever a fail-closed cache
+	// of that already-resolved decision, never a second place J2/J3 logic
+	// gets re-derived (item 37: "el SaaS ya resolvió effective capability;
+	// Edge sólo consume desired effective state").
+	ANPR *CameraANPRConfig `json:"anpr,omitempty"`
+}
+
+// CameraANPRConfig is the per-camera ANPR/LPR desired state (item 37).
+// Absent (nil) or Enabled=false means DENY -- the same fail-closed default
+// as anpr.DenyAllAuthorizer (item 38: "cuando no exista config válida: deny
+// ANPR").
+type CameraANPRConfig struct {
+	Enabled bool `json:"enabled"`
+	// HighSpeedLPR opts a camera into the bounded high-sampling burst
+	// profile (item 36/79). Never auto-activated by this config alone --
+	// the sampler still applies its own caps/TTL/revert-to-baseline.
+	HighSpeedLPR bool `json:"high_speed_lpr,omitempty"`
 }
 
 // Validate checks that cfg satisfies all technical and security bounds.

@@ -184,21 +184,43 @@ func ExtractJPEG(frame processing.Frame, result CropResult) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("anpr: decode source frame: %w", err)
 	}
+	return cropImageToJPEG(img, result)
+}
 
+// ExtractJPEGFromEncoded crops an ALREADY JPEG-encoded full frame -- the
+// bytes vision.EventConsumer.ConsumeInference actually receives, since the
+// raw processing.Frame is not passed to that callback -- to
+// result.ClampedBBox and re-encodes the crop. Shares cropImageToJPEG with
+// ExtractJPEG rather than duplicating the rect-clamp/draw/encode logic;
+// only the decode step differs.
+//
+// Same frame-ownership guarantee as ExtractJPEG (item 19/74): the returned
+// bytes never alias fullFrameJPEG's backing array.
+func ExtractJPEGFromEncoded(fullFrameJPEG []byte, result CropResult) ([]byte, error) {
+	img, err := jpeg.Decode(bytes.NewReader(fullFrameJPEG))
+	if err != nil {
+		return nil, fmt.Errorf("anpr: decode source jpeg: %w", err)
+	}
+	return cropImageToJPEG(img, result)
+}
+
+// cropImageToJPEG crops img to result.ClampedBBox and JPEG-encodes the
+// crop. Shared by both ExtractJPEG entry points.
+func cropImageToJPEG(img image.Image, result CropResult) ([]byte, error) {
 	rect := image.Rect(
 		int(result.ClampedBBox.X0), int(result.ClampedBBox.Y0),
 		int(result.ClampedBBox.X0)+result.OutputWidth, int(result.ClampedBBox.Y0)+result.OutputHeight,
 	)
 	// Intersect defensively against the decoded image's actual bounds, in
-	// case frame.OutputWidth/Height ever disagrees with the crop's source
-	// dimensions — never index out of range.
+	// case the crop's source dimensions ever disagree with it — never
+	// index out of range.
 	rect = rect.Intersect(img.Bounds())
 	if rect.Empty() {
 		return nil, ErrCropZeroArea
 	}
 
-	// Copy (not SubImage-and-share) so the returned bytes never alias
-	// frame.Data's backing array.
+	// Copy (not SubImage-and-share) so the returned bytes never alias the
+	// source image's backing array.
 	cropped := image.NewRGBA(image.Rect(0, 0, rect.Dx(), rect.Dy()))
 	draw.Draw(cropped, cropped.Bounds(), img, rect.Min, draw.Src)
 

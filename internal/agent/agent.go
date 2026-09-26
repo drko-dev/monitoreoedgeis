@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/drko-dev/monitoreoedgeis/internal/anpr"
 	"github.com/drko-dev/monitoreoedgeis/internal/cameracreds"
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/control"
@@ -66,6 +67,7 @@ type Agent struct {
 	control             *control.Module
 	fullEdgeService     *fulledge.Service
 	fullEdgeConsumer    *fullEdgeEventConsumer
+	anprRegistry        *anpr.Registry
 	localEvents         *edgebacklog.Backlog
 	modules             *moduleManager
 }
@@ -214,7 +216,14 @@ func New(cfg *config.Config) *Agent {
 				log.Warn("full edge: failed to initialize clip capture", slog.Any("error", clipErr))
 			}
 		}
+		a.anprRegistry = newAnprRegistry(func() remoteconfig.RuntimeConfig {
+			if a.runtimeApplier == nil {
+				return remoteconfig.RuntimeConfig{}
+			}
+			return a.runtimeApplier.CurrentConfig()
+		})
 		a.fullEdgeConsumer = newFullEdgeEventConsumer(a.fullEdgeService, producer, clipper, nil, cfg.DataDir, log)
+		a.fullEdgeConsumer.SetAnprRegistry(a.anprRegistry)
 	}
 
 	if cfg.ConnectivityEnabled {

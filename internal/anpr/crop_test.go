@@ -195,3 +195,73 @@ func makeYUV420P(w, h int, fill byte) []byte {
 	}
 	return buf
 }
+
+// Hito J6 hybrid wiring: ExtractJPEGFromEncoded crops an already-encoded
+// full-frame JPEG (what vision.EventConsumer.ConsumeInference actually
+// receives) instead of a raw processing.Frame.
+func TestExtractJPEGFromEncoded_ProducesValidCrop(t *testing.T) {
+	w, h := 32, 32
+	frame := processing.Frame{Data: makeYUV420P(w, h, 128), OutputWidth: w, OutputHeight: h}
+	fullFrameJPEG, err := ExtractJPEG(frame, mustCropResult(t, BBox{X0: 0, Y0: 0, X1: float64(w), Y1: float64(h)}, w, h))
+	if err != nil {
+		t.Fatalf("build fixture full-frame jpeg: %v", err)
+	}
+
+	result := mustCropResult(t, BBox{X0: 4, Y0: 4, X1: 12, Y1: 12}, w, h)
+	cropped, err := ExtractJPEGFromEncoded(fullFrameJPEG, result)
+	if err != nil {
+		t.Fatalf("ExtractJPEGFromEncoded: %v", err)
+	}
+	if len(cropped) == 0 {
+		t.Fatal("expected non-empty jpeg output")
+	}
+	img, err := jpeg.Decode(bytes.NewReader(cropped))
+	if err != nil {
+		t.Fatalf("decode cropped jpeg: %v", err)
+	}
+	if img.Bounds().Dx() != 8 || img.Bounds().Dy() != 8 {
+		t.Fatalf("expected 8x8 crop, got %dx%d", img.Bounds().Dx(), img.Bounds().Dy())
+	}
+}
+
+// Frame ownership (item 19/74): mutating the source slice after the call
+// must never change the already-returned crop bytes.
+func TestExtractJPEGFromEncoded_FrameOwnershipSafe(t *testing.T) {
+	w, h := 32, 32
+	frame := processing.Frame{Data: makeYUV420P(w, h, 128), OutputWidth: w, OutputHeight: h}
+	fullFrameJPEG, err := ExtractJPEG(frame, mustCropResult(t, BBox{X0: 0, Y0: 0, X1: float64(w), Y1: float64(h)}, w, h))
+	if err != nil {
+		t.Fatalf("build fixture full-frame jpeg: %v", err)
+	}
+
+	result := mustCropResult(t, BBox{X0: 2, Y0: 2, X1: 10, Y1: 10}, w, h)
+	cropped1, err := ExtractJPEGFromEncoded(fullFrameJPEG, result)
+	if err != nil {
+		t.Fatalf("ExtractJPEGFromEncoded: %v", err)
+	}
+
+	for i := range fullFrameJPEG {
+		fullFrameJPEG[i] = 0x00
+	}
+
+	cropped2 := append([]byte(nil), cropped1...)
+	if !bytes.Equal(cropped1, cropped2) {
+		t.Fatal("cropped1 was mutated after the fact -- should be an independent copy")
+	}
+}
+
+func TestExtractJPEGFromEncoded_MalformedInputRejected(t *testing.T) {
+	result := mustCropResult(t, BBox{X0: 0, Y0: 0, X1: 8, Y1: 8}, 32, 32)
+	if _, err := ExtractJPEGFromEncoded([]byte("not a jpeg"), result); err == nil {
+		t.Fatal("expected an error decoding malformed jpeg, got nil")
+	}
+}
+
+func mustCropResult(t *testing.T, bbox BBox, w, h int) CropResult {
+	t.Helper()
+	res, err := ComputeCrop(frameSpec(bbox, w, h))
+	if err != nil {
+		t.Fatalf("ComputeCrop: %v", err)
+	}
+	return res
+}
