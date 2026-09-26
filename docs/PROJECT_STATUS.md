@@ -3,6 +3,22 @@
 > Answers one question: **"¿Dónde estamos parados ahora?"**
 > Git + the final Hito Z integration are the source of truth. Historical sections below are retained as implementation history and may describe the state that existed at those earlier hitos.
 
+## Current: Hito J6 — Hybrid ANPR/LPR Production Integration
+
+| Field | Value |
+| --- | --- |
+| **BRANCH** | `integration/j6-anpr-production` |
+| **HEAD** | `2b91851d9bb370864de1b2cc6a324f455f29ae41` |
+| **BASE** | `05234f2b844724edf5e1253092c0cd440543eb10` (Hito Z) |
+| **IMPLEMENTED** | YES — candidate pipeline wired into the real local-detection consumer, remote-config authorization, CloudSink/TokenBucket reuse (no second spool/limiter), real `PostANPRCandidate` multipart transport |
+| **TESTED (unit/integration)** | YES — `go build/vet/gofmt/test -race`: all 37 packages green |
+| **VALIDATED (cross-repo E2E)** | YES — real Go client → real running SaaS `app_cloud.py` → real PostgreSQL; found and led to fixing a critical SaaS-side authorization bug (see the SaaS repo's `J6_FINAL_PRODUCTION_REPORT.md`) |
+| **MERGED** | NOT YET — PR pending |
+| **DEPLOYED** | NO — this milestone explicitly excludes deploy |
+| **KNOWN GAPS** | `HIGH_SPEED_LPR` sampling-hint not yet wired to the real FPS sampler (scaffolded in remote-config schema only); Edge-only ANPR out of scope by design |
+
+See `docs/integrations/J6_FINAL_PRODUCTION_REPORT.md` for full architecture/decisions.
+
 ## Snapshot
 
 | Field | Value |
