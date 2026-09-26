@@ -95,6 +95,13 @@ type CameraANPRConfig struct {
 	// profile (item 36/79). Never auto-activated by this config alone --
 	// the sampler still applies its own caps/TTL/revert-to-baseline.
 	HighSpeedLPR bool `json:"high_speed_lpr,omitempty"`
+	// BurstFPS/BurstDurationMS are the SaaS's own canonical execution
+	// profile values for plate_recognition (ai_capability_execution_
+	// profiles.burst_fps/burst_duration_ms, e.g. the real
+	// "plate_capture_burst" profile) -- never invented on the Edge side.
+	// Only meaningful when HighSpeedLPR is true.
+	BurstFPS        float64 `json:"burst_fps,omitempty"`
+	BurstDurationMS int     `json:"burst_duration_ms,omitempty"`
 }
 
 // Validate checks that cfg satisfies all technical and security bounds.
@@ -183,6 +190,16 @@ func Validate(cfg RuntimeConfig, knownCameras []string) error {
 			}
 			if err := validateResolution(*camCfg.OutputWidth, *camCfg.OutputHeight); err != nil {
 				return fmt.Errorf("remoteconfig: camera %q invalid resolution: %w", candidateKey, err)
+			}
+		}
+
+		// ANPR burst_fps (item #36/#79/D): same technical ceiling as any
+		// other sampling rate on this pipeline -- a burst can never exceed
+		// what the runtime allows for a normal TargetFPS request either.
+		if camCfg.ANPR != nil && camCfg.ANPR.HighSpeedLPR && camCfg.ANPR.BurstFPS != 0 {
+			if camCfg.ANPR.BurstFPS < MinVideoTargetFPS || camCfg.ANPR.BurstFPS > MaxVideoTargetFPS {
+				return fmt.Errorf("remoteconfig: camera %q anpr.burst_fps %.2f out of technical range [%.1f, %.1f]",
+					candidateKey, camCfg.ANPR.BurstFPS, MinVideoTargetFPS, MaxVideoTargetFPS)
 			}
 		}
 

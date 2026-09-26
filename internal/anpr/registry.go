@@ -32,6 +32,12 @@ type Registry struct {
 	logger   *slog.Logger
 	now      func() time.Time
 
+	// samplingHint/burstFPS: staged by WithSamplingHint, applied to
+	// burstMgr once it exists (see NewRegistry) -- both nil by default
+	// (item H).
+	samplingHint BurstSamplingHint
+	burstFPS     func(cameraKey string) (float64, bool)
+
 	cameras map[string]*CameraStatus // bounded by cfg.MaxCameras
 	metrics Metrics
 }
@@ -48,6 +54,17 @@ func WithPlateRegionProvider(p PlateRegionProvider) RegistryOption {
 func WithLogger(l *slog.Logger) RegistryOption { return func(r *Registry) { r.logger = l } }
 func WithClock(now func() time.Time) RegistryOption {
 	return func(r *Registry) { r.now = now }
+}
+
+// WithSamplingHint wires the real HIGH_SPEED_LPR sampler integration (item
+// H). burstFPS is consulted fresh per new burst (never cached at
+// construction time), so a live remote-config change takes effect
+// immediately without requiring the Registry to be rebuilt.
+func WithSamplingHint(hint BurstSamplingHint, burstFPS func(cameraKey string) (float64, bool)) RegistryOption {
+	return func(r *Registry) {
+		r.samplingHint = hint
+		r.burstFPS = burstFPS
+	}
 }
 
 // NewRegistry creates a Registry for cfg. cfg.HighSpeedLPR, if set, is
@@ -69,6 +86,9 @@ func NewRegistry(cfg Config, opts ...RegistryOption) *Registry {
 		r.provider = NoneProvider{}
 	}
 	r.burstMgr = NewBurstManager(cfg, r.now)
+	if r.samplingHint != nil {
+		r.burstMgr.SetSamplingHint(r.samplingHint, r.burstFPS)
+	}
 	return r
 }
 

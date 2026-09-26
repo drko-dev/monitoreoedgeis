@@ -60,10 +60,11 @@ func (a *remoteConfigAnprAuthorizer) ANPRAllowed(cameraKey string) bool {
 // so it safely observes a.runtimeApplier even though that field is only
 // assigned later in Agent construction -- Submit() is never called before
 // the agent finishes bootstrapping and starts receiving real frames.
-func newAnprRegistry(currentConfig func() remoteconfig.RuntimeConfig) *anpr.Registry {
+func newAnprRegistry(currentConfig func() remoteconfig.RuntimeConfig, samplingHint *samplerBurstHint) *anpr.Registry {
 	return anpr.NewRegistry(
 		defaultAnprConfig(),
 		anpr.WithAuthorizer(&remoteConfigAnprAuthorizer{current: currentConfig}),
+		anpr.WithSamplingHint(samplingHint, burstFPSFromRemoteConfig(currentConfig)),
 	)
 }
 

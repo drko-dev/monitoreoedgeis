@@ -124,6 +124,18 @@ type BurstManager struct {
 
 	dedupe      map[string]struct{}
 	dedupeOrder []string // FIFO eviction order, bounds dedupe map size
+
+	// samplingHint/burstFPS: real HIGH_SPEED_LPR wiring (item H). Both nil
+	// by default (PREP behavior, zero change) -- set via SetSamplingHint
+	// after construction. burstFPS resolves the CURRENT desired boost FPS
+	// for a camera (sourced from remote-config's CameraANPRConfig, itself
+	// a projection of the SaaS's real plate_capture_burst execution
+	// profile -- never invented here); ok=false means "no boost for this
+	// camera right now" (HighSpeedLPR disabled, camera unknown, or ANPR
+	// itself unauthorized), which is the correct default whenever nothing
+	// has explicitly opted in.
+	samplingHint BurstSamplingHint
+	burstFPS     func(cameraKey string) (fps float64, ok bool)
 }
 
 // NewBurstManager creates a BurstManager. now defaults to time.Now when
@@ -139,6 +151,44 @@ func NewBurstManager(cfg Config, now func() time.Time) *BurstManager {
 		activeCount: make(map[string]int),
 		dedupe:      make(map[string]struct{}),
 	}
+}
+
+// SetSamplingHint wires the real HIGH_SPEED_LPR sampler integration (item
+// H). Both arguments nil restores the PREP no-op default. burstFPS is
+// consulted fresh on every new burst -- never cached -- so a live
+// remote-config change (HighSpeedLPR flips, burst_fps updates) takes
+// effect on the next burst without requiring a restart.
+func (m *BurstManager) SetSamplingHint(hint BurstSamplingHint, burstFPS func(cameraKey string) (float64, bool)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.samplingHint = hint
+	m.burstFPS = burstFPS
+}
+
+// requestBoostLocked asks for a burst sampling boost, if wired and if
+// burstFPS says this camera currently wants one. Must be called with m.mu
+// held.
+func (m *BurstManager) requestBoostLocked(cameraKey, burstID string) {
+	if m.samplingHint == nil || m.burstFPS == nil {
+		return
+	}
+	fps, ok := m.burstFPS(cameraKey)
+	if !ok {
+		return
+	}
+	m.samplingHint.RequestBurstFPS(cameraKey, burstID, fps)
+}
+
+// releaseBoostLocked is always safe to call, even for a burst that never
+// requested a boost (a nil hint, or burstFPS returning ok=false at request
+// time, both mean the release below is simply a harmless no-op on the real
+// sampler side too -- see samplerBurstHint.ReleaseBurstFPS in
+// internal/agent). Must be called with m.mu held.
+func (m *BurstManager) releaseBoostLocked(cameraKey, burstID string) {
+	if m.samplingHint == nil {
+		return
+	}
+	m.samplingHint.ReleaseBurstFPS(cameraKey, burstID)
 }
 
 // Process ingests one VehicleCandidate: dedupes, applies out-of-order
@@ -174,6 +224,10 @@ func (m *BurstManager) Process(v VehicleCandidate) (*CandidateBurst, PlateCandid
 		burst = m.newBurstLocked(gk, v, now)
 		m.bursts[gk] = burst
 		m.activeCount[v.CameraKey]++
+		// First frame opens the burst -> request (item I). Never repeated
+		// for subsequent frames of the SAME burst (they reuse this burst,
+		// this branch only runs on genuine creation).
+		m.requestBoostLocked(v.CameraKey, burst.BurstID)
 	}
 
 	if burst.State == BurstFull {
@@ -191,6 +245,7 @@ func (m *BurstManager) Process(v VehicleCandidate) (*CandidateBurst, PlateCandid
 		// Overflow cap reached even under SelectTopNQuality: treat as full
 		// rather than growing memory further.
 		burst.State = BurstFull
+		m.releaseBoostLocked(burst.CameraKey, burst.BurstID)
 		return nil, "", OutcomeCapacityFrames
 	}
 
@@ -209,6 +264,9 @@ func (m *BurstManager) Process(v VehicleCandidate) (*CandidateBurst, PlateCandid
 
 	if burst.FramesAdded >= burst.MaxFrames {
 		burst.State = BurstFull
+		// FULL means enough frames are already collected -- release the
+		// boost, no need to keep sampling elevated for this burst (item I).
+		m.releaseBoostLocked(burst.CameraKey, burst.BurstID)
 	}
 
 	m.recordDedupeLocked(dk)
@@ -257,6 +315,7 @@ func (m *BurstManager) cleanupExpiredLocked(now time.Time) {
 		if !b.State.terminal() && !now.Before(b.ExpiresAt) {
 			b.State = BurstExpired
 			m.activeCount[b.CameraKey]--
+			m.releaseBoostLocked(b.CameraKey, b.BurstID)
 		}
 	}
 }
@@ -275,6 +334,7 @@ func (m *BurstManager) Close(cameraKey, trackID, correlationID string) {
 	}
 	b.State = BurstClosed
 	m.activeCount[b.CameraKey]--
+	m.releaseBoostLocked(b.CameraKey, b.BurstID)
 }
 
 // Cleanup removes terminal bursts (CLOSED/EXPIRED) from memory — spec item

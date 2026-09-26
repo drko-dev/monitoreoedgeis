@@ -69,6 +69,7 @@ type Agent struct {
 	fullEdgeService     *fulledge.Service
 	fullEdgeConsumer    *fullEdgeEventConsumer
 	anprRegistry        *anpr.Registry
+	anprSamplingHint    *samplerBurstHint
 	anprTransport       *anprCloudTransport
 	localEvents         *edgebacklog.Backlog
 	modules             *moduleManager
@@ -218,12 +219,13 @@ func New(cfg *config.Config) *Agent {
 				log.Warn("full edge: failed to initialize clip capture", slog.Any("error", clipErr))
 			}
 		}
+		a.anprSamplingHint = newSamplerBurstHint()
 		a.anprRegistry = newAnprRegistry(func() remoteconfig.RuntimeConfig {
 			if a.runtimeApplier == nil {
 				return remoteconfig.RuntimeConfig{}
 			}
 			return a.runtimeApplier.CurrentConfig()
-		})
+		}, a.anprSamplingHint)
 		a.fullEdgeConsumer = newFullEdgeEventConsumer(a.fullEdgeService, producer, clipper, nil, cfg.DataDir, log)
 		a.fullEdgeConsumer.SetAnprRegistry(a.anprRegistry)
 		a.anprTransport = &anprCloudTransport{logger: log}
@@ -317,6 +319,9 @@ func New(cfg *config.Config) *Agent {
 			a.videoManager = videoMgr
 			if a.fullEdgeConsumer != nil {
 				a.fullEdgeConsumer.SetHistoryProvider(videoMgr)
+			}
+			if a.anprSamplingHint != nil {
+				a.anprSamplingHint.SetManager(videoMgr)
 			}
 
 			a.runtimeApplier = remoteconfig.NewRuntimeAdapter(
