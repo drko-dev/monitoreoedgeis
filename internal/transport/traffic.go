@@ -18,6 +18,7 @@ const (
 	TrafficEvents    TrafficCategory = "events"
 	TrafficEvidence  TrafficCategory = "evidence"
 	TrafficOTA       TrafficCategory = "ota"
+	TrafficAnpr      TrafficCategory = "anpr"
 )
 
 // TrafficCounters is a cumulative application-payload snapshot.

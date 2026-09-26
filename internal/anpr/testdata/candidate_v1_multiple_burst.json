@@ -1,0 +1,41 @@
+[
+  {
+    "schema_version": "anpr_candidate_v1",
+    "camera_key": "cam-north-01",
+    "candidate_id": "cam-north-01:1001:0:cam-north-01|corr:evt-abc",
+    "burst_id": "cam-north-01|corr:evt-abc:1",
+    "frame_seq": 1001,
+    "timestamp": "2026-09-25T14:03:11.500Z",
+    "correlation_id": "evt-abc",
+    "vehicle_bbox": {"x0": 100, "y0": 200, "x1": 400, "y1": 500},
+    "quality_hints": {"width": 300, "height": 300, "area": 90000, "vehicle_confidence": 0.91},
+    "processing_mode": "hybrid",
+    "source": "edge"
+  },
+  {
+    "schema_version": "anpr_candidate_v1",
+    "camera_key": "cam-north-01",
+    "candidate_id": "cam-north-01:1002:0:cam-north-01|corr:evt-abc",
+    "burst_id": "cam-north-01|corr:evt-abc:1",
+    "frame_seq": 1002,
+    "timestamp": "2026-09-25T14:03:11.600Z",
+    "correlation_id": "evt-abc",
+    "vehicle_bbox": {"x0": 102, "y0": 201, "x1": 402, "y1": 501},
+    "quality_hints": {"width": 300, "height": 300, "area": 90000, "vehicle_confidence": 0.92},
+    "processing_mode": "hybrid",
+    "source": "edge"
+  },
+  {
+    "schema_version": "anpr_candidate_v1",
+    "camera_key": "cam-south-02",
+    "candidate_id": "cam-south-02:1001:0:cam-south-02|corr:evt-xyz",
+    "burst_id": "cam-south-02|corr:evt-xyz:1",
+    "frame_seq": 1001,
+    "timestamp": "2026-09-25T14:03:11.500Z",
+    "correlation_id": "evt-xyz",
+    "vehicle_bbox": {"x0": 50, "y0": 60, "x1": 250, "y1": 300},
+    "quality_hints": {"width": 200, "height": 240, "area": 48000, "vehicle_confidence": 0.85},
+    "processing_mode": "hybrid",
+    "source": "edge"
+  }
+]

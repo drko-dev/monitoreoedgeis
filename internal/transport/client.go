@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -326,6 +327,67 @@ func (c *Client) PostFrameWithMetadata(ctx context.Context, deviceID, credential
 	defer resp.Body.Close()
 	n, _ := io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	c.traffic.Record(TrafficFrames, 0, n, 0)
+
+	return classifyFrameStatusWithHeader(resp.StatusCode, resp.Header)
+}
+
+// PostANPRCandidate uploads one Hito J6 ANPR/LPR candidate as
+// multipart/form-data: a "metadata" JSON part (the caller's already-built
+// ANPRCandidateEnvelope v1, including crop_sha256/crop_size_bytes) plus a
+// "crop" image/jpeg part -- never base64-in-JSON (item #18). Reuses the
+// exact same device authentication (X-Device-Id / Bearer) and status
+// classification (classifyFrameStatusWithHeader -- generic despite its
+// name: 200/202 success, 401/403 auth, 429 rate-limited, 408/5xx
+// retryable, other 4xx permanent) as PostFrame, never a second auth
+// scheme or a second retry taxonomy.
+func (c *Client) PostANPRCandidate(ctx context.Context, deviceID, credential string, metadataJSON, cropJPEG []byte) error {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	metaPart, err := writer.CreateFormField("metadata")
+	if err != nil {
+		return fmt.Errorf("transport: build anpr multipart metadata field: %w", err)
+	}
+	if _, err := metaPart.Write(metadataJSON); err != nil {
+		return fmt.Errorf("transport: write anpr multipart metadata field: %w", err)
+	}
+
+	cropPart, err := writer.CreateFormFile("crop", "crop.jpg")
+	if err != nil {
+		return fmt.Errorf("transport: build anpr multipart crop field: %w", err)
+	}
+	if _, err := cropPart.Write(cropJPEG); err != nil {
+		return fmt.Errorf("transport: write anpr multipart crop field: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("transport: close anpr multipart body: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+AnprCandidatesPath, &body)
+	if err != nil {
+		return fmt.Errorf("transport: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("X-Device-Id", deviceID)
+	req.Header.Set("Authorization", "Bearer "+credential)
+
+	totalBytes := int64(body.Len())
+	c.traffic.Record(TrafficAnpr, totalBytes, 0, 1)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("%w: POST %s", ErrTimeout, AnprCandidatesPath)
+		}
+		var netErr interface{ Timeout() bool }
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return fmt.Errorf("%w: POST %s", ErrTimeout, AnprCandidatesPath)
+		}
+		return fmt.Errorf("%w: POST %s: %w", ErrSaaSUnavailable, AnprCandidatesPath, err)
+	}
+	defer resp.Body.Close()
+	n, _ := io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	c.traffic.Record(TrafficAnpr, 0, n, 0)
 
 	return classifyFrameStatusWithHeader(resp.StatusCode, resp.Header)
 }

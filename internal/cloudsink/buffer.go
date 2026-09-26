@@ -26,21 +26,40 @@ var ErrBufferFull = errors.New("cloudsink: buffer full")
 // bufferMeta is the small JSON header written before each buffered frame's
 // raw JPEG bytes. It never carries deviceID or credential: those are read
 // fresh from CloudSink at replay time, never persisted to disk.
+//
+// Kind (Hito J6, item #28): "" (absent) or "frame" is the original,
+// pre-J6 spool format -- a legacy entry with no "kind" key unmarshals to
+// the empty string and is interpreted as a frame, exactly as before this
+// field existed. "anpr_candidate" is the only other value: the ANPR/J6
+// pipeline reuses this SAME spool rather than creating a second one.
 type bufferMeta struct {
-	CandidateKey    string    `json:"candidate_key"`
-	Seq             uint64    `json:"seq"`
-	Timestamp       time.Time `json:"timestamp"`
-	Size            int       `json:"size"`
-	ProcessingMode  string    `json:"processing_mode,omitempty"`
-	CandidateReason string    `json:"candidate_reason,omitempty"`
-	CandidateScore  float64   `json:"candidate_score,omitempty"`
-	CorrelationID   string    `json:"correlation_id,omitempty"`
+	Kind            string          `json:"kind,omitempty"`
+	CandidateKey    string          `json:"candidate_key"`
+	Seq             uint64          `json:"seq"`
+	Timestamp       time.Time       `json:"timestamp"`
+	Size            int             `json:"size"`
+	ProcessingMode  string          `json:"processing_mode,omitempty"`
+	CandidateReason string          `json:"candidate_reason,omitempty"`
+	CandidateScore  float64         `json:"candidate_score,omitempty"`
+	CorrelationID   string          `json:"correlation_id,omitempty"`
+	AnprCandidate   json.RawMessage `json:"anpr_candidate,omitempty"`
 }
 
-// BufferedFrame is one frame recovered from, or about to enter, the offline
-// spool. It carries the already-encoded JPEG (the exact bytes that would
-// have been uploaded), never the raw yuv420p.
+// KindFrame/KindAnprCandidate are the two BufferedFrame.Kind values.
+// KindFrame is also the zero value, so a legacy spool entry (written
+// before this field existed) is always interpreted as a frame.
+const (
+	KindFrame         = ""
+	KindAnprCandidate = "anpr_candidate"
+)
+
+// BufferedFrame is one item recovered from, or about to enter, the offline
+// spool -- a frame (Kind==KindFrame) or, since Hito J6, an ANPR candidate
+// (Kind==KindAnprCandidate). JPEG carries the already-encoded bytes to
+// upload in both cases (a full frame, or a plate candidate's crop); for an
+// ANPR entry, AnprCandidate additionally carries its JSON-encoded metadata.
 type BufferedFrame struct {
+	Kind            string
 	CandidateKey    string
 	Seq             uint64
 	Timestamp       time.Time
@@ -49,6 +68,7 @@ type BufferedFrame struct {
 	CandidateReason string
 	CandidateScore  float64
 	CorrelationID   string
+	AnprCandidate   json.RawMessage
 }
 
 // BufferStats is a point-in-time snapshot of I6 metrics.
@@ -365,6 +385,7 @@ func (b *Buffer) Stats() BufferStats {
 // entry.
 func writeAtomic(finalPath string, f BufferedFrame) error {
 	meta := bufferMeta{
+		Kind:            f.Kind,
 		CandidateKey:    f.CandidateKey,
 		Seq:             f.Seq,
 		Timestamp:       f.Timestamp,
@@ -373,6 +394,7 @@ func writeAtomic(finalPath string, f BufferedFrame) error {
 		CandidateReason: f.CandidateReason,
 		CandidateScore:  f.CandidateScore,
 		CorrelationID:   f.CorrelationID,
+		AnprCandidate:   f.AnprCandidate,
 	}
 	header, err := json.Marshal(meta)
 	if err != nil {
@@ -428,6 +450,7 @@ func readEntry(path string) (BufferedFrame, error) {
 			path, meta.Size, len(payload))
 	}
 	return BufferedFrame{
+		Kind:            meta.Kind,
 		CandidateKey:    meta.CandidateKey,
 		Seq:             meta.Seq,
 		Timestamp:       meta.Timestamp,
@@ -436,5 +459,6 @@ func readEntry(path string) (BufferedFrame, error) {
 		CandidateReason: meta.CandidateReason,
 		CandidateScore:  meta.CandidateScore,
 		CorrelationID:   meta.CorrelationID,
+		AnprCandidate:   meta.AnprCandidate,
 	}, nil
 }

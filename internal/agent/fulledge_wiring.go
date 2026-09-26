@@ -1,11 +1,15 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"image"
+	_ "image/jpeg" // registers the jpeg decoder for image.DecodeConfig
 	"log/slog"
 	"path/filepath"
 	"strings"
 
+	"github.com/drko-dev/monitoreoedgeis/internal/anpr"
 	"github.com/drko-dev/monitoreoedgeis/internal/edgebacklog"
 	"github.com/drko-dev/monitoreoedgeis/internal/evidence"
 	"github.com/drko-dev/monitoreoedgeis/internal/fulledge"
@@ -31,6 +35,17 @@ type fullEdgeEventConsumer struct {
 	historyProvider FrameHistoryProvider
 	dataDir         string
 	logger          *slog.Logger
+
+	// anprRegistry is nil until SetAnprRegistry is called (agent.go wires
+	// it right after construction) -- a nil registry means Hito J6
+	// candidate extraction is a strict no-op, never a panic.
+	anprRegistry *anpr.Registry
+	// anprTransport receives an accepted candidate's metadata + crop JPEG
+	// for upload. nil (the PREP default) means "not wired yet" -- a
+	// Submit() success with no transport wired is logged and dropped,
+	// never silently lost without a trace, never blocking the vision
+	// pipeline.
+	anprTransport func(candidate anpr.PlateCandidate, cropJPEG []byte)
 }
 
 func newFullEdgeEventConsumer(svc *fulledge.Service, producer edgebacklog.Producer, clipper *evidence.Clipper, history FrameHistoryProvider, dataDir string, logger *slog.Logger) *fullEdgeEventConsumer {
@@ -46,6 +61,21 @@ func newFullEdgeEventConsumer(svc *fulledge.Service, producer edgebacklog.Produc
 
 func (c *fullEdgeEventConsumer) SetHistoryProvider(hp FrameHistoryProvider) {
 	c.historyProvider = hp
+}
+
+// SetAnprRegistry wires Hito J6's candidate registry. Called once from
+// agent.go right after construction (agent.go builds the registry AFTER
+// this consumer so the registry's Authorizer closure can safely observe
+// runtimeApplier, itself assigned later still).
+func (c *fullEdgeEventConsumer) SetAnprRegistry(r *anpr.Registry) {
+	c.anprRegistry = r
+}
+
+// SetAnprTransport wires the upload hand-off for accepted candidates. See
+// internal/cloudsink for the real implementation reusing the shared
+// TokenBucket/buffer (item 28).
+func (c *fullEdgeEventConsumer) SetAnprTransport(fn func(candidate anpr.PlateCandidate, cropJPEG []byte)) {
+	c.anprTransport = fn
 }
 
 // ConsumeInference implements vision.EventConsumer.
@@ -88,6 +118,15 @@ func (c *fullEdgeEventConsumer) ConsumeInference(result vision.InferenceResult, 
 			// item #2's bbox unification).
 			BBox: fulledge.BoundingBox{X1: det.BBox[0], Y1: det.BBox[1], X2: det.BBox[2], Y2: det.BBox[3]},
 		})
+	}
+
+	// Hito J6: ANPR/LPR candidate extraction. Runs on the SAME
+	// result.Detections the local YOLO worker already produced -- never a
+	// second RTSP client, second decoder or second model execution (items
+	// #6/#31/#32). A nil registry (not yet wired, or this build has no J6
+	// support) makes this a strict no-op.
+	if c.anprRegistry != nil {
+		c.consumeAnprCandidates(result, jpeg)
 	}
 
 	events, err := c.svc.ProcessInferenceWithJPEG(fres, jpeg)
@@ -175,6 +214,61 @@ func (c *fullEdgeEventConsumer) enqueue(evt *fulledge.LocalEvent) {
 	if err := c.producer.Enqueue(sub); err != nil && c.logger != nil {
 		c.logger.Warn("full edge: failed to enqueue local event for sync",
 			slog.String("event_uuid", evt.EventUUID), slog.Any("error", err))
+	}
+}
+
+// consumeAnprCandidates maps each vehicle detection in result onto an
+// anpr.VehicleCandidate and submits it to the registry (item #32: only
+// vision.DetectionTypeVehicle, class-ID-checked, never label string
+// matching). Only ACCEPTED submissions ever touch frame bytes -- the crop
+// is extracted from the already-encoded full-frame jpeg via
+// anpr.ExtractJPEGFromEncoded (never a second decode of the raw frame,
+// since ConsumeInference doesn't receive the raw processing.Frame).
+func (c *fullEdgeEventConsumer) consumeAnprCandidates(result vision.InferenceResult, jpeg []byte) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(jpeg))
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Warn("anpr: failed to read full-frame jpeg dimensions, skipping candidate extraction",
+				slog.String("candidate_key", result.CandidateKey), slog.Any("error", err))
+		}
+		return
+	}
+
+	for _, det := range result.Detections {
+		if det.Type != vision.DetectionTypeVehicle {
+			continue
+		}
+		v := anpr.VehicleCandidate{
+			CameraKey:         result.CandidateKey,
+			FrameSeq:          result.FrameSeq,
+			Timestamp:         result.Timestamp,
+			VehicleClassID:    det.ClassID,
+			VehicleConfidence: det.Confidence,
+			VehicleBBox:       anpr.BBox{X0: det.BBox[0], Y0: det.BBox[1], X1: det.BBox[2], Y1: det.BBox[3]},
+			SourceWidth:       cfg.Width,
+			SourceHeight:      cfg.Height,
+			CorrelationID:     result.CorrelationID,
+			ProcessingMode:    "hybrid", // the only mode this local-detection consumer serves
+			CandidateReason:   "vehicle_detection",
+		}
+
+		res := c.anprRegistry.Submit(v)
+		if res.Reason != anpr.ReasonAccepted || res.Candidate == nil || res.Crop == nil {
+			continue // unauthorized/duplicate/capacity/etc. -- never logged with plate data, never fabricated
+		}
+
+		cropJPEG, err := anpr.ExtractJPEGFromEncoded(jpeg, *res.Crop)
+		if err != nil {
+			if c.logger != nil {
+				c.logger.Warn("anpr: crop extraction failed for accepted candidate",
+					slog.String("candidate_id", res.Candidate.CandidateID), slog.Any("error", err))
+			}
+			continue
+		}
+
+		if c.anprTransport != nil {
+			c.anprTransport(*res.Candidate, cropJPEG)
+		}
 	}
 }
 

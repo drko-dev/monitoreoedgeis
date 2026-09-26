@@ -33,6 +33,16 @@ type MetadataFrameSender interface {
 	PostFrameWithMetadata(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte, meta transport.FrameMetadata) error
 }
 
+// ANPRSender optionally extends FrameSender to deliver Hito J6 ANPR/LPR
+// candidates. metadataJSON is the already-encoded ANPRCandidateEnvelope v1
+// (internal/anpr's wire contract) -- CloudSink stays decoupled from the
+// anpr package's Go types, exactly as it already stays decoupled from
+// vision.Detection, and only ever relays opaque bytes plus rate-limits/
+// buffers them.
+type ANPRSender interface {
+	PostANPRCandidate(ctx context.Context, deviceID, credential string, metadataJSON []byte, cropJPEG []byte) error
+}
+
 // DefaultJPEGQuality is the standard compression quality for Cloud upload
 // (Milestone I; configurable per Milestone I7 via Config.JPEGQuality).
 const DefaultJPEGQuality = 85
@@ -455,6 +465,7 @@ func (s *CloudSink) publishStatus() {
 
 func (s *CloudSink) enqueue(f processing.Frame, jpegBytes []byte) error {
 	err := s.buffer.Enqueue(BufferedFrame{
+		Kind:            KindFrame,
 		CandidateKey:    f.CandidateKey,
 		Seq:             f.Seq,
 		Timestamp:       f.Timestamp,
@@ -463,6 +474,70 @@ func (s *CloudSink) enqueue(f processing.Frame, jpegBytes []byte) error {
 		CandidateReason: f.CandidateReason,
 		CandidateScore:  f.CandidateScore,
 		CorrelationID:   f.CorrelationID,
+	})
+	if err != nil {
+		return fmt.Errorf("cloudsink: %w", err)
+	}
+	return nil
+}
+
+// EnqueueANPRCandidate submits one Hito J6 ANPR candidate through the SAME
+// TokenBucket rate limiter and the SAME offline buffer a video frame would
+// use (items #27/#28/#29) -- never a second spool, never a second limiter.
+// metadataJSON is the already-built ANPRCandidateEnvelope v1; candidateKey/
+// timestamp are used only for buffer bookkeeping (FIFO ordering, stats),
+// never re-derived into a second identity.
+//
+// Falls back to buffering on a recoverable upload error exactly like Route
+// does for frames; on ErrThrottled or a non-recoverable error, the
+// candidate is dropped (never silently retried against a permanently
+// rejecting SaaS).
+func (s *CloudSink) EnqueueANPRCandidate(candidateKey string, timestamp time.Time, metadataJSON, cropJPEG []byte) error {
+	sender, ok := s.sender.(ANPRSender)
+	if !ok {
+		return errors.New("cloudsink: configured sender does not support ANPR candidates")
+	}
+
+	if s.buffer != nil && s.buffer.HasPending(candidateKey) {
+		return s.enqueueANPR(candidateKey, timestamp, metadataJSON, cropJPEG)
+	}
+
+	if s.limiter != nil && !s.limiter.Allow(int64(len(cropJPEG))) {
+		s.logger.Debug("anpr candidate throttled by rate limit", "candidate_key", candidateKey, "bytes", len(cropJPEG))
+		return ErrThrottled
+	}
+
+	uploadErr := s.uploadANPR(context.Background(), sender, metadataJSON, cropJPEG)
+	if uploadErr == nil {
+		return nil
+	}
+	if s.buffer != nil && isRecoverable(uploadErr) {
+		if err := s.enqueueANPR(candidateKey, timestamp, metadataJSON, cropJPEG); err != nil {
+			return fmt.Errorf("%w (buffer: %v)", uploadErr, err)
+		}
+		s.logger.Debug("anpr candidate buffered for retry", "candidate_key", candidateKey, "error", uploadErr)
+		return nil
+	}
+	return uploadErr
+}
+
+func (s *CloudSink) uploadANPR(ctx context.Context, sender ANPRSender, metadataJSON, cropJPEG []byte) error {
+	uploadCtx, cancel := context.WithTimeout(ctx, RequestTimeout)
+	defer cancel()
+	if err := sender.PostANPRCandidate(uploadCtx, s.deviceID, s.credential, metadataJSON, cropJPEG); err != nil {
+		return fmt.Errorf("cloudsink: upload anpr candidate: %w", err)
+	}
+	s.rate.record(int64(len(cropJPEG)), time.Now())
+	return nil
+}
+
+func (s *CloudSink) enqueueANPR(candidateKey string, timestamp time.Time, metadataJSON, cropJPEG []byte) error {
+	err := s.buffer.Enqueue(BufferedFrame{
+		Kind:          KindAnprCandidate,
+		CandidateKey:  candidateKey,
+		Timestamp:     timestamp,
+		JPEG:          cropJPEG,
+		AnprCandidate: metadataJSON,
 	})
 	if err != nil {
 		return fmt.Errorf("cloudsink: %w", err)
@@ -554,15 +629,25 @@ func (s *CloudSink) drainLoop(ctx context.Context) {
 			}
 		}
 
-		err = s.upload(ctx, processing.Frame{
-			CandidateKey:    f.CandidateKey,
-			Seq:             f.Seq,
-			Timestamp:       f.Timestamp,
-			ProcessingMode:  f.ProcessingMode,
-			CandidateReason: f.CandidateReason,
-			CandidateScore:  f.CandidateScore,
-			CorrelationID:   f.CorrelationID,
-		}, f.JPEG)
+		if f.Kind == KindAnprCandidate {
+			// Hito J6: replay an ANPR candidate through the SAME buffer/
+			// limiter/backoff machinery a frame would use (item #23/#28).
+			if sender, ok := s.sender.(ANPRSender); ok {
+				err = s.uploadANPR(ctx, sender, f.AnprCandidate, f.JPEG)
+			} else {
+				err = errors.New("cloudsink: configured sender does not support ANPR candidates")
+			}
+		} else {
+			err = s.upload(ctx, processing.Frame{
+				CandidateKey:    f.CandidateKey,
+				Seq:             f.Seq,
+				Timestamp:       f.Timestamp,
+				ProcessingMode:  f.ProcessingMode,
+				CandidateReason: f.CandidateReason,
+				CandidateScore:  f.CandidateScore,
+				CorrelationID:   f.CorrelationID,
+			}, f.JPEG)
+		}
 
 		switch {
 		case err == nil:

@@ -44,6 +44,12 @@ const (
 	// authenticated device and camera_id from X-Candidate-Key server-side;
 	// neither is ever sent directly by the Edge.
 	FramesPath = "/api/v1/edge/frames"
+	// AnprCandidatesPath accepts Hito J6 ANPR/LPR candidates as
+	// multipart/form-data (a "metadata" JSON part -- ANPRCandidateEnvelope
+	// v1 -- plus a "crop" image/jpeg part), never base64-in-JSON. The SaaS
+	// resolves organization_id/camera_id server-side exactly as
+	// FramesPath does; the Edge only ever sends camera_key.
+	AnprCandidatesPath = "/api/v1/edge/anpr/candidates"
 	// LocalEventsPath accepts locally produced event metadata. The SaaS derives
 	// organization and camera ownership from the authenticated edge device.
 	LocalEventsPath   = "/api/v1/edge/local-events"

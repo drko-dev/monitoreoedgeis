@@ -12,7 +12,9 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/drko-dev/monitoreoedgeis/internal/anpr"
 	"github.com/drko-dev/monitoreoedgeis/internal/cameracreds"
+	"github.com/drko-dev/monitoreoedgeis/internal/cloudsink"
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/control"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
@@ -66,6 +68,9 @@ type Agent struct {
 	control             *control.Module
 	fullEdgeService     *fulledge.Service
 	fullEdgeConsumer    *fullEdgeEventConsumer
+	anprRegistry        *anpr.Registry
+	anprSamplingHint    *samplerBurstHint
+	anprTransport       *anprCloudTransport
 	localEvents         *edgebacklog.Backlog
 	modules             *moduleManager
 }
@@ -214,7 +219,17 @@ func New(cfg *config.Config) *Agent {
 				log.Warn("full edge: failed to initialize clip capture", slog.Any("error", clipErr))
 			}
 		}
+		a.anprSamplingHint = newSamplerBurstHint()
+		a.anprRegistry = newAnprRegistry(func() remoteconfig.RuntimeConfig {
+			if a.runtimeApplier == nil {
+				return remoteconfig.RuntimeConfig{}
+			}
+			return a.runtimeApplier.CurrentConfig()
+		}, a.anprSamplingHint)
 		a.fullEdgeConsumer = newFullEdgeEventConsumer(a.fullEdgeService, producer, clipper, nil, cfg.DataDir, log)
+		a.fullEdgeConsumer.SetAnprRegistry(a.anprRegistry)
+		a.anprTransport = &anprCloudTransport{logger: log}
+		a.fullEdgeConsumer.SetAnprTransport(a.anprTransport.Send)
 	}
 
 	if cfg.ConnectivityEnabled {
@@ -271,6 +286,9 @@ func New(cfg *config.Config) *Agent {
 			var extraSinks []processing.Sink
 			if cs := newCloudSink(cfg, creds, reporter, log); cs != nil {
 				extraSinks = append(extraSinks, cs)
+				if concrete, ok := cs.(*cloudsink.CloudSink); ok && a.anprTransport != nil {
+					a.anprTransport.SetSink(concrete)
+				}
 			}
 			// Edge mode (Milestone K): local YOLO is the sole inference
 			// authority, so this replaces newCloudSink's frame stream
@@ -302,6 +320,9 @@ func New(cfg *config.Config) *Agent {
 			if a.fullEdgeConsumer != nil {
 				a.fullEdgeConsumer.SetHistoryProvider(videoMgr)
 			}
+			if a.anprSamplingHint != nil {
+				a.anprSamplingHint.SetManager(videoMgr)
+			}
 
 			a.runtimeApplier = remoteconfig.NewRuntimeAdapter(
 				cfg.ProcessingMode,
@@ -312,7 +333,13 @@ func New(cfg *config.Config) *Agent {
 				remoteconfig.WithStartTimeout(cfg.EdgeYOLOStartTimeout),
 				remoteconfig.WithInitialVisionStop(initialVisionStop),
 				remoteconfig.WithCloudSinkFactory(func() processing.Sink {
-					return buildCloudSink(cfg, creds, reporter, log)
+					sink := buildCloudSink(cfg, creds, reporter, log)
+					if concrete, ok := sink.(*cloudsink.CloudSink); ok && a.anprTransport != nil {
+						a.anprTransport.SetSink(concrete)
+					} else if a.anprTransport != nil {
+						a.anprTransport.SetSink(nil) // mode transitioned away from cloud/hybrid -- stop sending
+					}
+					return sink
 				}),
 				remoteconfig.WithVisionSinkFactory(func() (processing.Sink, func(ctx context.Context) error, func(ctx context.Context) error) {
 					var c vision.EventConsumer
