@@ -2,17 +2,25 @@ package agent
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"image"
 	"image/color"
 	"image/jpeg"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/anpr"
+	"github.com/drko-dev/monitoreoedgeis/internal/cloudsink"
 	"github.com/drko-dev/monitoreoedgeis/internal/edgebacklog"
 	"github.com/drko-dev/monitoreoedgeis/internal/fulledge"
 	"github.com/drko-dev/monitoreoedgeis/internal/remoteconfig"
+	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 	"github.com/drko-dev/monitoreoedgeis/internal/vision"
 )
 
@@ -180,4 +188,75 @@ func TestRemoteConfigAnprAuthorizer_NilCurrentFuncFailsClosed(t *testing.T) {
 	if auth.ANPRAllowed("cam-1") {
 		t.Fatal("expected deny with a nil current func")
 	}
+}
+
+// End-to-end proof that anprCloudTransport really reaches a live CloudSink
+// and a real HTTP server, with a correctly built envelope (item #17's wire
+// contract fields, sha256/size matching the actual crop bytes).
+func TestAnprCloudTransport_Send_RealCloudSinkRealHTTP(t *testing.T) {
+	var gotMetadata map[string]any
+	var gotCropLen int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != transport.AnprCandidatesPath {
+			t.Errorf("path = %q, want %q", r.URL.Path, transport.AnprCandidatesPath)
+		}
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm: %v", err)
+		}
+		if err := json.Unmarshal([]byte(r.FormValue("metadata")), &gotMetadata); err != nil {
+			t.Fatalf("unmarshal metadata: %v", err)
+		}
+		file, _, err := r.FormFile("crop")
+		if err != nil {
+			t.Fatalf("FormFile(crop): %v", err)
+		}
+		data, _ := io.ReadAll(file)
+		gotCropLen = len(data)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	client, err := transport.New(srv.URL, true, 2*time.Second, "test")
+	if err != nil {
+		t.Fatalf("transport.New: %v", err)
+	}
+	sink := cloudsink.New(client, "device-1", "cred-1", cloudsink.Config{}, slog.Default(), nil)
+	t.Cleanup(sink.Close)
+
+	xport := &anprCloudTransport{logger: slog.Default()}
+	xport.SetSink(sink)
+
+	candidate := anpr.PlateCandidate{
+		CandidateID: "cand-1", CameraKey: "cam-1", FrameSeq: 42,
+		Timestamp:   time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		VehicleBBox: anpr.BBox{X0: 10, Y0: 10, X1: 60, Y1: 90}, BurstID: "burst-1",
+	}
+	cropJPEG := []byte{0xFF, 0xD8, 0xFF, 0xD9, 0x01, 0x02, 0x03}
+
+	xport.Send(candidate, cropJPEG)
+
+	if gotMetadata["candidate_id"] != "cand-1" {
+		t.Errorf("candidate_id = %v, want cand-1", gotMetadata["candidate_id"])
+	}
+	if gotMetadata["camera_key"] != "cam-1" {
+		t.Errorf("camera_key = %v, want cam-1", gotMetadata["camera_key"])
+	}
+	if gotMetadata["schema_version"] != anprEnvelopeSchemaVersion {
+		t.Errorf("schema_version = %v, want %v", gotMetadata["schema_version"], anprEnvelopeSchemaVersion)
+	}
+	wantHash := sha256.Sum256(cropJPEG)
+	if gotMetadata["crop_sha256"] != hex.EncodeToString(wantHash[:]) {
+		t.Errorf("crop_sha256 = %v, want a hash of the actual crop bytes", gotMetadata["crop_sha256"])
+	}
+	if gotCropLen != len(cropJPEG) {
+		t.Errorf("received crop length = %d, want %d", gotCropLen, len(cropJPEG))
+	}
+}
+
+// A nil sink (no CloudSink built yet, or Edge-only mode) must never panic
+// and must never fabricate a send.
+func TestAnprCloudTransport_Send_NilSinkIsNoOp(t *testing.T) {
+	xport := &anprCloudTransport{logger: slog.Default()}
+	xport.Send(anpr.PlateCandidate{CandidateID: "cand-1", CameraKey: "cam-1"}, []byte{0x01})
+	// No assertion beyond "did not panic" -- there is nothing else to observe.
 }
