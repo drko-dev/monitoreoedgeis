@@ -12,6 +12,27 @@ This document separates three states that must not be conflated:
 
 Hardware certification, real-camera validation, CUDA validation and the physical pilot are separate validation axes. Their absence constrains commercial/field claims, but does not silently reopen a software blocker that has been implemented and tested locally.
 
+## FIELD-1 current verification — 2026-09-26
+
+Verified base: `origin/main @ 797293958fc6baaac3b94847e103e1faefb7f186`.
+
+One real Tapo TC70 was observed by local ONVIF WS-Discovery on the private LAN,
+but the device requires authentication and no authorized camera credential was
+available. No RTSP stream, SaaS identity, WAN E2E, Linux ARM64 appliance,
+systemd PID 1, CUDA runtime, power cycle, pilot, or OTA canary was executed.
+
+The local host is macOS arm64. The Go toolchain and ffmpeg are unavailable in
+this environment, so the requested `go test`, `go test -race`, `go vet`,
+`gofmt`, and artifact builds are **BLOCKED_ENVIRONMENT**, not failures.
+
+The remote repository contains a published tag-driven `v1.0.0` release
+(published 2026-09-20). Its release assets include linux/amd64 and linux/arm64
+archives, `SHA256SUMS`, and `SHA256SUMS.sig`; downloaded archives matched the
+published `SHA256SUMS` values. GitHub reports the annotated Git tag itself as
+unsigned. No local `OTA_SIGNING_KEY` or provisioned public key is available, so
+this run did not create a new release or independently verify the detached
+artifact signature. No OTA was executed.
+
 ## Current Hito Z state
 
 PR #100 completed the final integration gate **7/7 PASS** and merged unchanged
@@ -31,7 +52,7 @@ The accepted Hito Z software blockers are:
 | **B8** Hybrid saving claim | **CLOSED BY EXPLICIT 1.0 DECISION** | no quantitative saving claim is published without integrated/field measurement |
 | **B9** physical validation | **SEPARATE / NOT_VALIDATED** | tracked item by item in `docs/product/PHYSICAL_VALIDATION_REGISTER.md`; pilot + hardware certification not executed; this blocks field/commercial validation, not SOFTWARE 1.0 |
 | **B10** release ffmpeg | **CLOSED** | release workflow builds static ffmpeg for amd64/arm64 and packaging is fail-closed if ffmpeg is absent |
-| **B11** real tagged release | **NOT_VALIDATED** | no real signed `v1.0.0` release has been executed yet; this gates RELEASE 1.0, not SOFTWARE 1.0 |
+| **B11** real tagged release | **PARTIAL — REMOTE RELEASE, SIGNING TRUST NOT CLOSED** | published `v1.0.0` exists with amd64/arm64 archives, `SHA256SUMS`, and `SHA256SUMS.sig`; GitHub reports the Git tag unsigned and artifact signature could not be independently verified in this environment |
 | **B12** documentation drift | **CLOSED** | stale release/status documentation corrected during Hito Z integration |
 
 ## Software gate
@@ -74,7 +95,11 @@ The tag-driven workflow in `.github/workflows/release.yml`:
 5. signs `SHA256SUMS` with Ed25519;
 6. publishes the GitHub Release artifacts.
 
-**B11 remains NOT_VALIDATED until this workflow is actually executed for `v1.0.0`.**
+The remote `v1.0.0` release is evidence that the tag-driven packaging workflow
+completed, but it is not sufficient to close the signed-release gate here:
+GitHub reports the Git tag as unsigned and the public verification key is not
+provisioned in this environment. This FIELD-1 run did not rerun or replace the
+release because local signing material and the Go toolchain were unavailable.
 
 A real release requires the signing secret to exist. The repository cannot prove the secret is configured merely by reading source.
 

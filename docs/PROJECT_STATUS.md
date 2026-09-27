@@ -3,6 +3,23 @@
 > Answers one question: **"¿Dónde estamos parados ahora?"**
 > Git + the final Hito Z integration are the source of truth. Historical sections below are retained as implementation history and may describe the state that existed at those earlier hitos.
 
+## Current FIELD-1 physical validation snapshot
+
+| Field | Value |
+| --- | --- |
+| **BASE** | `origin/main @ 797293958fc6baaac3b94847e103e1faefb7f186` |
+| **HOST** | macOS 27 arm64; not Linux ARM64 and no systemd PID 1 |
+| **REAL CAMERA** | One Tapo TC70 observed by real ONVIF discovery; authenticated access not validated |
+| **RTSP / SaaS / WAN** | **NOT_VALIDATED** — no authorized camera or SaaS credentials available |
+| **RELEASE 1.0** | **PARTIAL — remote v1.0.0 has amd64/arm64 artifacts, SHA256SUMS and SHA256SUMS.sig; GitHub reports the Git tag unsigned** |
+| **GO / FFMPEG VALIDATION** | **BLOCKED_ENVIRONMENT** — binaries unavailable on host |
+| **MASS OTA / DEPLOYMENT** | **NOT EXECUTED** |
+
+The detailed evidence and redaction policy are recorded in
+`docs/product/PHYSICAL_VALIDATION_REGISTER.md`. The discovery result is partial
+field evidence only; it does not certify the camera, appliance, release or
+runtime.
+
 ## Current: Hito J6 — Hybrid ANPR/LPR Production Integration
 
 | Field | Value |
@@ -28,7 +45,7 @@ See `docs/integrations/J6_FINAL_PRODUCTION_REPORT.md` for full architecture/deci
 | **STATE** | **HITO Z SOFTWARE CLOSED** — final integration merged |
 | **MAIN** | `6617322549e4d9ac815317a0724b92d3e4613045` (verified against `origin/main` for Hito 2A). Hito Z closeout at `b007c88` (PR #100); commits since then are documentation only — no functional code changed (`docs(product): add the physical validation register`, `docs(deploy): clarify GEOCAM_EDGE_RETENTION_EVICT_PENDING scope`) |
 | **SOFTWARE 1.0** | **READY** — final integration CI 7/7 PASS and merged unchanged into `main` |
-| **RELEASE 1.0** | **NOT_VALIDATED** — B11: no real signed `v1.0.0` run yet |
+| **RELEASE 1.0** | **PARTIAL** — B11: published remote `v1.0.0` contains artifacts and signature asset, but GitHub reports the Git tag unsigned |
 | **DEPLOYED PROD** | **NO / NO TARGET REGISTERED** |
 | **REAL CAMERA / PILOT** | **NOT_VALIDATED / NOT EXECUTED** |
 | **HARDWARE CERTIFIED** | **NO** |
@@ -41,7 +58,7 @@ See `docs/integrations/J6_FINAL_PRODUCTION_REPORT.md` for full architecture/deci
 `B1/G1, B2, B3, B4, B5, B6, B7, B8, B10, B12 = CLOSED`.
 
 `B9` is physical validation and remains a separate validation axis.
-`B11` is the real signed release gate and remains NOT_VALIDATED until a tag-driven release actually runs.
+`B11` has partial remote release evidence but remains open until signing trust is independently verified; physical installation and OTA canary validation also remain open.
 
 PR #100 is the canonical Hito Z integration: CI 7/7 PASS, merged to `main`.
 See `docs/product/RELEASE_1_0_READINESS.md` for the authoritative distinction between SOFTWARE 1.0, RELEASE 1.0 and DEPLOYED PROD.

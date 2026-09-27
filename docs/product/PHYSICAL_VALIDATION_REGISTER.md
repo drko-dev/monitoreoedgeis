@@ -6,8 +6,8 @@ development is never read as a physical gap.
 
 | | |
 | --- | --- |
-| **Register date** | 2026-09-20 (register content) / verified against `main` again for Hito 2A |
-| **`main`** | `6617322549e4d9ac815317a0724b92d3e4613045` |
+| **Register date** | 2026-09-26 — FIELD-1 execution record |
+| **`main`** | `797293958fc6baaac3b94847e103e1faefb7f186` |
 | **SOFTWARE 1.0** | **READY** — see `docs/product/RELEASE_1_0_READINESS.md` |
 | **FIELD / HARDWARE VALIDATION** | **PENDING** — every row below is `NOT_VALIDATED` |
 
@@ -33,13 +33,34 @@ evidence, never a `FAILED` result.
 `PARTIAL` marks a row where only one of several sub-claims is covered. It is not
 a softer `YES`.
 
+## FIELD-1 execution record — 2026-09-26
+
+The validation host was a macOS 27 arm64 development machine on a private
+`192.168.0.0/24` LAN. No Linux host, systemd PID 1, Go toolchain or ffmpeg
+binary was available locally. `system_profiler SPCameraDataType` returned no
+locally attached camera device.
+
+The existing local `geocam-edge` binary executed one real WS-Discovery scan and
+observed one ONVIF device:
+
+- vendor/model: Tapo TC70;
+- ONVIF endpoint: private address redacted, port 2020;
+- device type: `NetworkVideoTransmitter`;
+- `auth_required`: `true`;
+- firmware: not read — no authorized camera credential was available.
+
+This is **real discovery evidence only**. It does not close authenticated ONVIF,
+RTSP, reconnect, WAN, SaaS E2E, hybrid bandwidth, ANPR, Linux ARM64, systemd,
+power-loss, pilot, CUDA, or release rows. No camera password, Edge identity,
+SaaS credential, remote configuration, OTA, or production system was mutated.
+
 ---
 
 ## 1. Real camera / field
 
 | Item | SW implemented | Local / simulated tested | Physical validated | Evidence required to close | Owner / environment |
 | --- | --- | --- | --- | --- | --- |
-| **ONVIF against a real device** | YES — `internal/discovery/onvif`, `internal/cameracreds`, `internal/cameratest` | YES — `onvif/wssecurity_test.go`, `cameratest/credentials_failure_test.go`; loopback `httptest` only, and `UNREACHABLE` is distinguished from `INVALID` | **NO — NOT_VALIDATED** | Vendor / model / firmware named, plus discovery and credential-provisioning output from the real device | Field operator; real camera or DVR/NVR on the target subnet |
+| **ONVIF against a real device** | YES — `internal/discovery/onvif`, `internal/cameracreds`, `internal/cameratest` | YES — `onvif/wssecurity_test.go`, `cameratest/credentials_failure_test.go`; loopback `httptest` only, and `UNREACHABLE` is distinguished from `INVALID` | **PARTIAL — REAL DISCOVERY OBSERVED; AUTHENTICATED ONVIF NOT_VALIDATED** — Tapo TC70, port 2020, private IP redacted, `auth_required=true` | Authenticated device-information/profile output and credential-provisioning output from the real device | Field operator; authorized camera credentials |
 | **RTSP against a real stream** | YES — `internal/rtsp` | YES — `internal/rtsp/failure_lifecycle_test.go` against test-local RTSP servers | **NO — NOT_VALIDATED** | Per-camera state plus `input_fps` / `decoded_fps` / `output_fps` recorded from real streams | Field operator; real camera, real codec |
 | **Reconnection under real faults** | YES — supervisor with bounded exponential backoff; states `connecting` / `online` / `degraded` / `auth_failed` / `offline` | YES — TCP refused, RTSP EOF/peer close, packet silence and auth rejection are simulated; Y5 recovery via `Manager.SetTargets` | **NO — NOT_VALIDATED** | Reconnect and timeout counters across a real link flap and a real camera power cycle | Field operator; real camera + real network path |
 | **Real scenes** | YES — decode and detection pipeline exists; **no accuracy claim is made anywhere in this repository** | **NO** — no scene validation exists; the simulators carry no real imagery | **NO — NOT_VALIDATED** | Pilot evidence record over real scenes (motion, lighting, occlusion). Any accuracy or detection-quality figure must come from that run, not from this document | Field operator; real scenes with documented conditions |
