@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/agent"
+	"github.com/drko-dev/monitoreoedgeis/internal/auditjournal"
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
@@ -65,6 +66,8 @@ func main() {
 		runFactoryResetCmd(args)
 	case "credential":
 		runCredentialCmd(args)
+	case "audit":
+		runAuditCmd(args)
 	case "discovery":
 		runDiscoveryCmd(args)
 	case "saas":
@@ -465,6 +468,11 @@ func runEnrollCmd(args []string) {
 	}
 	defer lock.Release()
 
+	auditJournal := openAuditJournal(cfg.DataDir)
+	if auditJournal != nil {
+		defer auditJournal.Close()
+	}
+
 	ident, err := identity.Load(cfg.DataDir, cfg.EdgeID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "geocam-edge enroll: identity error: %v\n", err)
@@ -504,6 +512,10 @@ func runEnrollCmd(args []string) {
 		// S11 security event log: edge_id is a non-secret identifier; the
 		// enrollment token/credential itself is never logged here or anywhere.
 		slog.Default().Error("enrollment failed", "edge_id", ident.EdgeID, "error", saasErrorMessage(err))
+		auditAppend(auditJournal, auditjournal.Record{
+			EventType: auditjournal.EventEnrollmentFailure, Result: auditjournal.ResultFailure,
+			EdgeID: ident.EdgeID, SafeReason: saasErrorMessage(err),
+		})
 		fmt.Fprintf(os.Stderr, "geocam-edge enroll: %s\n", saasErrorMessage(err))
 		os.Exit(1)
 	}
@@ -513,11 +525,19 @@ func runEnrollCmd(args []string) {
 
 	if err := credentials.Save(cfg.DataDir, creds); err != nil {
 		slog.Default().Error("enrollment succeeded but persisting credentials failed", "edge_id", creds.EdgeID, "device_id", creds.DeviceID, "error", err)
+		auditAppend(auditJournal, auditjournal.Record{
+			EventType: auditjournal.EventEnrollmentFailure, Result: auditjournal.ResultFailure,
+			EdgeID: creds.EdgeID, DeviceID: creds.DeviceID, SafeReason: "enrolled server-side but local credential persistence failed",
+		})
 		fmt.Fprintf(os.Stderr, "geocam-edge enroll: enrollment succeeded but persisting credentials failed: %v\n", err)
 		os.Exit(1)
 	}
 
 	slog.Default().Info("enrollment succeeded", "edge_id", creds.EdgeID, "device_id", creds.DeviceID, "tenant_id", creds.TenantID, "site_id", creds.SiteID)
+	auditAppend(auditJournal, auditjournal.Record{
+		EventType: auditjournal.EventEnrollmentSuccess, Result: auditjournal.ResultSuccess,
+		EdgeID: creds.EdgeID, DeviceID: creds.DeviceID,
+	})
 	fmt.Print(enrollSummary(creds.EdgeID, creds.DeviceID, creds.TenantID, creds.SiteID))
 }
 
@@ -671,14 +691,34 @@ func runFactoryResetCmd(args []string) {
 		os.Exit(1)
 	}
 	defer lock.Release()
+
+	// Audit journal lives under cfg.DataDir but is NOT in factoryreset's
+	// StatePaths allowlist, so Reset never removes it — this instance stays
+	// valid to record the outcome after Reset runs (see B18: the journal
+	// must not disappear silently with a factory reset).
+	auditJournal := openAuditJournal(cfg.DataDir)
+	if auditJournal != nil {
+		defer auditJournal.Close()
+	}
+	if *confirmed {
+		auditAppend(auditJournal, auditjournal.Record{EventType: auditjournal.EventFactoryResetRequested, Result: auditjournal.ResultSuccess})
+	}
+
 	if err := factoryreset.Reset(cfg.DataDir, *confirmed); err != nil {
 		// S11 security event log: never logs DataDir contents, only the
 		// outcome and the (non-secret) data directory path.
 		slog.Default().Error("factory reset failed", "data_dir", cfg.DataDir, "error", err)
+		if *confirmed {
+			auditAppend(auditJournal, auditjournal.Record{
+				EventType: auditjournal.EventFactoryResetFailed, Result: auditjournal.ResultFailure,
+				SafeReason: err.Error(),
+			})
+		}
 		fmt.Fprintf(os.Stderr, "geocam-edge factory-reset: %v\n", err)
 		os.Exit(1)
 	}
 	slog.Default().Info("factory reset completed", "data_dir", cfg.DataDir)
+	auditAppend(auditJournal, auditjournal.Record{EventType: auditjournal.EventFactoryResetCompleted, Result: auditjournal.ResultSuccess})
 	fmt.Printf("Factory reset complete. Local device state removed from %s.\n", cfg.DataDir)
 }
 
@@ -689,6 +729,121 @@ Remove only local device state below GEOCAM_DATA_DIR and return this Edge to
 an unenrolled state. Releases, installed software, and systemd are preserved.
 The --confirm flag is required; this command never resets automatically.
 `)
+}
+
+// openAuditJournal opens the durable security audit journal for dataDir.
+// A failure to open (e.g. a pre-existing corrupt on-disk journal) is logged
+// and treated as best-effort: it must never block enroll/rotate/factory-reset,
+// which are themselves the security-critical operations. `geocam-edge audit
+// status`/`audit verify` surface the underlying problem to an operator.
+func openAuditJournal(dataDir string) *auditjournal.Journal {
+	j, err := auditjournal.Open(dataDir)
+	if err != nil {
+		slog.Default().Error("audit journal unavailable", "error", err)
+		return nil
+	}
+	return j
+}
+
+// auditAppend appends rec if the journal is available, logging (never
+// panicking or exiting) on failure. j may be nil when openAuditJournal
+// already failed — every call site must tolerate that silently.
+func auditAppend(j *auditjournal.Journal, rec auditjournal.Record) {
+	if j == nil {
+		return
+	}
+	if _, err := j.Append(rec); err != nil {
+		slog.Default().Error("audit journal append failed", "event_type", rec.EventType, "error", err)
+	}
+}
+
+// runAuditCmd dispatches `geocam-edge audit <subcommand>`.
+func runAuditCmd(args []string) {
+	if isHelpRequest(args) {
+		printAuditUsage(os.Stdout)
+		return
+	}
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "geocam-edge audit: usage: geocam-edge audit verify|status")
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "verify":
+		runAuditVerifyCmd(args[1:])
+	case "status":
+		runAuditStatusCmd(args[1:])
+	default:
+		fmt.Fprintln(os.Stderr, "geocam-edge audit: usage: geocam-edge audit verify|status")
+		os.Exit(1)
+	}
+}
+
+func printAuditUsage(w io.Writer) {
+	fmt.Fprint(w, `Usage: geocam-edge audit verify
+       geocam-edge audit status
+
+Read-only inspection of the local durable security audit journal. Never
+prints record contents or secrets. Editing, deleting, or resetting the
+journal is intentionally not supported.
+`)
+}
+
+// runAuditVerifyCmd walks the full hash chain and reports whether it is
+// intact. Exit code is non-zero on any corruption, so it is scriptable.
+func runAuditVerifyCmd(args []string) {
+	if isHelpRequest(args) {
+		printAuditUsage(os.Stdout)
+		return
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge audit verify: configuration error: %v\n", err)
+		os.Exit(1)
+	}
+	path := filepath.Join(cfg.DataDir, auditjournal.DirName, auditjournal.FileName)
+	result, err := auditjournal.VerifyFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge audit verify: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("audit_records=%d\n", result.RecordCount)
+	fmt.Printf("first_sequence=%d\n", result.FirstSequence)
+	fmt.Printf("last_sequence=%d\n", result.LastSequence)
+	fmt.Printf("last_hash=%s\n", result.LastHash)
+	fmt.Printf("integrity=%s\n", result.Status)
+	if result.FailureReason != "" {
+		fmt.Printf("failure_reason=%s\n", result.FailureReason)
+	}
+	if result.Status != auditjournal.StatusPass && result.Status != auditjournal.StatusEmpty {
+		os.Exit(1)
+	}
+}
+
+// runAuditStatusCmd prints the journal's cheap in-memory snapshot (the same
+// shape exposed on /status), without re-scanning the whole chain.
+func runAuditStatusCmd(args []string) {
+	if isHelpRequest(args) {
+		printAuditUsage(os.Stdout)
+		return
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge audit status: configuration error: %v\n", err)
+		os.Exit(1)
+	}
+	j := openAuditJournal(cfg.DataDir)
+	if j == nil {
+		fmt.Println("health=AUDIT_CORRUPT")
+		os.Exit(1)
+	}
+	defer j.Close()
+	snap := j.Snapshot()
+	fmt.Printf("health=%s\n", snap.Health)
+	fmt.Printf("records=%d\n", snap.Records)
+	fmt.Printf("last_sequence=%d\n", snap.LastSequence)
+	if snap.LastWriteAt != "" {
+		fmt.Printf("last_write_at=%s\n", snap.LastWriteAt)
+	}
 }
 
 // runCredentialCmd dispatches `geocam-edge credential <subcommand>`.
@@ -727,6 +882,11 @@ func runCredentialRotateCmd(args []string) {
 		os.Exit(1)
 	}
 	defer lock.Release()
+
+	auditJournal := openAuditJournal(cfg.DataDir)
+	if auditJournal != nil {
+		defer auditJournal.Close()
+	}
 
 	creds, err := credentials.Load(cfg.DataDir)
 	if err != nil {
@@ -773,6 +933,10 @@ func runCredentialRotateCmd(args []string) {
 		// S11 security event log: edge_id/rotation_id are non-secret
 		// identifiers; neither credential (old or new) is ever logged.
 		slog.Default().Error("credential rotation failed", "edge_id", creds.EdgeID, "rotation_id", rotationID, "error", saasErrorMessage(err))
+		auditAppend(auditJournal, auditjournal.Record{
+			EventType: auditjournal.EventCredentialRotationFailure, Result: auditjournal.ResultFailure,
+			EdgeID: creds.EdgeID, RotationID: rotationID, SafeReason: saasErrorMessage(err),
+		})
 		if errors.Is(err, transport.ErrUnauthorized) {
 			fmt.Fprintln(os.Stderr, "geocam-edge credential rotate: credential rejected by SaaS (revoked) — re-enrollment required")
 		} else {
@@ -799,6 +963,11 @@ func runCredentialRotateCmd(args []string) {
 		SiteID:            creds.SiteID,
 		EnrolledAt:        creds.EnrolledAt,
 	}); err != nil {
+		auditAppend(auditJournal, auditjournal.Record{
+			EventType: auditjournal.EventCredentialRotationFailure, Result: auditjournal.ResultFailure,
+			EdgeID: creds.EdgeID, RotationID: rotationID,
+			SafeReason: "SaaS acknowledged the rotation but local credential persistence failed",
+		})
 		fmt.Fprintf(os.Stderr,
 			"geocam-edge credential rotate: SaaS acknowledged the rotation but persisting the new credential locally failed: %v\n"+
 				"retry `geocam-edge credential rotate`\n", err)
@@ -807,12 +976,21 @@ func runCredentialRotateCmd(args []string) {
 
 	if _, err := client.Me(ctx, resp.DeviceID, newCred); err != nil {
 		slog.Default().Error("credential rotated and persisted but post-rotation verification failed", "edge_id", creds.EdgeID, "rotation_id", rotationID, "error", err)
+		auditAppend(auditJournal, auditjournal.Record{
+			EventType: auditjournal.EventCredentialRotationFailure, Result: auditjournal.ResultFailure,
+			EdgeID: creds.EdgeID, RotationID: rotationID,
+			SafeReason: "rotated and persisted, but post-rotation verification failed",
+		})
 		fmt.Fprintf(os.Stderr, "geocam-edge credential rotate: rotated and persisted, but verification against %s failed: %v\n",
 			transport.MePath, err)
 		os.Exit(1)
 	}
 
 	slog.Default().Info("credential rotation succeeded", "edge_id", creds.EdgeID, "rotation_id", rotationID, "new_credential_version", newVersion)
+	auditAppend(auditJournal, auditjournal.Record{
+		EventType: auditjournal.EventCredentialRotationSuccess, Result: auditjournal.ResultSuccess,
+		EdgeID: creds.EdgeID, RotationID: rotationID,
+	})
 	fmt.Print(rotateSummary(creds.EdgeID, newVersion))
 }
 

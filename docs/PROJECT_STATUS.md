@@ -3,6 +3,27 @@
 > Answers one question: **"¿Dónde estamos parados ahora?"**
 > Git + the final Hito Z integration are the source of truth. Historical sections below are retained as implementation history and may describe the state that existed at those earlier hitos.
 
+## Current: Hito S11A — Durable Local Security Audit Journal + Integrity Chain
+
+| Field | Value |
+| --- | --- |
+| **PR #110 merged** | YES — `docs(edge): record physical validation evidence and release readiness`, merge commit `25812ac761b64cee02c1794879f03090170d8fba` |
+| **BASE** | `origin/main @ 25812ac761b64cee02c1794879f03090170d8fba` |
+| **BRANCH** | `feature/edge-s11a-audit-integrity` |
+| **NEW PACKAGE** | `internal/auditjournal` — durable, local, hash-chained, append-only security audit journal |
+| **LOCAL DURABLE HASH-CHAINED AUDIT** | IMPLEMENTED |
+| **LOCAL TAMPER EVIDENCE** | IMPLEMENTED — `geocam-edge audit verify` detects modified/deleted/reordered records, bad hashes, bad sequences |
+| **REMOTE IMMUTABLE RETENTION / EXTERNAL CRYPTOGRAPHIC ANCHOR** | NOT IMPLEMENTED — explicitly out of scope for S11A |
+| **EVENTS WIRED** | Enrollment success/failure, credential rotation success/failure, factory reset requested/completed/failed |
+| **EVENTS NOT YET WIRED** | Control command received/executed/failed, remote config apply/rollback/failure, auth-rejected/device-revoked (types defined, no call site emits them yet) |
+| **CLI** | `geocam-edge audit verify` / `geocam-edge audit status` (read-only; no edit/delete/reset) |
+| **TESTED** | YES — `go test/vet/gofmt -race`: 38/38 packages green; `internal/auditjournal` alone: 21 tests covering genesis, append, restart recovery, deterministic serialization, concurrent writers, corruption detection (modified/deleted/reordered/bad-hash/bad-sequence/malformed-JSON), truncated-tail-vs-corrupt distinction, permissions, write/fsync failure seams, secret redaction |
+| **BUILD** | linux/amd64, linux/arm64 — both green |
+| **MERGED** | NOT YET — PR pending |
+| **DEPLOYED** | NO |
+
+See `docs/security/audit.md` (S11A section) and `docs/security/threat-model.md` for the full honest scope/limitations statement.
+
 ## Current FIELD-1 physical validation snapshot
 
 | Field | Value |

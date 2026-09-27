@@ -1,13 +1,20 @@
-# GEO CAM Edge — Security Event Logging / Audit (Hito S, S11)
+# GEO CAM Edge — Security Event Logging / Audit (Hito S, S11, S11A)
 
 Scope: which security-sensitive events the Edge logs today, what they
 contain, what they never contain, and the honest distinction between
 operational logging and a durable, tamper-evident audit trail. Reuses
-`log/slog` exclusively — **no second logging stack was created.**
+`log/slog` exclusively for operational logging — **no second logging stack
+was created** for that. S11A adds a *separate*, purpose-built durable audit
+journal (`internal/auditjournal`) for security-sensitive events specifically
+— see "S11A — durable local audit journal" below.
 
 ```
-EDGE SECURITY EVENT LOGGING:      PARTIAL
-DURABLE / TAMPER-EVIDENT AUDIT:   NOT IMPLEMENTED
+EDGE SECURITY EVENT LOGGING:          PARTIAL (slog, Hito S11)
+LOCAL DURABLE HASH-CHAINED AUDIT:     IMPLEMENTED (Hito S11A)
+LOCAL TAMPER EVIDENCE:                IMPLEMENTED (Hito S11A)
+REMOTE IMMUTABLE RETENTION:           NOT IMPLEMENTED
+EXTERNAL CRYPTOGRAPHIC ANCHOR:        NOT IMPLEMENTED (no TPM/HSM/transparency log)
+ROOT COMPROMISE PROTECTION:           NOT CLAIMED
 ```
 
 ## Events covered, and by what
@@ -108,3 +115,113 @@ produce no new on-disk file of their own — output goes to
 stdout/stderr/journald, not to a file under `GEOCAM_DATA_DIR`). Factory
 reset's existing allowlist (`internal/factoryreset`) is therefore
 unchanged — there is nothing new for it to evaluate deleting.
+
+## S11A — durable local audit journal
+
+`internal/auditjournal` adds a durable, local, hash-chained, append-only
+security audit journal, separate from `slog` and from
+`internal/control.Ledger` (see above — the ledger is idempotency/retry-safety,
+never audit).
+
+```
+LOCAL DURABLE HASH-CHAINED AUDIT:   IMPLEMENTED
+LOCAL TAMPER EVIDENCE:              IMPLEMENTED
+REMOTE IMMUTABLE RETENTION:         NOT IMPLEMENTED
+EXTERNAL CRYPTOGRAPHIC ANCHOR:      NOT IMPLEMENTED
+ROOT COMPROMISE PROTECTION:         NOT CLAIMED
+```
+
+### Threat model (honest statement)
+
+This journal provides **local tamper evidence**: it can detect that the
+on-disk journal was modified, truncated, reordered, or had a record deleted
+relative to the chain this process itself wrote. It does **not** protect
+against an attacker with full root/host compromise, who could rewrite
+history and recompute a self-consistent chain from scratch — a hash chain
+proves internal consistency, not authorship. There is no remote immutable
+retention, no external cryptographic anchor (TPM/HSM/transparency log), and
+no signature. See `docs/security/threat-model.md`.
+
+### Record contract
+
+One JSON line per record, canonical field order (Go struct marshaling,
+never a map), UTC RFC3339Nano timestamp, bounded scalar fields only —
+`schema_version`, `sequence`, `timestamp`, `event_type`, `result`, `edge_id`,
+`device_id`, `command_id`, `rotation_id`, `config_version`, `safe_reason`,
+`prev_hash`, `record_hash`. No arbitrary map, no raw payload. `safe_reason`
+is redacted (password/secret/token/auth/bearer/credential/rtsp-shaped
+fragments) and truncated before it is ever hashed or written — callers
+cannot opt out.
+
+`record_hash = SHA256(prev_hash || canonical_json(record without record_hash))`.
+The first record's `prev_hash` is the explicit genesis value `genesis:v1`,
+never ambiguous with a real 64-hex-char digest.
+
+### Durability and concurrency
+
+Directory `0700`, file `0600`, single append-only file
+(`$GEOCAM_DATA_DIR/audit/security-audit.jsonl`), each `Append` does a
+`Write` + `Sync` (fsync) before returning success. A single mutex serializes
+every append end to end (sequence assignment, hashing, write, fsync) —
+security audit events are low-volume by design, so a global lock is the
+deliberately simple, obviously-correct choice (see `BenchmarkAppend` for
+measured cost at 100/1,000/10,000 appends).
+
+### Restart and corruption
+
+On open, the journal replays existing records to recover the last valid
+sequence/hash so a new append continues the chain rather than restarting
+it. A verifier distinguishes:
+
+- **PASS** — full valid chain.
+- **EMPTY** — journal does not exist yet, or has zero records.
+- **CORRUPT** — a modified/deleted/reordered record, bad `prev_hash`,
+  bad `record_hash`, duplicate/skipped sequence, or malformed JSON not at
+  the very end of the file. `Open` refuses to start appending onto a
+  corrupt chain.
+- **TRUNCATED_LAST_WRITE** — every record up to the last one is valid, and
+  only the final line is incomplete — consistent with a crash mid-append,
+  not tampering. The valid prefix is recovered and appending continues;
+  reported as `AUDIT_DEGRADED`, not `AUDIT_CORRUPT`.
+
+Health states (`AUDIT_HEALTHY` / `AUDIT_DEGRADED` / `AUDIT_CORRUPT` /
+`AUDIT_WRITE_FAILED`) are safe to expose as-is.
+
+### CLI
+
+```
+geocam-edge audit verify   # walks the full chain, exit code non-zero on CORRUPT
+geocam-edge audit status   # cheap in-memory snapshot, no full re-scan
+```
+
+Both are read-only. There is no `audit edit`/`delete`/`reset` — append-only
+means exactly that.
+
+### Events integrated in this hito
+
+`ENROLLMENT_SUCCESS`/`ENROLLMENT_FAILURE`,
+`CREDENTIAL_ROTATION_SUCCESS`/`CREDENTIAL_ROTATION_FAILURE`,
+`FACTORY_RESET_REQUESTED`/`FACTORY_RESET_COMPLETED`/`FACTORY_RESET_FAILED`
+— wired into `cmd/geocam-edge/main.go` (enroll, credential rotate,
+factory-reset). A failure to open the audit journal itself never blocks
+these operations; it is logged via `slog` and surfaced by `audit status`.
+
+**Not yet integrated in this hito** (event types are defined in
+`internal/auditjournal.EventType` and ready to use, but no call site emits
+them yet): `CONTROL_COMMAND_RECEIVED`/`_EXECUTED`/`_FAILED`
+(`internal/control`), `REMOTE_CONFIG_APPLY`/`_ROLLBACK`/`_FAILURE`
+(`internal/remoteconfig`), `AUTH_REJECTED`/`DEVICE_REVOKED`
+(`internal/heartbeat`). Tracked as follow-up, not claimed done here.
+
+### Factory reset
+
+`internal/factoryreset.StatePaths` does not include `audit/` — a factory
+reset never deletes the audit journal. No code change to `reset.go` was
+needed for that property to hold.
+
+### Performance
+
+Security audit events are low-volume. `BenchmarkAppend` measures real
+append cost (write + fsync) at 100/1,000/10,000 records — see the package
+for current numbers on this hardware; no full-journal scan happens on the
+append hot path (only on `audit verify`/on `Open`/on recovery).
