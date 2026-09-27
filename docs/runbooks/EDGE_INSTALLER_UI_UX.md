@@ -380,7 +380,9 @@ When the UI performs one of those technical operations, the technical runbook re
 
 ### UX-0 — Baseline audit and contracts
 
-Status: `PARTIAL / STARTED`
+Status: `COMPLETED (AUDITED)`
+
+Contract Audit Document: [`docs/product/UX0_INSTALLER_CONTRACT_AUDIT.md`](../product/UX0_INSTALLER_CONTRACT_AUDIT.md)
 
 Deliverables:
 
@@ -390,7 +392,7 @@ Deliverables:
 - define secret-handling rules
 - pin exact Cloud/Hybrid/Full Edge configuration mappings
 
-Exit criterion: no UI button depends on undefined backend behavior.
+Exit criterion: no UI button depends on undefined backend behavior (MET — see audit specification).
 
 ### UX-1 — Wails application shell
 
@@ -523,6 +525,7 @@ Exit criterion: a technician unfamiliar with repository internals can complete i
 | Area | Current state | Next action |
 |---|---|---|
 | Core Edge/CLI | Exists | Reuse, do not duplicate |
+| Backend/UI Contract Audit | Completed (`UX0_INSTALLER_CONTRACT_AUDIT.md`) | Base for UX-1 facade |
 | Camera technical runbook | Exists | Use as backend truth for UI |
 | Full Edge technical runbook | Exists | Use as backend truth for UI |
 | Linux release workflow | Exists for current appliance artifacts | Extend for GUI/cross-platform |
