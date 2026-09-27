@@ -26,3 +26,8 @@ __pycache__/
 
 # geocam-up local onboarding backups (never part of the product)
 /geocam-up.bak-*
+
+# Frontend and Wails UI build artifacts
+node_modules/
+cmd/geocam-edge-ui/build/bin/
+cmd/geocam-edge-ui/frontend/package.json.md5

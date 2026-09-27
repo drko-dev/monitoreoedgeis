@@ -396,18 +396,20 @@ Exit criterion: no UI button depends on undefined backend behavior (MET — see 
 
 ### UX-1 — Wails application shell
 
-Status: `TODO`
+Status: `IMPLEMENTED / TESTED LOCAL`
+
+Specification & Architecture: [`docs/product/UX1_WAILS_SHELL.md`](../product/UX1_WAILS_SHELL.md)
 
 Deliverables:
 
-- Wails v2 application structure
+- Wails v2 application structure (`cmd/geocam-edge-ui`)
 - React + TypeScript + Vite frontend
 - shared design shell
-- Go bindings/service façade
+- Go bindings/service façade (`internal/installer`)
 - navigation/state model
-- development build on at least one supported desktop platform
+- development build on at least one supported desktop platform (macOS arm64 tested)
 
-Exit criterion: GUI can call a safe Go status method and display real Edge state.
+Exit criterion: GUI can call a safe Go status method and display real Edge state (MET — tested via Wails production build and Go bindings).
 
 ### UX-2 — Enrollment wizard
 
@@ -529,7 +531,7 @@ Exit criterion: a technician unfamiliar with repository internals can complete i
 | Camera technical runbook | Exists | Use as backend truth for UI |
 | Full Edge technical runbook | Exists | Use as backend truth for UI |
 | Linux release workflow | Exists for current appliance artifacts | Extend for GUI/cross-platform |
-| GUI installer | Not implemented | UX-1 |
+| GUI installer | Shell implemented (`cmd/geocam-edge-ui`) | UX-2 (Enrollment) |
 | Enrollment UX | Needs productized flow | UX-2 |
 | Cloud/Hybrid/Full Edge selector | Backend modes exist; GUI absent | UX-3 |
 | Camera IP onboarding GUI | Backend pieces exist; GUI absent | UX-4 |
