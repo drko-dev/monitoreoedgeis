@@ -199,19 +199,30 @@ means exactly that.
 
 ### Events integrated in this hito
 
-`ENROLLMENT_SUCCESS`/`ENROLLMENT_FAILURE`,
-`CREDENTIAL_ROTATION_SUCCESS`/`CREDENTIAL_ROTATION_FAILURE`,
-`FACTORY_RESET_REQUESTED`/`FACTORY_RESET_COMPLETED`/`FACTORY_RESET_FAILED`
-— wired into `cmd/geocam-edge/main.go` (enroll, credential rotate,
-factory-reset). A failure to open the audit journal itself never blocks
-these operations; it is logged via `slog` and surfaced by `audit status`.
+- `ENROLLMENT_SUCCESS`/`ENROLLMENT_FAILURE`,
+  `CREDENTIAL_ROTATION_SUCCESS`/`CREDENTIAL_ROTATION_FAILURE`,
+  `FACTORY_RESET_REQUESTED`/`FACTORY_RESET_COMPLETED`/`FACTORY_RESET_FAILED`
+  — wired into `cmd/geocam-edge/main.go` (enroll, credential rotate,
+  factory-reset).
+- `CONTROL_COMMAND_RECEIVED`, `CONTROL_COMMAND_EXECUTED`, `CONTROL_COMMAND_FAILED`
+  — wired into `internal/control/module.go` upon command claim, success, and
+  failure/invalidation. Replay lookups do not re-emit executed events.
+- `REMOTE_CONFIG_APPLY`, `REMOTE_CONFIG_ROLLBACK`, `REMOTE_CONFIG_FAILURE`
+  — wired into `internal/remoteconfig/engine.go` upon actual completed apply,
+  crash/apply recovery rollback, and configuration/validation failures. Routine
+  idempotent polls do not re-emit apply events.
+- `AUTH_REJECTED`
+  — wired into `internal/heartbeat/heartbeat.go` upon receiving 401/403.
+  Deduplicated across streaks so rejected heartbeat loops emit exactly once
+  per unauthorized episode.
+- `DEVICE_REVOKED`
+  — **NOT_DISTINGUISHABLE**: `transport.ErrUnauthorized` covers all 401/403
+  responses; the Edge runtime cannot distinguish revocation from general
+  credential rejection. The audit trail records `AUTH_REJECTED` honestly
+  without inventing unprovable revocation distinctions.
 
-**Not yet integrated in this hito** (event types are defined in
-`internal/auditjournal.EventType` and ready to use, but no call site emits
-them yet): `CONTROL_COMMAND_RECEIVED`/`_EXECUTED`/`_FAILED`
-(`internal/control`), `REMOTE_CONFIG_APPLY`/`_ROLLBACK`/`_FAILURE`
-(`internal/remoteconfig`), `AUTH_REJECTED`/`DEVICE_REVOKED`
-(`internal/heartbeat`). Tracked as follow-up, not claimed done here.
+A failure to open or write to the audit journal never blocks main runtime
+operations; failures are logged via `slog` and surfaced by `audit status`.
 
 ### Factory reset
 

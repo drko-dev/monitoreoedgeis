@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/drko-dev/monitoreoedgeis/internal/auditjournal"
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
 
@@ -686,4 +687,106 @@ func TestInitialDelayIsSpreadAcrossTheStartupWindow(t *testing.T) {
 	if len(seen) < 5 {
 		t.Errorf("only %d distinct startup delays across 10 instances; a fleet would still arrive as one spike", len(seen))
 	}
+}
+
+type mockHeartbeatAuditSink struct {
+	mu         sync.Mutex
+	records    []auditjournal.Record
+	failAppend error
+}
+
+func (m *mockHeartbeatAuditSink) Append(rec auditjournal.Record) (auditjournal.Record, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failAppend != nil {
+		return auditjournal.Record{}, m.failAppend
+	}
+	rec.Sequence = uint64(len(m.records) + 1)
+	m.records = append(m.records, rec)
+	return rec, nil
+}
+
+func (m *mockHeartbeatAuditSink) snapshot() []auditjournal.Record {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]auditjournal.Record, len(m.records))
+	copy(out, m.records)
+	return out
+}
+
+func TestHeartbeat_AuditUnauthorized(t *testing.T) {
+	sink := &mockHeartbeatAuditSink{}
+	sender := newFakeSender(transport.ErrUnauthorized)
+	clock := &fakeClock{}
+	opts := testOptions(sender, clock)
+	opts.Audit = sink
+	opts.DeviceID = "edge-device-test-id"
+	opts.Credential = "ultra-secret-token-value-never-log"
+
+	m, err := New(opts)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// 3 consecutive 401s must yield exactly 1 audit record (streak dedup)
+	runUntil(t, m, sender, 3)
+
+	records := sink.snapshot()
+	if len(records) != 1 {
+		t.Fatalf("expected 1 audit record for unauthorized streak, got %d", len(records))
+	}
+	if records[0].EventType != auditjournal.EventAuthRejected || records[0].Result != auditjournal.ResultFailure {
+		t.Errorf("record 0 = %+v, want EventAuthRejected with ResultFailure", records[0])
+	}
+	if records[0].DeviceID != "edge-device-test-id" {
+		t.Errorf("record 0 DeviceID = %q, want edge-device-test-id", records[0].DeviceID)
+	}
+
+	// Verify zero credential/secret leakage
+	for idx, r := range records {
+		if strings.Contains(r.SafeReason, "ultra-secret-token-value-never-log") {
+			t.Errorf("record %d leaked credential in SafeReason: %+v", idx, r)
+		}
+	}
+}
+
+func TestHeartbeat_AuditUnauthorized_RecoveryReArms(t *testing.T) {
+	sink := &mockHeartbeatAuditSink{}
+	sender := newFakeSender(
+		transport.ErrUnauthorized,
+		nil, // recovered
+		transport.ErrUnauthorized,
+	)
+	clock := &fakeClock{}
+	opts := testOptions(sender, clock)
+	opts.Audit = sink
+	opts.DeviceID = "edge-device-test-id"
+
+	m, err := New(opts)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	runUntil(t, m, sender, 3)
+
+	records := sink.snapshot()
+	if len(records) != 2 {
+		t.Fatalf("expected 2 audit records across two distinct streaks, got %d", len(records))
+	}
+	if records[0].EventType != auditjournal.EventAuthRejected || records[1].EventType != auditjournal.EventAuthRejected {
+		t.Errorf("expected both records to be EventAuthRejected, got: %+v", records)
+	}
+}
+
+func TestHeartbeat_AuditUnauthorized_FailingSinkResilience(t *testing.T) {
+	sink := &mockHeartbeatAuditSink{failAppend: errors.New("audit disk full")}
+	sender := newFakeSender(transport.ErrUnauthorized)
+	clock := &fakeClock{}
+	opts := testOptions(sender, clock)
+	opts.Audit = sink
+	m, err := New(opts)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runUntil(t, m, sender, 2)
 }

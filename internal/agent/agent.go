@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/anpr"
+	"github.com/drko-dev/monitoreoedgeis/internal/auditjournal"
 	"github.com/drko-dev/monitoreoedgeis/internal/cameracreds"
 	"github.com/drko-dev/monitoreoedgeis/internal/cloudsink"
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
@@ -73,6 +74,21 @@ type Agent struct {
 	anprTransport       *anprCloudTransport
 	localEvents         *edgebacklog.Backlog
 	modules             *moduleManager
+	// auditJournal is the durable security audit journal (S11A). nil when it
+	// could not be opened (e.g. a pre-existing corrupt on-disk journal) --
+	// modules tolerate a nil sink and simply do not record audit events;
+	// this must never block agent startup or main operation.
+	auditJournal *auditjournal.Journal
+}
+
+// Close releases agent-owned resources that outlive individual modules
+// (currently just the audit journal file handle). Safe to call on a nil
+// journal.
+func (a *Agent) Close() error {
+	if a.auditJournal == nil {
+		return nil
+	}
+	return a.auditJournal.Close()
 }
 
 // New wires the agent from configuration. It performs no network I/O beyond
@@ -126,6 +142,18 @@ func New(cfg *config.Config) *Agent {
 		health:         reporter,
 		healthGate:     newAgentHealthGate(reporter),
 	}
+	// Audit journal (S11A): opened once here and shared by every module that
+	// records security events (control, remote config, heartbeat) -- never
+	// one Journal instance per module, which would race on sequence/hash
+	// state against the same on-disk file. A failure to open (e.g. a
+	// pre-existing corrupt journal) is logged and never fatal: main
+	// operation must not depend on audit succeeding.
+	if journal, err := auditjournal.Open(cfg.DataDir); err != nil {
+		componentLog.Error("audit journal unavailable", "error", err)
+	} else {
+		a.auditJournal = journal
+	}
+
 	healthModule := newHealthServerModule(cfg.HealthAddr, reporter, logging.Component(log, "health-http"))
 	a.livenessProbe = healthModule
 	if managed && (a.identityErr != nil || a.credentialsErr != nil) {
@@ -148,7 +176,7 @@ func New(cfg *config.Config) *Agent {
 	// construction errors are non-fatal: a misconfigured SaaS URL must not
 	// take down the local health surface that would let an operator diagnose
 	// it. Either way the agent does not reach READY (see Run).
-	hb, hbErr := newHeartbeatModule(cfg, ident, creds, reporter, a.healthGate, otaModule, logging.Component(log, "heartbeat"))
+	hb, hbErr := newHeartbeatModule(cfg, ident, creds, reporter, a.healthGate, otaModule, a.auditJournal, logging.Component(log, "heartbeat"))
 	if hb != nil {
 		mods = append(mods, hb)
 	}
@@ -424,10 +452,10 @@ func New(cfg *config.Config) *Agent {
 		mods = append(mods, disc)
 	}
 
-	remoteConfig, remoteConfigErr := newRemoteConfigModule(cfg, creds, reporter, a.runtimeApplier, logging.Component(log, "remote-config"))
+	remoteConfig, remoteConfigErr := newRemoteConfigModule(cfg, creds, reporter, a.runtimeApplier, a.auditJournal, logging.Component(log, "remote-config"))
 	a.remoteConfig = remoteConfig
 
-	ctrl, controlErr := newControlModule(cfg, creds, reporter, disc, remoteConfig, logging.Component(log, "control"))
+	ctrl, controlErr := newControlModule(cfg, creds, reporter, disc, remoteConfig, a.auditJournal, logging.Component(log, "control"))
 	if ctrl != nil {
 		mods = append(mods, ctrl)
 		a.control = ctrl
