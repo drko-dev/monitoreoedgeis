@@ -5,8 +5,16 @@ import (
 	"log/slog"
 	"sync/atomic"
 
+	"github.com/drko-dev/monitoreoedgeis/internal/auditjournal"
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
+
+// AuditSink is the minimal interface remoteconfig needs to record security
+// events, satisfied by *auditjournal.Journal. Kept as a small interface in
+// this consuming package rather than depending on cmd/.
+type AuditSink interface {
+	Append(rec auditjournal.Record) (auditjournal.Record, error)
+}
 
 // Client is the outbound transport SyncOnce talks through -- the same
 // Edge-initiated, allowlisted channel internal/control uses (Hito L). No
@@ -27,6 +35,7 @@ type Module struct {
 	deviceID, credential string
 	logger               *slog.Logger
 	healthSink           HealthSink
+	audit                AuditSink
 
 	desiredVersion atomic.Int64
 }
@@ -40,6 +49,17 @@ type Option func(*Module)
 func WithHealthSink(hs HealthSink) Option {
 	return func(m *Module) {
 		m.healthSink = hs
+	}
+}
+
+// WithAuditSink injects the durable security audit journal. Optional: when
+// unset, remoteconfig simply does not record audit events.
+func WithAuditSink(a AuditSink) Option {
+	return func(m *Module) {
+		m.audit = a
+		if m.engine != nil {
+			m.engine.SetAuditSink(a)
+		}
 	}
 }
 
@@ -58,6 +78,9 @@ func New(client Client, engine *Engine, deviceID, credential string, logger *slo
 	}
 	for _, opt := range opts {
 		opt(m)
+	}
+	if m.audit != nil && m.engine != nil {
+		m.engine.SetAuditSink(m.audit)
 	}
 	return m
 }
@@ -97,6 +120,7 @@ func (m *Module) SyncOnce(ctx context.Context) error {
 		return err
 	}
 	m.publishStatus()
+
 	if status == "" {
 		return nil
 	}

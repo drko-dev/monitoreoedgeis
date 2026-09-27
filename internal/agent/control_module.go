@@ -45,7 +45,7 @@ func (e controlExecutor) ReloadConfig(ctx context.Context) error {
 	return e.remoteConfig.SyncOnce(ctx)
 }
 
-func newControlModule(cfg *config.Config, creds credentials.Credentials, reporter *health.Reporter, discoveryModule *discovery.Module, remoteConfigModule *remoteconfig.Module, log *slog.Logger) (*control.Module, error) {
+func newControlModule(cfg *config.Config, creds credentials.Credentials, reporter *health.Reporter, discoveryModule *discovery.Module, remoteConfigModule *remoteconfig.Module, audit control.AuditSink, log *slog.Logger) (*control.Module, error) {
 	if cfg.SaaSURL == "" || !creds.IsEnrolled() || creds.DeviceID == "" || creds.Credential == "" {
 		return nil, nil
 	}
@@ -54,6 +54,9 @@ func newControlModule(cfg *config.Config, creds credentials.Credentials, reporte
 		return nil, fmt.Errorf("control transport: %w", err)
 	}
 	var opts []control.Option
+	if audit != nil {
+		opts = append(opts, control.WithAuditSink(audit))
+	}
 	if cfg.DataDir != "" {
 		ledger, err := control.OpenLedger(cfg.DataDir, 100)
 		if err != nil {

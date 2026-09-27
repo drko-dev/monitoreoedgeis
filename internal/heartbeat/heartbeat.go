@@ -30,8 +30,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/drko-dev/monitoreoedgeis/internal/auditjournal"
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
+
+// AuditSink is the minimal interface heartbeat needs to record security
+// events, satisfied by *auditjournal.Journal. Kept as a small interface in
+// this consuming package rather than depending on cmd/.
+type AuditSink interface {
+	Append(rec auditjournal.Record) (auditjournal.Record, error)
+}
 
 // Scheduling constants.
 const (
@@ -102,6 +110,10 @@ type Options struct {
 	// OnUnauthorized, when set, is called once each time a 401/403 is newly
 	// observed, so the agent can mark itself DEGRADED.
 	OnUnauthorized func()
+	// Audit, when set, records AUTH_REJECTED once per newly observed
+	// 401/403 streak (same dedup as OnUnauthorized above). Optional: when
+	// nil, heartbeat simply does not record audit events.
+	Audit AuditSink
 	// OnRecovered, when set, is called once when a heartbeat succeeds after
 	// the module had stopped running cleanly (a transient failure, or a 401
 	// the SaaS later cleared). It is the counterpart OnUnauthorized needs: an
@@ -308,6 +320,14 @@ func (m *Module) loop(ctx context.Context) {
 				unauthorizedReported = true
 				m.opts.Log.Error("heartbeat rejected: credential revoked or device disabled; " +
 					"not retrying aggressively, not re-enrolling, credential left untouched")
+				// AUTH_REJECTED only, not DEVICE_REVOKED: transport.ErrUnauthorized
+				// covers every 401/403 the SaaS can return here, and this runtime
+				// cannot honestly distinguish a real revocation from any other
+				// auth rejection. See docs/security/audit.md.
+				m.auditAppend(auditjournal.Record{
+					EventType: auditjournal.EventAuthRejected, Result: auditjournal.ResultFailure,
+					DeviceID: m.opts.DeviceID,
+				})
 				if m.opts.OnUnauthorized != nil {
 					m.opts.OnUnauthorized()
 				}
@@ -352,6 +372,18 @@ func (m *Module) classify(err error, bo *backoff) (string, time.Duration) {
 		return "rejected_payload", m.jittered(m.opts.Interval)
 	default:
 		return "server_error", m.jittered(bo.next())
+	}
+}
+
+// auditAppend records a security event if an audit sink is configured. A
+// failure to append is logged and never propagated -- audit must not
+// affect heartbeat scheduling/backoff.
+func (m *Module) auditAppend(rec auditjournal.Record) {
+	if m.opts.Audit == nil {
+		return
+	}
+	if _, err := m.opts.Audit.Append(rec); err != nil {
+		m.opts.Log.Error("audit journal append failed", "event_type", rec.EventType, "error", err)
 	}
 }
 

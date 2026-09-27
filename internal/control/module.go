@@ -9,8 +9,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/drko-dev/monitoreoedgeis/internal/auditjournal"
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
+
+// AuditSink is the minimal interface control needs to record security
+// events, satisfied by *auditjournal.Journal. Kept as a small interface
+// (not the concrete type) so this package stays testable and composable
+// without depending on cmd/ or on auditjournal's on-disk details.
+type AuditSink interface {
+	Append(rec auditjournal.Record) (auditjournal.Record, error)
+}
 
 const (
 	defaultInterval = 15 * time.Second
@@ -36,6 +45,7 @@ type Module struct {
 	client               Client
 	executor             Executor
 	ledger               *Ledger
+	audit                AuditSink
 	deviceID, credential string
 	pollInterval         time.Duration
 	cancel               context.CancelFunc
@@ -68,6 +78,27 @@ type Option func(*Module)
 func WithLedger(l *Ledger) Option {
 	return func(m *Module) {
 		m.ledger = l
+	}
+}
+
+// WithAuditSink injects the durable security audit journal. Optional: when
+// unset, control simply does not record audit events -- its idempotency
+// and command execution behavior are unaffected either way.
+func WithAuditSink(a AuditSink) Option {
+	return func(m *Module) {
+		m.audit = a
+	}
+}
+
+// auditAppend records a security event if an audit sink is configured. A
+// failure to append is logged and never propagated -- audit must not
+// affect control command execution.
+func (m *Module) auditAppend(rec auditjournal.Record) {
+	if m.audit == nil {
+		return
+	}
+	if _, err := m.audit.Append(rec); err != nil {
+		slog.Default().Error("audit journal append failed", "event_type", rec.EventType, "error", err)
 	}
 }
 
@@ -160,6 +191,10 @@ func (m *Module) loop(ctx context.Context) {
 		if cmd == nil {
 			continue
 		}
+		m.auditAppend(auditjournal.Record{
+			EventType: auditjournal.EventControlCommandReceived, Result: auditjournal.ResultSuccess,
+			CommandID: cmd.ID,
+		})
 		state, result, code, execErr := m.execute(ctx, cmd)
 		if execErr != nil {
 			// Hard ledger persistence failure: do NOT report success to SaaS.
@@ -174,6 +209,12 @@ func (m *Module) loop(ctx context.Context) {
 
 func (m *Module) execute(ctx context.Context, cmd *transport.ControlCommand) (string, map[string]any, string, error) {
 	if cmd.ID == "" || len(cmd.Payload) != 0 {
+		m.auditAppend(auditjournal.Record{
+			EventType:  auditjournal.EventControlCommandFailed,
+			Result:     auditjournal.ResultFailure,
+			CommandID:  cmd.ID,
+			SafeReason: "INVALID_COMMAND",
+		})
 		return StatusFailed, nil, "INVALID_COMMAND", nil
 	}
 
@@ -183,6 +224,12 @@ func (m *Module) execute(ctx context.Context, cmd *transport.ControlCommand) (st
 			if record.Status == StatusExecuting {
 				// Incomplete / was executing before restart: do NOT re-execute.
 				// Report failed with deterministic error code.
+				m.auditAppend(auditjournal.Record{
+					EventType:  auditjournal.EventControlCommandFailed,
+					Result:     auditjournal.ResultFailure,
+					CommandID:  cmd.ID,
+					SafeReason: ErrIndeterminateAfterRestart,
+				})
 				return StatusFailed, nil, ErrIndeterminateAfterRestart, nil
 			}
 			return record.Status, record.Result, record.ErrorCode, nil
@@ -194,6 +241,12 @@ func (m *Module) execute(ctx context.Context, cmd *transport.ControlCommand) (st
 	if existing, seen := m.executed[cmd.ID]; seen {
 		m.mu.Unlock()
 		if existing.status == StatusExecuting {
+			m.auditAppend(auditjournal.Record{
+				EventType:  auditjournal.EventControlCommandFailed,
+				Result:     auditjournal.ResultFailure,
+				CommandID:  cmd.ID,
+				SafeReason: ErrIndeterminateAfterRestart,
+			})
 			return StatusFailed, nil, ErrIndeterminateAfterRestart, nil
 		}
 		return existing.status, existing.result, existing.errorCode, nil
@@ -204,6 +257,12 @@ func (m *Module) execute(ctx context.Context, cmd *transport.ControlCommand) (st
 	if m.ledger != nil {
 		if err := m.ledger.Begin(cmd.ID); err != nil {
 			// Begin failed: DO NOT call executor. Return error to stop loop.
+			m.auditAppend(auditjournal.Record{
+				EventType:  auditjournal.EventControlCommandFailed,
+				Result:     auditjournal.ResultFailure,
+				CommandID:  cmd.ID,
+				SafeReason: "LEDGER_BEGIN_FAILED",
+			})
 			return "", nil, "", fmt.Errorf("control: begin command in ledger: %w", err)
 		}
 	}
@@ -249,6 +308,16 @@ func (m *Module) execute(ctx context.Context, cmd *transport.ControlCommand) (st
 		"status", state,
 		"error_code", code,
 	)
+
+	auditEvent := auditjournal.EventControlCommandExecuted
+	auditResult := auditjournal.ResultSuccess
+	if state == StatusFailed {
+		auditEvent = auditjournal.EventControlCommandFailed
+		auditResult = auditjournal.ResultFailure
+	}
+	m.auditAppend(auditjournal.Record{
+		EventType: auditEvent, Result: auditResult, CommandID: cmd.ID, SafeReason: code,
+	})
 
 	// 4. Persist terminal outcome atomically in ledger BEFORE reporting to SaaS
 	if m.ledger != nil {

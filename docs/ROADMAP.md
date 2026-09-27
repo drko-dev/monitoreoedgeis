@@ -544,6 +544,24 @@ hardware-backed. Ver `docs/security/threat-model.md`,
 `docs/security/edge-security-baseline.md`,
 `docs/security/device-lifecycle.md`, `docs/security/update-trust.md`,
 `docs/security/least-privilege.md`, `docs/security/audit.md`.
+- S11A. Durable local security audit journal + hash chain integrity.
+  **LOCAL DURABLE HASH-CHAINED AUDIT: IMPLEMENTED / LOCAL TAMPER EVIDENCE:
+  IMPLEMENTED / REMOTE IMMUTABLE RETENTION: NOT IMPLEMENTED / EXTERNAL
+  CRYPTOGRAPHIC ANCHOR: NOT IMPLEMENTED** — nuevo paquete
+  `internal/auditjournal`: journal local append-only, SHA-256 hash chain
+  por registro (`record_hash = SHA256(prev_hash || canonical_json(record))`),
+  genesis explícito, recuperación de estado al reiniciar, escritura
+  durable (write + fsync, permisos 0600/0700), detección de corrupción
+  (registro modificado/eliminado/reordenado, secuencia duplicada/saltada,
+  JSON inválido) distinta de un corte por crash a mitad de escritura
+  (`TRUNCATED_LAST_WRITE`). CLI `geocam-edge audit verify`/`audit status`
+  de sólo lectura. Integrado en enroll, credential rotate y factory-reset
+  (que ya no borra `audit/` -- no estaba en su allowlist). `safe_reason`
+  redacta fragmentos con forma de secreto antes de persistir. Explícitamente
+  NO implementado: retención remota inmutable, anclaje criptográfico externo
+  (TPM/HSM/transparency log), ni protección contra un atacante con
+  compromiso root completo del host (un hash chain prueba consistencia
+  interna, no autoría). Detalle en `docs/security/audit.md`.
 
 - S1 Threat model. **DOCUMENTED** — assets, trust boundaries, concrete threats, mitigations, owners and remaining gaps: `docs/security/threat-model.md`.
 - S2 Unique secrets. **IMPLEMENTED** — per-device credential uses 32 bytes from `crypto/rand`; only its SHA-256 hash crosses enrollment; camera master key is a distinct local 32-byte random key; enrollment token is distinct from both. No shared/default/hardcoded production credential found in the audited paths.
@@ -582,7 +600,7 @@ hardware-backed. Ver `docs/security/threat-model.md`,
   unidad systemd separada CPU/GPU, sin `DeviceAllow`, sin lista
   NVIDIA/Intel/NPU inventada en este hito. Hallazgo clave: aunque el
   usuario de servicio es dueño de `$PREFIX` (releases/binario),
-  `ProtectSystem=strict` lo hace de solo lectura para el proceso en
+  `ProtectSystem=strict` lo hace de sólo lectura para el proceso en
   ejecución — sin path de auto-modificación del binario. Control plane
   confirmado allowlisted (`internal/control`, switch fijo de 4 tipos, sin
   `os/exec`, sin shell). Detalle completo en

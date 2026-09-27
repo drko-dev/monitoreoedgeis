@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/drko-dev/monitoreoedgeis/internal/auditjournal"
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
 
@@ -469,4 +471,173 @@ func TestControlModule_CompleteFailureHaltsAndDoesNotReport(t *testing.T) {
 	}
 
 	_ = m.Stop(context.Background())
+}
+
+type mockControlAuditSink struct {
+	mu         sync.Mutex
+	records    []auditjournal.Record
+	failAppend error
+}
+
+func (m *mockControlAuditSink) Append(rec auditjournal.Record) (auditjournal.Record, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failAppend != nil {
+		return auditjournal.Record{}, m.failAppend
+	}
+	rec.Sequence = uint64(len(m.records) + 1)
+	m.records = append(m.records, rec)
+	return rec, nil
+}
+
+func (m *mockControlAuditSink) snapshot() []auditjournal.Record {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]auditjournal.Record, len(m.records))
+	copy(out, m.records)
+	return out
+}
+
+func TestControlModule_AuditEvents(t *testing.T) {
+	sink := &mockControlAuditSink{}
+	exec := &fakeExecutor{
+		rediscoverFn: func(ctx context.Context) error {
+			return nil
+		},
+	}
+
+	cmdChan := make(chan *transport.ControlCommand, 10)
+	reportedChan := make(chan string, 10)
+
+	client := &fakeClient{
+		claimFunc: func(ctx context.Context, deviceID, credential string) (*transport.ControlCommand, error) {
+			select {
+			case c := <-cmdChan:
+				return c, nil
+			default:
+				return nil, nil
+			}
+		},
+		reportFunc: func(ctx context.Context, deviceID, credential, commandID, status string, result map[string]any, errorCode string) error {
+			reportedChan <- status
+			return nil
+		},
+	}
+
+	m := New(client, exec, "dev-1", "cred-1", WithAuditSink(sink))
+	m.SetPollInterval(10 * time.Millisecond)
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() { _ = m.Stop(context.Background()) }()
+
+	// 1. Successful execution
+	cmdChan <- &transport.ControlCommand{
+		ID:          "cmd-audit-success",
+		CommandType: "rediscovery",
+	}
+
+	select {
+	case st := <-reportedChan:
+		if st != "succeeded" {
+			t.Fatalf("status = %s, want succeeded", st)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for success")
+	}
+
+	records := sink.snapshot()
+	if len(records) != 2 {
+		t.Fatalf("expected 2 audit records, got %d", len(records))
+	}
+	if records[0].EventType != auditjournal.EventControlCommandReceived || records[0].CommandID != "cmd-audit-success" {
+		t.Errorf("record 0 = %+v, want EventControlCommandReceived", records[0])
+	}
+	if records[1].EventType != auditjournal.EventControlCommandExecuted || records[1].CommandID != "cmd-audit-success" || records[1].Result != auditjournal.ResultSuccess {
+		t.Errorf("record 1 = %+v, want EventControlCommandExecuted", records[1])
+	}
+
+	// 2. Replay duplicate command: must NOT re-emit EXECUTED
+	cmdChan <- &transport.ControlCommand{
+		ID:          "cmd-audit-success",
+		CommandType: "rediscovery",
+	}
+	select {
+	case st := <-reportedChan:
+		if st != "succeeded" {
+			t.Fatalf("replay status = %s, want succeeded", st)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for replay")
+	}
+	// Audit records should have RECEIVED (because claimed from SaaS), but NOT EXECUTED again!
+	records2 := sink.snapshot()
+	if len(records2) != 3 {
+		t.Fatalf("expected 3 audit records after replay, got %d", len(records2))
+	}
+	if records2[2].EventType != auditjournal.EventControlCommandReceived {
+		t.Errorf("record 2 = %+v, want EventControlCommandReceived", records2[2])
+	}
+
+	// 3. Failed command execution (unknown command): records RECEIVED then FAILED
+	cmdChan <- &transport.ControlCommand{
+		ID:          "cmd-audit-fail",
+		CommandType: "shell_unknown",
+	}
+	select {
+	case st := <-reportedChan:
+		if st != "failed" {
+			t.Fatalf("status = %s, want failed", st)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for fail")
+	}
+
+	records3 := sink.snapshot()
+	if len(records3) != 5 {
+		t.Fatalf("expected 5 audit records, got %d", len(records3))
+	}
+	if records3[3].EventType != auditjournal.EventControlCommandReceived || records3[3].CommandID != "cmd-audit-fail" {
+		t.Errorf("record 3 = %+v, want EventControlCommandReceived", records3[3])
+	}
+	if records3[4].EventType != auditjournal.EventControlCommandFailed || records3[4].CommandID != "cmd-audit-fail" || records3[4].SafeReason != "UNKNOWN_COMMAND" {
+		t.Errorf("record 4 = %+v, want EventControlCommandFailed with UNKNOWN_COMMAND", records3[4])
+	}
+
+	// 4. Invalid command with illegal payload: records RECEIVED then FAILED with INVALID_COMMAND
+	cmdChan <- &transport.ControlCommand{
+		ID:          "cmd-audit-invalid",
+		CommandType: "rediscovery",
+		Payload:     map[string]any{"secret_key": "must-not-leak"},
+	}
+	select {
+	case st := <-reportedChan:
+		if st != "failed" {
+			t.Fatalf("status = %s, want failed", st)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for invalid")
+	}
+
+	records4 := sink.snapshot()
+	for idx, r := range records4 {
+		if r.SafeReason == "must-not-leak" {
+			t.Errorf("record %d leaked payload in SafeReason: %+v", idx, r)
+		}
+	}
+
+	// 5. Failing audit sink does not break command execution
+	sink.failAppend = errors.New("audit disk full")
+	cmdChan <- &transport.ControlCommand{
+		ID:          "cmd-audit-resilience",
+		CommandType: "rediscovery",
+	}
+	select {
+	case st := <-reportedChan:
+		if st != "succeeded" {
+			t.Fatalf("status with failing sink = %s, want succeeded", st)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for resilience")
+	}
 }

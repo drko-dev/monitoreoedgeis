@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/drko-dev/monitoreoedgeis/internal/auditjournal"
 )
 
 // fakeAdapter is a controllable RuntimeAdapter for testing the O5-O8
@@ -579,5 +581,138 @@ func TestEngine_RestartAfterPublishFailure_StillSeesStaging(t *testing.T) {
 	}
 	if st.AppliedVersion != 1 {
 		t.Fatalf("AppliedVersion after restart = %d, want 1", st.AppliedVersion)
+	}
+}
+
+type mockRemoteConfigAuditSink struct {
+	mu         sync.Mutex
+	records    []auditjournal.Record
+	failAppend error
+}
+
+func (m *mockRemoteConfigAuditSink) Append(rec auditjournal.Record) (auditjournal.Record, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failAppend != nil {
+		return auditjournal.Record{}, m.failAppend
+	}
+	rec.Sequence = uint64(len(m.records) + 1)
+	m.records = append(m.records, rec)
+	return rec, nil
+}
+
+func (m *mockRemoteConfigAuditSink) snapshot() []auditjournal.Record {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]auditjournal.Record, len(m.records))
+	copy(out, m.records)
+	return out
+}
+
+func TestEngine_AuditEvents(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenStore(dir)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	adapter := &fakeAdapter{}
+	sink := &mockRemoteConfigAuditSink{}
+	e := NewEngine(store, adapter, WithEngineAuditSink(sink))
+	ctx := context.Background()
+
+	// 1. Success apply: records REMOTE_CONFIG_APPLY with ConfigVersion and no payload
+	status, code, err := e.ReceiveDesired(ctx, cfg(1, `{"secret_password":"super-sensitive-config"}`))
+	if err != nil || status != ApplyStatusApplied || code != "" {
+		t.Fatalf("ReceiveDesired v1: status=%s, code=%s, err=%v", status, code, err)
+	}
+
+	records := sink.snapshot()
+	if len(records) != 1 {
+		t.Fatalf("expected 1 audit record, got %d", len(records))
+	}
+	if records[0].EventType != auditjournal.EventRemoteConfigApply || records[0].ConfigVersion != "1" || records[0].Result != auditjournal.ResultSuccess {
+		t.Errorf("record 0 = %+v, want EventRemoteConfigApply for v1", records[0])
+	}
+	// Verify no payload or secret leakage in any field
+	for idx, r := range records {
+		if strings.Contains(r.SafeReason, "super-sensitive-config") || strings.Contains(r.SafeReason, "secret_password") {
+			t.Errorf("record %d leaked secret in SafeReason: %+v", idx, r)
+		}
+	}
+
+	// 2. Idempotent poll of identical applied version: returns ApplyStatusApplied but does NOT re-audit apply
+	status2, _, _ := e.ReceiveDesired(ctx, cfg(1, `{"secret_password":"super-sensitive-config"}`))
+	if status2 != ApplyStatusApplied {
+		t.Fatalf("idempotent poll status = %s, want %s", status2, ApplyStatusApplied)
+	}
+	if len(sink.snapshot()) != 1 {
+		t.Fatalf("audit count after idempotent poll = %d, want 1 (must not re-audit)", len(sink.snapshot()))
+	}
+
+	// 3. Apply failure triggering rollback: records REMOTE_CONFIG_ROLLBACK
+	adapter.applyErr = errors.New("pipeline refused config")
+	status3, code3, _ := e.ReceiveDesired(ctx, cfg(2, `{"some":"new-config"}`))
+	if status3 != ApplyStatusRolledBack || code3 != ErrCodeApplyFailed {
+		t.Fatalf("ReceiveDesired v2: status=%s, code=%s", status3, code3)
+	}
+	records3 := sink.snapshot()
+	if len(records3) != 2 {
+		t.Fatalf("expected 2 audit records, got %d", len(records3))
+	}
+	if records3[1].EventType != auditjournal.EventRemoteConfigRollback || records3[1].ConfigVersion != "2" || records3[1].SafeReason != ErrCodeApplyFailed {
+		t.Errorf("record 1 = %+v, want EventRemoteConfigRollback", records3[1])
+	}
+
+	// 4. Validation failure: records REMOTE_CONFIG_FAILURE with ErrCodeValidationFailed
+	adapter.applyErr = nil
+	adapter.validateErr = errors.New("syntax error")
+	status4, code4, _ := e.ReceiveDesired(ctx, cfg(3, `{"bad":"syntax"}`))
+	if status4 != ApplyStatusFailed || code4 != ErrCodeValidationFailed {
+		t.Fatalf("ReceiveDesired v3: status=%s, code=%s", status4, code4)
+	}
+	records4 := sink.snapshot()
+	if len(records4) != 3 {
+		t.Fatalf("expected 3 audit records, got %d", len(records4))
+	}
+	if records4[2].EventType != auditjournal.EventRemoteConfigFailure || records4[2].ConfigVersion != "3" || records4[2].SafeReason != ErrCodeValidationFailed {
+		t.Errorf("record 2 = %+v, want EventRemoteConfigFailure", records4[2])
+	}
+
+	// 5. Version conflict (divergent payload for same version): records REMOTE_CONFIG_FAILURE
+	adapter.validateErr = nil
+	status5, code5, _ := e.ReceiveDesired(ctx, cfg(1, `{"secret_password":"tampered-payload"}`))
+	if status5 != ApplyStatusFailed || code5 != ErrCodeVersionConflict {
+		t.Fatalf("ReceiveDesired v1 conflict: status=%s, code=%s", status5, code5)
+	}
+	records5 := sink.snapshot()
+	if len(records5) != 4 {
+		t.Fatalf("expected 4 audit records, got %d", len(records5))
+	}
+	if records5[3].EventType != auditjournal.EventRemoteConfigFailure || records5[3].SafeReason != ErrCodeVersionConflict {
+		t.Errorf("record 3 = %+v, want EventRemoteConfigFailure for version conflict", records5[3])
+	}
+
+	// 6. Recovery rollback audit: simulate staging config left over from restart
+	_, _ = store.Update(func(s State) State {
+		c := cfg(4, `{"crash":"mid-apply"}`)
+		s.Staging = &c
+		return s
+	})
+	if err := e.Recover(ctx); err != nil {
+		t.Fatalf("Recover error: %v", err)
+	}
+	records6 := sink.snapshot()
+	if len(records6) != 5 {
+		t.Fatalf("expected 5 audit records after recovery, got %d", len(records6))
+	}
+	if records6[4].EventType != auditjournal.EventRemoteConfigRollback || records6[4].ConfigVersion != "4" {
+		t.Errorf("record 4 = %+v, want EventRemoteConfigRollback after recovery", records6[4])
+	}
+
+	// 7. Failing audit sink does not break apply
+	sink.failAppend = errors.New("audit disk full")
+	status7, code7, err7 := e.ReceiveDesired(ctx, cfg(5, `{"valid":true}`))
+	if err7 != nil || status7 != ApplyStatusApplied || code7 != "" {
+		t.Fatalf("ReceiveDesired with failing audit sink: status=%s, code=%s, err=%v", status7, code7, err7)
 	}
 }

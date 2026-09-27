@@ -33,6 +33,7 @@ func newHeartbeatModule(
 	reporter *health.Reporter,
 	gate credentialHealth,
 	otaModule *ota.Module,
+	audit heartbeat.AuditSink,
 	log *slog.Logger,
 ) (*heartbeat.Module, error) {
 	if cfg.SaaSURL == "" {
@@ -132,6 +133,7 @@ func newHeartbeatModule(
 		// comes from GEOCAM_HEARTBEAT_AUTH_FAILURE_INTERVAL.
 		AuthFailureInterval: cfg.HeartbeatAuthFailureInterval,
 		Log:                 log,
+		Audit:               audit,
 		OnStatus:            reporter.SetHeartbeatStatus,
 		OnUnauthorized: func() {
 			// A revoked or disabled Edge is genuinely not doing its job, so

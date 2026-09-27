@@ -3,6 +3,10 @@ package remoteconfig
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strconv"
+
+	"github.com/drko-dev/monitoreoedgeis/internal/auditjournal"
 )
 
 // Error codes reported alongside a terminal ApplyStatus.
@@ -22,15 +26,44 @@ const (
 type Engine struct {
 	store   *Store
 	adapter Adapter
+	audit   AuditSink
+}
+
+// EngineOption configures Engine options.
+type EngineOption func(*Engine)
+
+// WithEngineAuditSink injects the durable security audit journal into Engine.
+func WithEngineAuditSink(a AuditSink) EngineOption {
+	return func(e *Engine) {
+		e.audit = a
+	}
+}
+
+// SetAuditSink configures the audit sink on an existing Engine.
+func (e *Engine) SetAuditSink(a AuditSink) {
+	e.audit = a
+}
+
+func (e *Engine) auditAppend(rec auditjournal.Record) {
+	if e.audit == nil {
+		return
+	}
+	if _, err := e.audit.Append(rec); err != nil {
+		slog.Default().Error("audit journal append failed", "event_type", rec.EventType, "error", err)
+	}
 }
 
 // NewEngine builds an Engine over store using adapter for the actual
 // runtime knobs.
-func NewEngine(store *Store, adapter Adapter) *Engine {
+func NewEngine(store *Store, adapter Adapter, opts ...EngineOption) *Engine {
 	if adapter == nil {
 		adapter = NoopRuntimeAdapter{}
 	}
-	return &Engine{store: store, adapter: adapter}
+	e := &Engine{store: store, adapter: adapter}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
 }
 
 // Recover resolves any config left mid-apply by a crash: if the persisted
@@ -55,6 +88,12 @@ func (e *Engine) Recover(ctx context.Context) error {
 	rollbackErr := e.adapter.RollbackRuntimeConfig(ctx, previous)
 
 	if rollbackErr != nil {
+		e.auditAppend(auditjournal.Record{
+			EventType:     auditjournal.EventRemoteConfigFailure,
+			Result:        auditjournal.ResultFailure,
+			ConfigVersion: strconv.FormatInt(interrupted.Version, 10),
+			SafeReason:    "recovery: interrupted apply, rollback failed",
+		})
 		_, saveErr := e.store.Update(func(s State) State {
 			// Staging is intentionally left untouched: it is still the
 			// only durable record that this version's runtime state is
@@ -72,6 +111,13 @@ func (e *Engine) Recover(ctx context.Context) error {
 		}
 		return fmt.Errorf("remoteconfig: recovery rollback failed, staging left unresolved: %w", rollbackErr)
 	}
+
+	e.auditAppend(auditjournal.Record{
+		EventType:     auditjournal.EventRemoteConfigRollback,
+		Result:        auditjournal.ResultFailure,
+		ConfigVersion: strconv.FormatInt(interrupted.Version, 10),
+		SafeReason:    "recovery: apply interrupted by restart, rolled back to previous known-good",
+	})
 
 	_, err := e.store.Update(func(s State) State {
 		s.Staging = nil
@@ -93,12 +139,19 @@ func (e *Engine) Recover(ctx context.Context) error {
 // status in that case.
 func (e *Engine) ReceiveDesired(ctx context.Context, desired Config) (ApplyStatus, string, error) {
 	st := e.store.Get()
+	configVersion := strconv.FormatInt(desired.Version, 10)
 
 	if st.Staging != nil {
 		// A previous apply/rollback attempt never reached a terminal,
 		// durable outcome (crash, or a rollback that itself failed).
 		// Fail closed: refuse every new apply until Recover resolves it
 		// (normally at the next process start).
+		e.auditAppend(auditjournal.Record{
+			EventType:     auditjournal.EventRemoteConfigFailure,
+			Result:        auditjournal.ResultFailure,
+			ConfigVersion: configVersion,
+			SafeReason:    ErrCodeStagingUnresolved,
+		})
 		return ApplyStatusFailed, ErrCodeStagingUnresolved, nil
 	}
 
@@ -106,12 +159,24 @@ func (e *Engine) ReceiveDesired(ctx context.Context, desired Config) (ApplyStatu
 	case desired.Version < st.AppliedVersion:
 		// Never apply a version older than what's already applied; current
 		// stays intact, nothing persisted.
+		e.auditAppend(auditjournal.Record{
+			EventType:     auditjournal.EventRemoteConfigFailure,
+			Result:        auditjournal.ResultFailure,
+			ConfigVersion: configVersion,
+			SafeReason:    ErrCodeStaleVersion,
+		})
 		return ApplyStatusFailed, ErrCodeStaleVersion, nil
 
 	case desired.Version == st.AppliedVersion:
 		if st.AppliedConfig != nil && desired.Equal(*st.AppliedConfig) {
-			return ApplyStatusApplied, "", nil // idempotent: already applied
+			return ApplyStatusApplied, "", nil // idempotent: already applied, no new apply event
 		}
+		e.auditAppend(auditjournal.Record{
+			EventType:     auditjournal.EventRemoteConfigFailure,
+			Result:        auditjournal.ResultFailure,
+			ConfigVersion: configVersion,
+			SafeReason:    ErrCodeVersionConflict,
+		})
 		return ApplyStatusFailed, ErrCodeVersionConflict, nil // same version, divergent content
 
 	case st.LastFailedVersion != 0 && desired.Version == st.LastFailedVersion:
@@ -120,11 +185,23 @@ func (e *Engine) ReceiveDesired(ctx context.Context, desired Config) (ApplyStatu
 			// reattempt apply on every poll.
 			return ApplyStatusFailed, ErrCodePreviouslyFailed, nil
 		}
+		e.auditAppend(auditjournal.Record{
+			EventType:     auditjournal.EventRemoteConfigFailure,
+			Result:        auditjournal.ResultFailure,
+			ConfigVersion: configVersion,
+			SafeReason:    ErrCodeVersionConflict,
+		})
 		return ApplyStatusFailed, ErrCodeVersionConflict, nil // reusing a failed version number with different content
 	}
 
 	// New version. 1. received (implicit, we have it). 2. validate.
 	if err := e.adapter.ValidateRuntimeConfig(ctx, desired); err != nil {
+		e.auditAppend(auditjournal.Record{
+			EventType:     auditjournal.EventRemoteConfigFailure,
+			Result:        auditjournal.ResultFailure,
+			ConfigVersion: configVersion,
+			SafeReason:    ErrCodeValidationFailed,
+		})
 		if _, saveErr := e.store.Update(func(s State) State {
 			s.LastFailedVersion = desired.Version
 			cfg := desired
@@ -150,6 +227,12 @@ func (e *Engine) ReceiveDesired(ctx context.Context, desired Config) (ApplyStatu
 		return s
 	})
 	if err != nil {
+		e.auditAppend(auditjournal.Record{
+			EventType:     auditjournal.EventRemoteConfigFailure,
+			Result:        auditjournal.ResultFailure,
+			ConfigVersion: configVersion,
+			SafeReason:    "store update staging failed",
+		})
 		return "", "", err
 	}
 	// The config that was actually live immediately before this attempt --
@@ -168,6 +251,12 @@ func (e *Engine) ReceiveDesired(ctx context.Context, desired Config) (ApplyStatu
 			// Fail closed: leave Staging in place as the unresolved
 			// marker (nothing here clears it) and report a hard error --
 			// the caller must not ACK any status for this version.
+			e.auditAppend(auditjournal.Record{
+				EventType:     auditjournal.EventRemoteConfigFailure,
+				Result:        auditjournal.ResultFailure,
+				ConfigVersion: configVersion,
+				SafeReason:    "apply and rollback failed",
+			})
 			errMsg := sanitizeApplyError(fmt.Errorf("apply failed (%v); rollback also failed: %w", applyErr, rollbackErr))
 			if _, saveErr := e.store.Update(func(s State) State {
 				s.LastFailedVersion = desired.Version
@@ -183,6 +272,13 @@ func (e *Engine) ReceiveDesired(ctx context.Context, desired Config) (ApplyStatu
 			}
 			return "", "", fmt.Errorf("remoteconfig: %s", errMsg)
 		}
+
+		e.auditAppend(auditjournal.Record{
+			EventType:     auditjournal.EventRemoteConfigRollback,
+			Result:        auditjournal.ResultFailure,
+			ConfigVersion: configVersion,
+			SafeReason:    ErrCodeApplyFailed,
+		})
 
 		if _, saveErr := e.store.Update(func(s State) State {
 			s.Staging = nil
@@ -223,10 +319,28 @@ func (e *Engine) ReceiveDesired(ctx context.Context, desired Config) (ApplyStatu
 		// Store.Update left it on failure (unchanged, still unresolved) so
 		// a restart's Recover can act on it.
 		if rollbackErr := e.adapter.RollbackRuntimeConfig(ctx, rollbackTarget); rollbackErr != nil {
+			e.auditAppend(auditjournal.Record{
+				EventType:     auditjournal.EventRemoteConfigFailure,
+				Result:        auditjournal.ResultFailure,
+				ConfigVersion: configVersion,
+				SafeReason:    "publish failed, rollback failed",
+			})
 			return "", "", fmt.Errorf("remoteconfig: publish failed (%v) and rollback also failed (%v); staging left unresolved", saveErr, rollbackErr)
 		}
+		e.auditAppend(auditjournal.Record{
+			EventType:     auditjournal.EventRemoteConfigRollback,
+			Result:        auditjournal.ResultFailure,
+			ConfigVersion: configVersion,
+			SafeReason:    "publish failed, rolled back runtime",
+		})
 		return "", "", fmt.Errorf("remoteconfig: publish failed after a successful apply, rolled back runtime: %w", saveErr)
 	}
+
+	e.auditAppend(auditjournal.Record{
+		EventType:     auditjournal.EventRemoteConfigApply,
+		Result:        auditjournal.ResultSuccess,
+		ConfigVersion: configVersion,
+	})
 	return ApplyStatusApplied, "", nil
 }
 
