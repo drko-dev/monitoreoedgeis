@@ -25,13 +25,13 @@ The local host is macOS arm64. The Go toolchain and ffmpeg are unavailable in
 this environment, so the requested `go test`, `go test -race`, `go vet`,
 `gofmt`, and artifact builds are **BLOCKED_ENVIRONMENT**, not failures.
 
-The remote repository contains a published tag-driven `v1.0.0` release
-(published 2026-09-20). Its release assets include linux/amd64 and linux/arm64
-archives, `SHA256SUMS`, and `SHA256SUMS.sig`; downloaded archives matched the
-published `SHA256SUMS` values. GitHub reports the annotated Git tag itself as
-unsigned. No local `OTA_SIGNING_KEY` or provisioned public key is available, so
-this run did not create a new release or independently verify the detached
-artifact signature. No OTA was executed.
+The latest remote release is `v1.1.0` (published 2026-09-25), superseding the
+earlier `v1.0.0` release. It contains linux/amd64 and linux/arm64 archives,
+per-architecture `.sha256` files, `SHA256SUMS`, and `SHA256SUMS.sig`; downloaded
+archives matched the published `SHA256SUMS` values. GitHub reports the
+annotated `v1.1.0` Git tag as unsigned. No local `OTA_SIGNING_KEY` or
+provisioned public key is available, so this run did not independently verify
+the detached artifact signature. No OTA was executed.
 
 ## Current Hito Z state
 
@@ -52,7 +52,7 @@ The accepted Hito Z software blockers are:
 | **B8** Hybrid saving claim | **CLOSED BY EXPLICIT 1.0 DECISION** | no quantitative saving claim is published without integrated/field measurement |
 | **B9** physical validation | **SEPARATE / NOT_VALIDATED** | tracked item by item in `docs/product/PHYSICAL_VALIDATION_REGISTER.md`; pilot + hardware certification not executed; this blocks field/commercial validation, not SOFTWARE 1.0 |
 | **B10** release ffmpeg | **CLOSED** | release workflow builds static ffmpeg for amd64/arm64 and packaging is fail-closed if ffmpeg is absent |
-| **B11** real tagged release | **PARTIAL — REMOTE RELEASE, SIGNING TRUST NOT CLOSED** | published `v1.0.0` exists with amd64/arm64 archives, `SHA256SUMS`, and `SHA256SUMS.sig`; GitHub reports the Git tag unsigned and artifact signature could not be independently verified in this environment |
+| **B11** real tagged release | **PARTIAL — REMOTE RELEASE, SIGNING TRUST NOT CLOSED** | latest published `v1.1.0` exists with amd64/arm64 archives, per-architecture checksums, `SHA256SUMS`, and `SHA256SUMS.sig`; GitHub reports the Git tag unsigned and artifact signature could not be independently verified in this environment |
 | **B12** documentation drift | **CLOSED** | stale release/status documentation corrected during Hito Z integration |
 
 ## Software gate
@@ -95,7 +95,7 @@ The tag-driven workflow in `.github/workflows/release.yml`:
 5. signs `SHA256SUMS` with Ed25519;
 6. publishes the GitHub Release artifacts.
 
-The remote `v1.0.0` release is evidence that the tag-driven packaging workflow
+The remote `v1.1.0` release is evidence that the tag-driven packaging workflow
 completed, but it is not sufficient to close the signed-release gate here:
 GitHub reports the Git tag as unsigned and the public verification key is not
 provisioned in this environment. This FIELD-1 run did not rerun or replace the

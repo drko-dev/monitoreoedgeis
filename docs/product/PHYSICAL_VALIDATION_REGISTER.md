@@ -54,6 +54,13 @@ RTSP, reconnect, WAN, SaaS E2E, hybrid bandwidth, ANPR, Linux ARM64, systemd,
 power-loss, pilot, CUDA, or release rows. No camera password, Edge identity,
 SaaS credential, remote configuration, OTA, or production system was mutated.
 
+The latest remote release audit found `v1.1.0` (published 2026-09-25), with
+linux/amd64 and linux/arm64 archives, per-architecture `.sha256` files,
+`SHA256SUMS`, and `SHA256SUMS.sig`. Downloaded archive hashes matched
+`SHA256SUMS`. GitHub reports the annotated tag as unsigned; the detached
+artifact signature is present but was not cryptographically verified because no
+trusted public key was provisioned in this environment.
+
 ---
 
 ## 1. Real camera / field
@@ -186,7 +193,7 @@ deterministic seam).
 | Axis | Status |
 | --- | --- |
 | **SOFTWARE 1.0** | **READY** — functional blockers B1–B8 and B10 closed; the final integration gate passed and merged into `main` |
-| **RELEASE 1.0** | **NOT_VALIDATED** — B11: no real signed `v1.0.0` release has been executed |
+| **RELEASE 1.0** | **PARTIAL** — latest remote `v1.1.0` is available with amd64/arm64 artifacts and signature file; tag is unsigned and artifact signature is not cryptographically verified here |
 | **DEPLOYED PROD** | **NO / NO TARGET REGISTERED** |
 | **FIELD / HARDWARE VALIDATION** | **PENDING** — sections 1–6, every physical row `NOT_VALIDATED` |
 

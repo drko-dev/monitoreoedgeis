@@ -11,7 +11,7 @@
 | **HOST** | macOS 27 arm64; not Linux ARM64 and no systemd PID 1 |
 | **REAL CAMERA** | One Tapo TC70 observed by real ONVIF discovery; authenticated access not validated |
 | **RTSP / SaaS / WAN** | **NOT_VALIDATED** — no authorized camera or SaaS credentials available |
-| **RELEASE 1.0** | **PARTIAL — remote v1.0.0 has amd64/arm64 artifacts, SHA256SUMS and SHA256SUMS.sig; GitHub reports the Git tag unsigned** |
+| **RELEASE 1.0** | **PARTIAL — latest remote v1.1.0 has amd64/arm64 artifacts, per-arch checksums, SHA256SUMS and SHA256SUMS.sig; GitHub reports the Git tag unsigned** |
 | **GO / FFMPEG VALIDATION** | **BLOCKED_ENVIRONMENT** — binaries unavailable on host |
 | **MASS OTA / DEPLOYMENT** | **NOT EXECUTED** |
 
@@ -45,7 +45,7 @@ See `docs/integrations/J6_FINAL_PRODUCTION_REPORT.md` for full architecture/deci
 | **STATE** | **HITO Z SOFTWARE CLOSED** — final integration merged |
 | **MAIN** | `6617322549e4d9ac815317a0724b92d3e4613045` (verified against `origin/main` for Hito 2A). Hito Z closeout at `b007c88` (PR #100); commits since then are documentation only — no functional code changed (`docs(product): add the physical validation register`, `docs(deploy): clarify GEOCAM_EDGE_RETENTION_EVICT_PENDING scope`) |
 | **SOFTWARE 1.0** | **READY** — final integration CI 7/7 PASS and merged unchanged into `main` |
-| **RELEASE 1.0** | **PARTIAL** — B11: published remote `v1.0.0` contains artifacts and signature asset, but GitHub reports the Git tag unsigned |
+| **RELEASE 1.0** | **PARTIAL** — B11: latest remote `v1.1.0` contains artifacts and signature asset, but GitHub reports the Git tag unsigned |
 | **DEPLOYED PROD** | **NO / NO TARGET REGISTERED** |
 | **REAL CAMERA / PILOT** | **NOT_VALIDATED / NOT EXECUTED** |
 | **HARDWARE CERTIFIED** | **NO** |
