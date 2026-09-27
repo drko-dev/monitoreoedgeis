@@ -13,6 +13,9 @@ func TestLoadDefaults(t *testing.T) {
 		"GEOCAM_HEALTH_ADDR", "GEOCAM_ALLOW_INSECURE_HTTP", "GEOCAM_SAAS_TIMEOUT",
 		"GEOCAM_DISCOVERY_ENABLED", "GEOCAM_DISCOVERY_INTERVAL", "GEOCAM_DISCOVERY_TIMEOUT",
 		"GEOCAM_DISCOVERY_INTERFACES",
+		"GEOCAM_CREDENTIAL_ROTATION_ENABLED", "GEOCAM_CREDENTIAL_ROTATION_INTERVAL",
+		"GEOCAM_CREDENTIAL_ROTATION_MINIMUM_AGE", "GEOCAM_CREDENTIAL_ROTATION_JITTER_WINDOW",
+		"GEOCAM_CREDENTIAL_ROTATION_RETRY_BASE", "GEOCAM_CREDENTIAL_ROTATION_RETRY_MAX",
 		"GEOCAM_CLOUD_JPEG_QUALITY", "GEOCAM_CLOUD_MAX_BYTES_PER_SEC",
 		"GEOCAM_CLOUD_BURST_BYTES", "GEOCAM_CLOUD_MAX_FPS",
 	} {
@@ -28,6 +31,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.LogLevel != DefaultLogLevel {
 		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, DefaultLogLevel)
+	}
+	if cfg.AutoRotationEnabled || cfg.AutoRotationInterval != 0 {
+		t.Fatalf("automatic rotation must be disabled and policy interval unset by default: enabled=%v interval=%s", cfg.AutoRotationEnabled, cfg.AutoRotationInterval)
 	}
 	if cfg.HeartbeatInterval != DefaultHeartbeatInterval {
 		t.Errorf("HeartbeatInterval = %v, want %v", cfg.HeartbeatInterval, DefaultHeartbeatInterval)
@@ -142,6 +148,12 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{"GEOCAM_DISCOVERY_TIMEOUT", "invalid"},
 		{"GEOCAM_DISCOVERY_TIMEOUT", "500ms"}, // Below MinDiscoveryTimeout 1s
 		{"GEOCAM_DISCOVERY_TIMEOUT", "31s"},   // Above MaxDiscoveryTimeout 30s
+		{"GEOCAM_CREDENTIAL_ROTATION_INTERVAL", "0s"},
+		{"GEOCAM_CREDENTIAL_ROTATION_INTERVAL", "1h"},
+		{"GEOCAM_CREDENTIAL_ROTATION_JITTER_WINDOW", "25h"},
+		{"GEOCAM_CREDENTIAL_ROTATION_RETRY_BASE", "100ms"},
+		{"GEOCAM_CREDENTIAL_ROTATION_RETRY_MAX", "500ms"},
+		{"GEOCAM_CREDENTIAL_ROTATION_ENABLED", "perhaps"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.key+"="+tt.value, func(t *testing.T) {
@@ -150,6 +162,38 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 				t.Fatalf("Load() succeeded with %s=%q, want error", tt.key, tt.value)
 			}
 		})
+	}
+}
+
+func TestAutoRotationRequiresExplicitPolicyInterval(t *testing.T) {
+	t.Setenv("GEOCAM_CREDENTIAL_ROTATION_ENABLED", "true")
+	t.Setenv("GEOCAM_CREDENTIAL_ROTATION_INTERVAL", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("enabled automatic rotation accepted without explicit interval")
+	}
+}
+
+func TestAutoRotationExplicitConfigurationAndBoundedDefaults(t *testing.T) {
+	t.Setenv("GEOCAM_CREDENTIAL_ROTATION_ENABLED", "true")
+	t.Setenv("GEOCAM_CREDENTIAL_ROTATION_INTERVAL", "720h")
+	for _, key := range []string{"GEOCAM_CREDENTIAL_ROTATION_MINIMUM_AGE", "GEOCAM_CREDENTIAL_ROTATION_JITTER_WINDOW", "GEOCAM_CREDENTIAL_ROTATION_RETRY_BASE", "GEOCAM_CREDENTIAL_ROTATION_RETRY_MAX"} {
+		t.Setenv(key, "")
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AutoRotationEnabled || cfg.AutoRotationInterval != 30*24*time.Hour || cfg.AutoRotationJitterWindow > cfg.AutoRotationInterval/10 {
+		t.Fatalf("rotation config=%+v", cfg)
+	}
+}
+
+func TestAutoRotationRejectsExcessiveJitter(t *testing.T) {
+	t.Setenv("GEOCAM_CREDENTIAL_ROTATION_ENABLED", "true")
+	t.Setenv("GEOCAM_CREDENTIAL_ROTATION_INTERVAL", "24h")
+	t.Setenv("GEOCAM_CREDENTIAL_ROTATION_JITTER_WINDOW", "3h")
+	if _, err := Load(); err == nil {
+		t.Fatal("accepted jitter above 10% of interval")
 	}
 }
 

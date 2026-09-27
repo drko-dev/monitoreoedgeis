@@ -41,6 +41,7 @@ var (
 	// RetryAfter carried by RateLimitError rather than applying their own backoff
 	// when the server stated one.
 	ErrRateLimited = errors.New("transport: rate limited by SaaS")
+	ErrConflict    = errors.New("transport: idempotency conflict")
 )
 
 // RateLimitError carries the server-stated cooldown from a 429 response.
@@ -86,10 +87,11 @@ const DefaultTimeout = 10 * time.Second
 
 // Client talks to the SaaS gateway-enrollment API over stdlib net/http.
 type Client struct {
-	baseURL    string
-	httpClient *http.Client
-	userAgent  string
-	traffic    *TrafficMeter
+	baseURL           string
+	httpClient        *http.Client
+	userAgent         string
+	traffic           *TrafficMeter
+	currentCredential func() string
 }
 
 // SetTrafficMeter installs an optional application-payload meter. Configure it
@@ -129,6 +131,20 @@ func New(baseURL string, allowInsecureHTTP bool, timeout time.Duration, version 
 		httpClient: &http.Client{Timeout: timeout},
 		userAgent:  fmt.Sprintf("geocam-edge/%s", version),
 	}, nil
+}
+
+// SetCurrentCredentialSource makes authenticated requests use the latest
+// persisted device credential instead of a startup snapshot. Configure before
+// starting concurrent users of the client.
+func (c *Client) SetCurrentCredentialSource(source func() string) {
+	c.currentCredential = source
+}
+
+func (c *Client) credential(fallback string) string {
+	if c.currentCredential != nil {
+		return c.currentCredential()
+	}
+	return fallback
 }
 
 // EnrollRequest is the body sent to EnrollPath. Pydantic-validated with
@@ -251,6 +267,15 @@ func (c *Client) RotateKey(ctx context.Context, deviceID, credential string, req
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
 		return resp, fmt.Errorf("%w (status %d)", ErrUnauthorized, status)
 	}
+	if status == http.StatusTooManyRequests {
+		return resp, ErrRateLimited
+	}
+	if status == http.StatusConflict {
+		return resp, ErrConflict
+	}
+	if status == http.StatusRequestTimeout || status >= 500 {
+		return resp, ErrRetryableStatus
+	}
 	if status != http.StatusOK {
 		return resp, fmt.Errorf("%w: status %d", ErrUnexpectedStatus, status)
 	}
@@ -281,6 +306,7 @@ func (c *Client) PostFrame(ctx context.Context, deviceID, credential, candidateK
 
 // PostFrameWithMetadata extends PostFrame with optional hybrid candidate headers (Milestone J7).
 func (c *Client) PostFrameWithMetadata(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte, meta FrameMetadata) error {
+	credential = c.credential(credential)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+FramesPath, bytes.NewReader(jpeg))
 	if err != nil {
 		return fmt.Errorf("transport: build request: %w", err)
@@ -341,6 +367,7 @@ func (c *Client) PostFrameWithMetadata(ctx context.Context, deviceID, credential
 // retryable, other 4xx permanent) as PostFrame, never a second auth
 // scheme or a second retry taxonomy.
 func (c *Client) PostANPRCandidate(ctx context.Context, deviceID, credential string, metadataJSON, cropJPEG []byte) error {
+	credential = c.credential(credential)
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
@@ -452,6 +479,7 @@ func classifyFrameStatusWithHeader(status int, header http.Header) error {
 // requires deviceID as a separate header even though Bearer alone carries the
 // credential. Neither value is ever logged or included in any returned error.
 func (c *Client) do(ctx context.Context, method, path, deviceID, credential string, payload any) (int, http.Header, []byte, error) {
+	credential = c.credential(credential)
 	var bodyReader io.Reader
 	var requestBytes int64
 	if payload != nil {

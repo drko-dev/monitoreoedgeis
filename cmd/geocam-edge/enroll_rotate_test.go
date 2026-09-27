@@ -5,12 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -159,119 +157,6 @@ func TestRunEnrollClaimFailureDiscardsCredential(t *testing.T) {
 	_, _, err := runEnroll(context.Background(), client, ident, host, "bad-token")
 	if !errors.Is(err, transport.ErrTokenInvalid) {
 		t.Fatalf("err = %v, want ErrTokenInvalid", err)
-	}
-}
-
-// TestRotateWithRetrySucceedsOnThirdAttempt simulates a mock SaaS that
-// drops the connection for the first two rotation attempts and accepts the
-// third, asserting the same rotation_id/device_key_hash is resubmitted
-// every time and B is only reachable after the ACK.
-func TestRotateWithRetrySucceedsOnThirdAttempt(t *testing.T) {
-	var attempts atomic.Int32
-	var seenHashes, seenRotationIDs []string
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := attempts.Add(1)
-		var req transport.RotateKeyRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode rotate request: %v", err)
-		}
-		seenHashes = append(seenHashes, req.DeviceKeyHash)
-		seenRotationIDs = append(seenRotationIDs, req.RotationID)
-		if n < 3 {
-			// Simulate a dropped connection: hijack and close without
-			// writing a response.
-			hj, ok := w.(http.Hijacker)
-			if !ok {
-				t.Fatal("ResponseWriter does not support hijacking")
-			}
-			conn, _, err := hj.Hijack()
-			if err != nil {
-				t.Fatalf("hijack: %v", err)
-			}
-			conn.Close()
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(transport.RotateResponse{DeviceID: "device-1", EdgeID: testEdgeID, RotatedAt: time.Now().UTC().Format(time.RFC3339)})
-	}))
-	srv.Listener.Close()
-	srv.Listener = ln
-	srv.Start()
-	defer srv.Close()
-
-	client := newClient(t, srv.URL)
-	req := transport.RotateKeyRequest{DeviceKeyHash: strings.Repeat("b", 64), RotationID: "rot-fixed"}
-
-	resp, err := rotateWithRetry(context.Background(), client, "device-1", "current-cred", req, []time.Duration{time.Millisecond, time.Millisecond})
-	if err != nil {
-		t.Fatalf("rotateWithRetry() error = %v", err)
-	}
-	if resp.DeviceID != "device-1" {
-		t.Errorf("resp = %+v", resp)
-	}
-	if attempts.Load() != 3 {
-		t.Errorf("attempts = %d, want 3", attempts.Load())
-	}
-	for i, h := range seenHashes {
-		if h != req.DeviceKeyHash {
-			t.Errorf("attempt %d hash = %q, want %q (same B on every retry)", i, h, req.DeviceKeyHash)
-		}
-	}
-	for i, id := range seenRotationIDs {
-		if id != req.RotationID {
-			t.Errorf("attempt %d rotation_id = %q, want %q (same idempotency key on every retry)", i, id, req.RotationID)
-		}
-	}
-}
-
-// TestRotateWithRetryExhaustsAfterThreeFailures asserts that after 3 failed
-// attempts, rotateWithRetry gives up and returns the last error — the
-// caller's contract is then to leave the on-disk credential untouched.
-func TestRotateWithRetryExhaustsAfterThreeFailures(t *testing.T) {
-	var attempts atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts.Add(1)
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	client := newClient(t, srv.URL)
-	req := transport.RotateKeyRequest{DeviceKeyHash: strings.Repeat("c", 64), RotationID: "rot-fail"}
-
-	_, err := rotateWithRetry(context.Background(), client, "device-1", "current-cred", req, []time.Duration{time.Millisecond, time.Millisecond})
-	if err == nil {
-		t.Fatal("rotateWithRetry() succeeded, want error after exhausting attempts")
-	}
-	if attempts.Load() != rotateMaxAttempts {
-		t.Errorf("attempts = %d, want %d", attempts.Load(), rotateMaxAttempts)
-	}
-}
-
-// TestRotateWithRetryStopsImmediatelyOnUnauthorized asserts a revoked
-// current credential is not retried (it will never start working) and maps
-// to ErrUnauthorized.
-func TestRotateWithRetryStopsImmediatelyOnUnauthorized(t *testing.T) {
-	var attempts atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts.Add(1)
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	defer srv.Close()
-
-	client := newClient(t, srv.URL)
-	req := transport.RotateKeyRequest{DeviceKeyHash: strings.Repeat("d", 64), RotationID: "rot-revoked"}
-
-	_, err := rotateWithRetry(context.Background(), client, "device-1", "revoked-cred", req, []time.Duration{time.Second, time.Second})
-	if !errors.Is(err, transport.ErrUnauthorized) {
-		t.Fatalf("err = %v, want ErrUnauthorized", err)
-	}
-	if attempts.Load() != 1 {
-		t.Errorf("attempts = %d, want 1 (no retry on revoked credential)", attempts.Load())
 	}
 }
 

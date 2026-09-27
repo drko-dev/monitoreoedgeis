@@ -11,7 +11,6 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/remoteconfig"
-	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
 
 type controlExecutor struct {
@@ -49,7 +48,7 @@ func newControlModule(cfg *config.Config, creds credentials.Credentials, reporte
 	if cfg.SaaSURL == "" || !creds.IsEnrolled() || creds.DeviceID == "" || creds.Credential == "" {
 		return nil, nil
 	}
-	client, err := transport.New(cfg.SaaSURL, cfg.AllowInsecureHTTP, cfg.SaaSTimeout, Version)
+	client, err := newAgentTransport(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("control transport: %w", err)
 	}

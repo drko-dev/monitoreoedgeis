@@ -8,7 +8,6 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
-	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
 
 // newCameraCredsModule wires internal/cameracreds into the production
@@ -59,7 +58,7 @@ func newCameraCredsModule(
 	}
 	provider := cameracreds.NewProvider(store)
 
-	client, err := transport.New(cfg.SaaSURL, cfg.AllowInsecureHTTP, cfg.SaaSTimeout, Version)
+	client, err := newAgentTransport(cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("camera credentials: transport: %w", err)
 	}

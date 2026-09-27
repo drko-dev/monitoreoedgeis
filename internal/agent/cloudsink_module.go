@@ -10,7 +10,6 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/logging"
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
-	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
 
 // cloudBufferDirName is the subdirectory of GEOCAM_DATA_DIR holding
@@ -48,7 +47,7 @@ func buildCloudSink(cfg *config.Config, creds credentials.Credentials, reporter 
 		return nil
 	}
 
-	client, err := transport.New(cfg.SaaSURL, cfg.AllowInsecureHTTP, cfg.SaaSTimeout, Version)
+	client, err := newAgentTransport(cfg)
 	if err != nil {
 		log.Warn("cloud video sink disabled: transport client error", slog.Any("error", err))
 		return nil

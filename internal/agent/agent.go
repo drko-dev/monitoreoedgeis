@@ -166,6 +166,7 @@ func New(cfg *config.Config) *Agent {
 	mods := []Module{
 		healthModule,
 	}
+	mods = append(mods, newCredentialRotationModule(cfg, creds, reporter, a.auditJournal, componentLog))
 
 	// otaModule (Hito T) is built before heartbeat so heartbeat can wire it
 	// into OnSuccess; it is nil for an unenrolled Edge or a missing SaaS

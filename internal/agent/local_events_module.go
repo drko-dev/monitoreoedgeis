@@ -31,7 +31,7 @@ func newLocalEventsModule(cfg *config.Config, creds credentials.Credentials, rep
 	if err != nil {
 		return nil, err
 	}
-	c, err := transport.New(cfg.SaaSURL, cfg.AllowInsecureHTTP, cfg.SaaSTimeout, Version)
+	c, err := newAgentTransport(cfg)
 	if err != nil {
 		return nil, err
 	}

@@ -97,6 +97,9 @@ type Options struct {
 	Sender     Sender
 	DeviceID   string
 	Credential string
+	// CurrentCredential reloads the active credential after in-process
+	// rotation; the stored fallback is retained for callers without a provider.
+	CurrentCredential func() string
 	// Build produces the payload for one heartbeat, sampled fresh at send
 	// time rather than reused, so uptime and resource figures are current.
 	Build func() transport.HeartbeatRequest
@@ -399,7 +402,13 @@ func (m *Module) recordFailure(class, state string) {
 
 // send builds and posts one heartbeat.
 func (m *Module) send(ctx context.Context) error {
-	return m.opts.Sender.Heartbeat(ctx, m.opts.DeviceID, m.opts.Credential, m.opts.Build())
+	credential := m.opts.Credential
+	if m.opts.CurrentCredential != nil {
+		if current := m.opts.CurrentCredential(); current != "" {
+			credential = current
+		}
+	}
+	return m.opts.Sender.Heartbeat(ctx, m.opts.DeviceID, credential, m.opts.Build())
 }
 
 // wait sleeps for d, returning false if the context was cancelled first.

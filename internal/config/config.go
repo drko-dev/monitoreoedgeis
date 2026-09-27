@@ -27,6 +27,12 @@ type Config struct {
 	// duplicating that number here; tests set it explicitly to exercise
 	// recovery without waiting for the production cadence.
 	HeartbeatAuthFailureInterval time.Duration
+	AutoRotationEnabled          bool
+	AutoRotationInterval         time.Duration
+	AutoRotationMinimumAge       time.Duration
+	AutoRotationJitterWindow     time.Duration
+	AutoRotationRetryBase        time.Duration
+	AutoRotationRetryMax         time.Duration
 	DataDir                      string
 	// ConfigFilePath records the source path for non-secret persisted runtime
 	// settings. It is metadata only and may be shown in the safe `config` view.
@@ -217,7 +223,12 @@ const (
 	// only: it is not meant to be exposed to the LAN.
 	DefaultHealthAddr = "127.0.0.1:8091"
 	// DefaultSaaSTimeout bounds SaaS HTTP requests.
-	DefaultSaaSTimeout = 10 * time.Second
+	DefaultSaaSTimeout            = 10 * time.Second
+	MinAutoRotationInterval       = 24 * time.Hour
+	MaxAutoRotationInterval       = 365 * 24 * time.Hour
+	DefaultAutoRotationMinimumAge = 24 * time.Hour
+	DefaultAutoRotationRetryBase  = time.Second
+	DefaultAutoRotationRetryMax   = 5 * time.Minute
 	// Discovery defaults and bounds.
 	DefaultDiscoveryEnabled  = true
 	DefaultDiscoveryInterval = 5 * time.Minute
@@ -371,21 +382,26 @@ func Load() (*Config, error) {
 
 func loadFromEnvironment() (*Config, error) {
 	cfg := &Config{
-		EdgeID:              strings.TrimSpace(os.Getenv("GEOCAM_EDGE_ID")),
-		ProcessingMode:      DefaultProcessingMode,
-		LogLevel:            DefaultLogLevel,
-		SaaSURL:             strings.TrimSpace(os.Getenv("GEOCAM_SAAS_URL")),
-		HeartbeatInterval:   DefaultHeartbeatInterval,
-		DataDir:             DefaultDataDir,
-		ServiceManaged:      strings.EqualFold(strings.TrimSpace(os.Getenv("GEOCAM_SERVICE_MODE")), "true") || strings.TrimSpace(os.Getenv("GEOCAM_SERVICE_MODE")) == "1",
-		HealthAddr:          DefaultHealthAddr,
-		SaaSTimeout:         DefaultSaaSTimeout,
-		DiscoveryEnabled:    DefaultDiscoveryEnabled,
-		DiscoveryInterval:   DefaultDiscoveryInterval,
-		DiscoveryTimeout:    DefaultDiscoveryTimeout,
-		ConnectivityEnabled: DefaultConnectivityEnabled,
-		StreamRole:          DefaultStreamRole,
-		StreamTimeout:       DefaultStreamTimeout,
+		EdgeID:                   strings.TrimSpace(os.Getenv("GEOCAM_EDGE_ID")),
+		ProcessingMode:           DefaultProcessingMode,
+		LogLevel:                 DefaultLogLevel,
+		SaaSURL:                  strings.TrimSpace(os.Getenv("GEOCAM_SAAS_URL")),
+		HeartbeatInterval:        DefaultHeartbeatInterval,
+		DataDir:                  DefaultDataDir,
+		ServiceManaged:           strings.EqualFold(strings.TrimSpace(os.Getenv("GEOCAM_SERVICE_MODE")), "true") || strings.TrimSpace(os.Getenv("GEOCAM_SERVICE_MODE")) == "1",
+		HealthAddr:               DefaultHealthAddr,
+		SaaSTimeout:              DefaultSaaSTimeout,
+		AutoRotationInterval:     0,
+		AutoRotationMinimumAge:   DefaultAutoRotationMinimumAge,
+		AutoRotationJitterWindow: 0,
+		AutoRotationRetryBase:    DefaultAutoRotationRetryBase,
+		AutoRotationRetryMax:     DefaultAutoRotationRetryMax,
+		DiscoveryEnabled:         DefaultDiscoveryEnabled,
+		DiscoveryInterval:        DefaultDiscoveryInterval,
+		DiscoveryTimeout:         DefaultDiscoveryTimeout,
+		ConnectivityEnabled:      DefaultConnectivityEnabled,
+		StreamRole:               DefaultStreamRole,
+		StreamTimeout:            DefaultStreamTimeout,
 
 		VideoPipelineEnabled:        DefaultVideoPipelineEnabled,
 		VideoTargetFPS:              DefaultVideoTargetFPS,
@@ -425,6 +441,59 @@ func loadFromEnvironment() (*Config, error) {
 		LocalEventBacklogMaxOperations: DefaultLocalEventBacklogMaxOperations,
 		LocalEventBacklogMaxBytes:      DefaultLocalEventBacklogMaxBytes,
 		EdgeMaxClipSizeBytes:           DefaultEdgeMaxClipSizeBytes,
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_CREDENTIAL_ROTATION_ENABLED")); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid credential rotation enabled value")
+		}
+		cfg.AutoRotationEnabled = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_CREDENTIAL_ROTATION_INTERVAL")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d < MinAutoRotationInterval || d > MaxAutoRotationInterval {
+			return nil, fmt.Errorf("invalid credential rotation interval: must be between %s and %s", MinAutoRotationInterval, MaxAutoRotationInterval)
+		}
+		cfg.AutoRotationInterval = d
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_CREDENTIAL_ROTATION_MINIMUM_AGE")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d < MinAutoRotationInterval || d > MaxAutoRotationInterval {
+			return nil, fmt.Errorf("invalid credential rotation minimum age: must be between %s and %s", MinAutoRotationInterval, MaxAutoRotationInterval)
+		}
+		cfg.AutoRotationMinimumAge = d
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_CREDENTIAL_ROTATION_JITTER_WINDOW")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d < 0 || d > cfg.AutoRotationInterval/10 {
+			return nil, fmt.Errorf("invalid credential rotation jitter window: must be between 0 and one tenth of the interval")
+		}
+		cfg.AutoRotationJitterWindow = d
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_CREDENTIAL_ROTATION_RETRY_BASE")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d < time.Second || d > time.Minute {
+			return nil, fmt.Errorf("invalid credential rotation retry base: must be between 1s and 1m")
+		}
+		cfg.AutoRotationRetryBase = d
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_CREDENTIAL_ROTATION_RETRY_MAX")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d < cfg.AutoRotationRetryBase || d > time.Hour {
+			return nil, fmt.Errorf("invalid credential rotation retry max: must be >= retry base and <= 1h")
+		}
+		cfg.AutoRotationRetryMax = d
+	}
+	if cfg.AutoRotationEnabled {
+		if cfg.AutoRotationInterval == 0 {
+			return nil, fmt.Errorf("credential rotation requires an explicit interval when enabled")
+		}
+		if cfg.AutoRotationMinimumAge > cfg.AutoRotationInterval {
+			return nil, fmt.Errorf("credential rotation minimum age must not exceed the configured interval")
+		}
+		if strings.TrimSpace(os.Getenv("GEOCAM_CREDENTIAL_ROTATION_JITTER_WINDOW")) == "" {
+			cfg.AutoRotationJitterWindow = min(cfg.AutoRotationInterval/10, 24*time.Hour)
+		}
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_PROCESSING_MODE")); raw != "" {

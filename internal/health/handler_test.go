@@ -195,3 +195,23 @@ func TestHandlerStatusNeverExposesCredential(t *testing.T) {
 		t.Errorf("CredentialStatus = %q, want %q", snap.CredentialStatus, "ENROLLED")
 	}
 }
+
+func TestCredentialRotationStatusIsSafeAndObservable(t *testing.T) {
+	r := newTestReporter()
+	r.SetCredentialRotationStatus(CredentialRotationStatus{Enabled: true, State: "backoff", ConsecutiveFailures: 2, LastAttemptAt: time.Now().UTC()})
+	rec := httptest.NewRecorder()
+	Handler(r).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	body := rec.Body.String()
+	for _, forbidden := range []string{"credential_hash", "rotation_token", "Authorization", "Bearer ", "enrollment_token"} {
+		if strings.Contains(strings.ToLower(body), strings.ToLower(forbidden)) {
+			t.Fatalf("unsafe /status field %q: %s", forbidden, body)
+		}
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if snap.CredentialRotation == nil || snap.CredentialRotation.State != "backoff" || !snap.CredentialRotation.Enabled {
+		t.Fatalf("rotation status=%#v", snap.CredentialRotation)
+	}
+}
