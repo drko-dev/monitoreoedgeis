@@ -435,16 +435,23 @@ Exit criterion: fresh install becomes an authenticated Edge device without stori
 
 ### UX-3 — Mode/profile configuration
 
-Status: `TODO`
+Status: `IMPLEMENTED / TESTED LOCAL`
+
+Branch: `feature/ux3-processing-mode`
+Detailed documentation: [`docs/product/UX3_PROCESSING_MODE_CONFIGURATION.md`](../product/UX3_PROCESSING_MODE_CONFIGURATION.md)
 
 Deliverables:
 
-- Cloud / Hybrid / Full Edge selection screen
-- simple operational explanation
-- backend validation of requested profile
-- effective-profile verification after start/restart
+- ✅ Cloud / Hybrid / Full Edge selection screen (`ProcessingModeSelector.tsx`); Gateway is not a fourth mode (matches `docs/product/COMMERCIAL_MODES.md` §1)
+- ✅ real-fact capability checker (platform, ffmpeg, and for Full Edge only: vision worker command + model files, with CUDA-requested-but-unavailable downgrading to a warning, never a block)
+- ✅ typed `ConfigService` façade (`internal/installer/processing_mode.go`): `GetProcessingModeOptions`, `GetCurrentProcessingMode`, `ValidateProcessingMode`, `PlanProcessingMode` (non-mutating), `ApplyProcessingMode`
+- ✅ atomic persistence through `config.WritePersistentValues`/`RestorePersistentFileRaw` (temp+rename, 0600, read-merge-write, allowlisted keys only)
+- ✅ disk-level effective-profile verification after every Apply (read back and reparse before reporting success), with automatic rollback on a read-back mismatch
+- ✅ `ProcessingModeReview.tsx` review/confirm screen and typed Apply outcome (`SUCCESS` / `RESTART_REQUIRED` / `ROLLED_BACK` / `BLOCKED`)
+- ✅ rehydration always re-derives from the live daemon's `/status` or the persisted config file, never from frontend state
+- ✅ 24 Go tests (`internal/installer/processing_mode_test.go`, `internal/config/persisted_env_test.go`) + 7 frontend logic tests + Go/TS/Vite/Wails builds all green
 
-Exit criterion: selected product mode matches reported effective runtime profile.
+Exit criterion: selected product mode matches reported effective runtime profile. **Met with one honest limitation, not a code defect:** this installer has no local channel to reload or restart an already-running daemon (see the design doc, "Restart model"), so when the daemon is already running, Apply persists and verifies the new config on disk but reports `RESTART_REQUIRED` rather than a false `SUCCESS` — the live/effective-profile match is only claimed once nothing is running to contradict it, or after a manual restart (UX-4 prerequisite: a safe local restart channel).
 
 ### UX-4 — Camera IP onboarding
 

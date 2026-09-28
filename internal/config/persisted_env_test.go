@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -148,6 +149,108 @@ func TestLoadAcceptsNormalSaaSBaseURL(t *testing.T) {
 	}
 	if cfg.SaaSURL != "https://example.test" {
 		t.Fatalf("SaaSURL=%q, want https://example.test", cfg.SaaSURL)
+	}
+}
+
+func TestWritePersistentValuesCreatesFileAndRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "edge.env")
+	t.Setenv(ConfigFileEnv, path)
+
+	if err := WritePersistentValues(map[string]string{
+		"GEOCAM_PROCESSING_MODE":       "edge",
+		"GEOCAM_VIDEO_PIPELINE_ENABLED": "true",
+	}); err != nil {
+		t.Fatalf("WritePersistentValues: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat written file: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("file mode = %v, want 0600", info.Mode().Perm())
+	}
+
+	mode, ok, err := PersistentFileValue("GEOCAM_PROCESSING_MODE")
+	if err != nil || !ok || mode != "edge" {
+		t.Fatalf("PersistentFileValue(mode) = %q, %v, %v", mode, ok, err)
+	}
+	pipeline, ok, err := PersistentFileValue("GEOCAM_VIDEO_PIPELINE_ENABLED")
+	if err != nil || !ok || pipeline != "true" {
+		t.Fatalf("PersistentFileValue(pipeline) = %q, %v, %v", pipeline, ok, err)
+	}
+}
+
+func TestWritePersistentValuesMergesUnrelatedKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "edge.env")
+	if err := os.WriteFile(path, []byte("GEOCAM_SAAS_URL=https://example.test\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv(ConfigFileEnv, path)
+
+	if err := WritePersistentValues(map[string]string{"GEOCAM_PROCESSING_MODE": "hybrid"}); err != nil {
+		t.Fatalf("WritePersistentValues: %v", err)
+	}
+
+	saasURL, ok, err := PersistentFileValue("GEOCAM_SAAS_URL")
+	if err != nil || !ok || saasURL != "https://example.test" {
+		t.Fatalf("unrelated key not preserved: %q, %v, %v", saasURL, ok, err)
+	}
+	mode, ok, err := PersistentFileValue("GEOCAM_PROCESSING_MODE")
+	if err != nil || !ok || mode != "hybrid" {
+		t.Fatalf("PersistentFileValue(mode) = %q, %v, %v", mode, ok, err)
+	}
+}
+
+func TestWritePersistentValuesRejectsUnknownKeyWithoutWriting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "edge.env")
+	t.Setenv(ConfigFileEnv, path)
+
+	err := WritePersistentValues(map[string]string{"GEOCAM_DEVICE_PASSWORD": "x"})
+	if err == nil {
+		t.Fatal("WritePersistentValues accepted a disallowed key")
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatal("WritePersistentValues created a file despite rejecting the update")
+	}
+}
+
+func TestPersistentFileRawAndRestoreRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "edge.env")
+	t.Setenv(ConfigFileEnv, path)
+
+	snapshot, existed, err := PersistentFileRaw()
+	if err != nil || existed {
+		t.Fatalf("PersistentFileRaw before creation = %v, %v, %v", snapshot, existed, err)
+	}
+
+	if err := WritePersistentValues(map[string]string{"GEOCAM_PROCESSING_MODE": "edge"}); err != nil {
+		t.Fatalf("WritePersistentValues: %v", err)
+	}
+
+	if err := RestorePersistentFileRaw(snapshot, existed); err != nil {
+		t.Fatalf("RestorePersistentFileRaw: %v", err)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatal("RestorePersistentFileRaw did not remove a file that did not exist before")
+	}
+
+	if err := WritePersistentValues(map[string]string{"GEOCAM_PROCESSING_MODE": "cloud"}); err != nil {
+		t.Fatalf("WritePersistentValues (first): %v", err)
+	}
+	snapshot2, existed2, err := PersistentFileRaw()
+	if err != nil || !existed2 {
+		t.Fatalf("PersistentFileRaw after first write = %v, %v, %v", snapshot2, existed2, err)
+	}
+	if err := WritePersistentValues(map[string]string{"GEOCAM_PROCESSING_MODE": "edge"}); err != nil {
+		t.Fatalf("WritePersistentValues (second): %v", err)
+	}
+	if err := RestorePersistentFileRaw(snapshot2, existed2); err != nil {
+		t.Fatalf("RestorePersistentFileRaw: %v", err)
+	}
+	mode, ok, err := PersistentFileValue("GEOCAM_PROCESSING_MODE")
+	if err != nil || !ok || mode != "cloud" {
+		t.Fatalf("restored mode = %q, %v, %v, want cloud", mode, ok, err)
 	}
 }
 

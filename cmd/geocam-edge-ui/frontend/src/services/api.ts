@@ -1,5 +1,23 @@
-import { SystemReport, InstallerState, ClaimRequest, ClaimResult } from '../types/installer';
-import { GetSystemReport, GetInstallerState, ClaimDevice } from '../../wailsjs/go/main/App';
+import {
+  SystemReport,
+  InstallerState,
+  ClaimRequest,
+  ClaimResult,
+  ProcessingModeOption,
+  CurrentProcessingMode,
+  ProcessingModeRequest,
+  ProcessingModePlan,
+  ProcessingModeApplyResult,
+} from '../types/installer';
+import {
+  GetSystemReport,
+  GetInstallerState,
+  ClaimDevice,
+  GetProcessingModeOptions,
+  GetCurrentProcessingMode,
+  PlanProcessingMode,
+  ApplyProcessingMode,
+} from '../../wailsjs/go/main/App';
 
 // fetchSystemReport calls the Go facade via Wails binding
 export async function fetchSystemReport(): Promise<SystemReport> {
@@ -87,4 +105,105 @@ export async function claimDevice(req: ClaimRequest): Promise<ClaimResult> {
     status: 'active',
     edge_id: 'edge-dev-0001',
   };
+}
+
+const mockModeOptions: ProcessingModeOption[] = [
+  {
+    mode: 'cloud',
+    display_name: 'Cloud',
+    description: 'Inference runs in GEO CAM Cloud',
+    local_compute: 'Lower',
+    network_dependency: 'Higher',
+    inference_location: 'Cloud',
+    capability: 'SUPPORTED',
+  },
+  {
+    mode: 'hybrid',
+    display_name: 'Hybrid',
+    description: 'Local motion/candidate filtering; inference runs in Cloud',
+    local_compute: 'Moderate',
+    network_dependency: 'Reduced',
+    inference_location: 'Cloud',
+    capability: 'SUPPORTED',
+  },
+  {
+    mode: 'full_edge',
+    display_name: 'Full Edge',
+    description: 'Inference runs on this device',
+    local_compute: 'Higher',
+    network_dependency: 'Lowest',
+    inference_location: 'Local device',
+    capability: 'UNAVAILABLE',
+    capability_reason: 'Local vision runtime is not configured (dev sandbox).',
+    blockers: ['Local vision worker command is not configured.'],
+  },
+];
+
+// fetchProcessingModeOptions calls the Go facade via Wails binding
+export async function fetchProcessingModeOptions(): Promise<ProcessingModeOption[]> {
+  try {
+    const options = await GetProcessingModeOptions();
+    if (Array.isArray(options)) {
+      return options as unknown as ProcessingModeOption[];
+    }
+  } catch {
+    // Fallback below when not in Wails desktop runtime
+  }
+  return mockModeOptions;
+}
+
+// fetchCurrentProcessingMode calls the Go facade via Wails binding
+export async function fetchCurrentProcessingMode(): Promise<CurrentProcessingMode> {
+  try {
+    const current = await GetCurrentProcessingMode();
+    if (current && current.mode) {
+      return current as unknown as CurrentProcessingMode;
+    }
+  } catch {
+    // Fallback below when not in Wails desktop runtime
+  }
+  return {
+    mode: 'cloud',
+    pipeline_enabled: false,
+    effective_profile: 'gateway-no-media',
+    source: 'default',
+  };
+}
+
+// planProcessingMode calls the Go facade to preview an Apply without mutating anything
+export async function planProcessingMode(req: ProcessingModeRequest): Promise<ProcessingModePlan> {
+  try {
+    const plan = await PlanProcessingMode(req);
+    if (plan && plan.requested_mode) {
+      return plan as unknown as ProcessingModePlan;
+    }
+  } catch {
+    // Fallback below when not in Wails desktop runtime
+  }
+  return {
+    requested_mode: req.mode,
+    current_mode: 'cloud',
+    current_effective_profile: 'gateway-no-media',
+    target_effective_profile: req.mode === 'full_edge' ? 'full-edge' : req.mode === 'hybrid' ? 'hybrid' : 'gateway',
+    config_changes: { GEOCAM_PROCESSING_MODE: req.mode === 'full_edge' ? 'edge' : req.mode, GEOCAM_VIDEO_PIPELINE_ENABLED: 'true' },
+    restart_required: false,
+    components_required: req.mode === 'full_edge' ? ['Local vision worker process', 'Person detection model', 'Vehicle detection model'] : undefined,
+    rollback_available: true,
+  };
+}
+
+// applyProcessingMode calls the Go facade to atomically persist a processing mode change
+export async function applyProcessingMode(req: ProcessingModeRequest): Promise<ProcessingModeApplyResult> {
+  try {
+    return (await ApplyProcessingMode(req)) as unknown as ProcessingModeApplyResult;
+  } catch (err: unknown) {
+    if (err && typeof err === 'object' && 'code' in err) {
+      throw err;
+    }
+    throw {
+      code: 'NETWORK_ERROR',
+      safe_message: 'Could not communicate with the Edge installer backend.',
+      recoverable: true,
+    };
+  }
 }

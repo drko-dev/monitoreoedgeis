@@ -1,18 +1,57 @@
 import React, { useState } from 'react';
 import { useInstaller } from './hooks/useInstaller';
+import { useProcessingMode } from './hooks/useProcessingMode';
 import { Header } from './components/Header';
 import { SystemCard } from './components/SystemCard';
 import { StateCard } from './components/StateCard';
 import { Button } from './components/Button';
 import { ErrorAlert } from './components/ErrorAlert';
 import { EnrollmentWizard } from './components/EnrollmentWizard';
+import { ProcessingModeSelector } from './components/ProcessingModeSelector';
+import { ProcessingModeReview } from './components/ProcessingModeReview';
+import { ProcessingMode } from './types/installer';
 import './App.css';
+
+type ModeWizardStep = 'dashboard' | 'select' | 'review';
 
 export const App: React.FC = () => {
   const { report, state, loading, error, refresh } = useInstaller();
   const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
+  const [modeStep, setModeStep] = useState<ModeWizardStep>('dashboard');
+  const [selectedMode, setSelectedMode] = useState<ProcessingMode | null>(null);
+  const processingMode = useProcessingMode();
 
   const needsEnrollment = state?.state === 'NEEDS_ENROLLMENT' || state?.state === 'NEW';
+  const isEnrolled = state?.state === 'ENROLLED';
+
+  const handleContinue = () => {
+    if (isEnrolled) {
+      setSelectedMode(processingMode.current?.mode ?? null);
+      setModeStep('select');
+      return;
+    }
+    refresh();
+  };
+
+  const handleSelectContinue = async () => {
+    if (!selectedMode) return;
+    setModeStep('review');
+    await processingMode.requestPlan(selectedMode);
+  };
+
+  const handleApply = async () => {
+    if (!selectedMode) return;
+    try {
+      await processingMode.apply(selectedMode);
+    } catch {
+      // surfaced via processingMode.applyError in the review screen
+    }
+  };
+
+  const handleModeDone = () => {
+    processingMode.resetApply();
+    setModeStep('dashboard');
+  };
 
   if (loading) {
     return (
@@ -37,6 +76,26 @@ export const App: React.FC = () => {
 
       {needsEnrollment ? (
         <EnrollmentWizard onComplete={refresh} />
+      ) : isEnrolled && modeStep === 'select' ? (
+        <ProcessingModeSelector
+          options={processingMode.options}
+          currentMode={processingMode.current?.mode ?? null}
+          selected={selectedMode}
+          onSelect={setSelectedMode}
+          onContinue={handleSelectContinue}
+          loading={processingMode.planning}
+        />
+      ) : isEnrolled && modeStep === 'review' ? (
+        <ProcessingModeReview
+          plan={processingMode.plan}
+          planning={processingMode.planning}
+          applying={processingMode.applying}
+          applyResult={processingMode.applyResult}
+          applyError={processingMode.applyError}
+          onBack={() => setModeStep('select')}
+          onApply={handleApply}
+          onDone={handleModeDone}
+        />
       ) : (
         <>
           <div className="dashboard-grid">
@@ -47,10 +106,10 @@ export const App: React.FC = () => {
           <div className="actions-bar">
             <Button
               variant="primary"
-              onClick={refresh}
+              onClick={handleContinue}
               disabled={state?.state === 'BLOCKED'}
             >
-              Continue
+              {isEnrolled ? 'Configure Processing Mode' : 'Continue'}
             </Button>
             <Button variant="secondary" onClick={refresh}>
               Refresh Diagnostics

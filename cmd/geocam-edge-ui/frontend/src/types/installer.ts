@@ -82,3 +82,63 @@ export type EnrollmentStatus =
   | 'PERSISTENCE_ERROR'
   | 'EDGE_ID_CONFLICT';
 
+// Processing mode (UX-3). Exactly three product modes; "gateway" is
+// deliberately not a fourth mode here -- see
+// docs/product/UX3_PROCESSING_MODE_CONFIGURATION.md.
+export type ProcessingMode = 'cloud' | 'hybrid' | 'full_edge';
+
+export type CapabilityStatus = 'SUPPORTED' | 'SUPPORTED_WITH_WARNINGS' | 'UNAVAILABLE';
+
+export interface ProcessingModeOption {
+  mode: ProcessingMode;
+  display_name: string;
+  description: string;
+  local_compute: string;
+  network_dependency: string;
+  inference_location: string;
+  capability: CapabilityStatus;
+  capability_reason?: string;
+  warnings?: string[];
+  blockers?: string[];
+}
+
+export interface CurrentProcessingMode {
+  mode: ProcessingMode;
+  pipeline_enabled: boolean;
+  effective_profile: string;
+  source: 'runtime' | 'config' | 'default';
+}
+
+export interface ProcessingModeRequest {
+  mode: ProcessingMode;
+}
+
+export interface ProcessingModePlan {
+  requested_mode: ProcessingMode;
+  current_mode: ProcessingMode;
+  current_effective_profile: string;
+  target_effective_profile: string;
+  config_changes: Record<string, string>;
+  restart_required: boolean;
+  components_required?: string[];
+  warnings?: string[];
+  blockers?: string[];
+  rollback_available: boolean;
+}
+
+export type ApplyStatus = 'SUCCESS' | 'RESTART_REQUIRED' | 'ROLLED_BACK' | 'BLOCKED';
+
+export interface ProcessingModeApplyResult {
+  requested_product_mode: ProcessingMode;
+  expected_processing_mode: string;
+  expected_effective_profile: string;
+  actual_processing_mode: string;
+  actual_effective_profile: string;
+  match: boolean;
+  status: ApplyStatus;
+  restart_required: boolean;
+  rolled_back: boolean;
+  safe_message: string;
+  warnings?: string[];
+}
+

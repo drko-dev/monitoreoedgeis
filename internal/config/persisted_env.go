@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -153,11 +154,22 @@ func readPersistentEnvironment() (map[string]string, error) {
 		path = defaultPath
 	}
 
-	file, err := os.Open(path)
+	values, err := parsePersistentEnvFile(path)
 	if errors.Is(err, os.ErrNotExist) && !explicitPath {
 		return map[string]string{}, nil
 	}
+	return values, err
+}
+
+// parsePersistentEnvFile parses path's KEY=VALUE lines, returning
+// os.ErrNotExist (wrapped) verbatim when the file is absent so callers can
+// each decide what "absent" means for them.
+func parsePersistentEnvFile(path string) (map[string]string, error) {
+	file, err := os.Open(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("config: open persistent config: %w", err)
 	}
 	defer file.Close()
@@ -197,4 +209,163 @@ func readPersistentEnvironment() (map[string]string, error) {
 		return nil, fmt.Errorf("config: read persistent config: %w", err)
 	}
 	return values, nil
+}
+
+// PersistentFileRaw returns the exact current bytes of the persistent config
+// file, and whether it exists. Callers use it to snapshot the file before a
+// mutation so a failed apply can be rolled back to the exact prior content
+// (not a reconstruction from parsed key/value pairs, which could reformat or
+// reorder lines the operator wrote by hand).
+func PersistentFileRaw() (data []byte, existed bool, err error) {
+	persistedEnvMu.Lock()
+	defer persistedEnvMu.Unlock()
+
+	path, err := PersistentConfigPath()
+	if err != nil {
+		return nil, false, err
+	}
+	data, err = os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("config: read persistent config: %w", err)
+	}
+	return data, true, nil
+}
+
+// WritePersistentValues merges updates into the persistent non-secret config
+// file and writes it back atomically (temp file + rename, matching the
+// pattern used by internal/cameracreds and internal/identity): a crash
+// mid-write never leaves a partial file. Every key in updates must already be
+// allowlisted in persistentConfigKeys; unknown or secret keys are rejected
+// and nothing is written.
+func WritePersistentValues(updates map[string]string) error {
+	for key := range updates {
+		if _, allowed := persistentConfigKeys[key]; !allowed {
+			return fmt.Errorf("config: %s is not a supported persistent setting", key)
+		}
+	}
+
+	persistedEnvMu.Lock()
+	defer persistedEnvMu.Unlock()
+
+	path, err := PersistentConfigPath()
+	if err != nil {
+		return err
+	}
+	values, err := readPersistentEnvironmentLocked(path)
+	if err != nil {
+		return err
+	}
+	for key, value := range updates {
+		values[key] = value
+	}
+	return writePersistentEnvironmentLocked(path, values)
+}
+
+// RestorePersistentFileRaw atomically restores the persistent config file to
+// a snapshot previously captured by PersistentFileRaw: existed=false removes
+// the file (it did not exist before), otherwise the exact prior bytes are
+// written back.
+func RestorePersistentFileRaw(data []byte, existed bool) error {
+	persistedEnvMu.Lock()
+	defer persistedEnvMu.Unlock()
+
+	path, err := PersistentConfigPath()
+	if err != nil {
+		return err
+	}
+	if !existed {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("config: remove persistent config during rollback: %w", err)
+		}
+		return nil
+	}
+	return atomicWriteFile(path, data)
+}
+
+// readPersistentEnvironmentLocked is readPersistentEnvironment for an
+// explicit, already-resolved path, for callers that already hold
+// persistedEnvMu (write/rollback paths): an absent file is simply empty,
+// since a write is about to create it.
+func readPersistentEnvironmentLocked(path string) (map[string]string, error) {
+	values, err := parsePersistentEnvFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]string{}, nil
+	}
+	return values, err
+}
+
+// writePersistentEnvironmentLocked serializes values deterministically (keys
+// sorted) and writes them atomically to path. Values are quoted whenever they
+// contain characters that would otherwise change the parsed value (leading/
+// trailing whitespace, '#', quotes) so a round trip through
+// readPersistentEnvironmentLocked reproduces them exactly.
+func writePersistentEnvironmentLocked(path string, values map[string]string) error {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var buf strings.Builder
+	buf.WriteString("# Managed by GEO CAM Edge. Hand edits are preserved on unrelated keys.\n")
+	for _, key := range keys {
+		buf.WriteString(key)
+		buf.WriteByte('=')
+		buf.WriteString(encodePersistentValue(values[key]))
+		buf.WriteByte('\n')
+	}
+	return atomicWriteFile(path, []byte(buf.String()))
+}
+
+func encodePersistentValue(value string) string {
+	if value == "" {
+		return "\"\""
+	}
+	needsQuote := strings.TrimSpace(value) != value ||
+		strings.ContainsAny(value, "#\"'")
+	if !needsQuote {
+		return value
+	}
+	return strconv.Quote(value)
+}
+
+// atomicWriteFile creates the parent directory if missing and writes data to
+// path via temp-file-then-rename, matching the pattern used by
+// internal/cameracreds, internal/identity and internal/credentials: a crash
+// mid-write never leaves a partial file, and the file gets 0600 permissions.
+func atomicWriteFile(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("config: create config dir %s: %w", dir, err)
+	}
+
+	tmp, err := os.CreateTemp(dir, ".edge.env-*.tmp")
+	if err != nil {
+		return fmt.Errorf("config: create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op once the rename below succeeds
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("config: write temp file: %w", err)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("config: chmod temp file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("config: sync temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("config: close temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("config: rename into place: %w", err)
+	}
+	return nil
 }

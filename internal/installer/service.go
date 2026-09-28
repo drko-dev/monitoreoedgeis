@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/agent"
@@ -18,7 +19,9 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 )
 
-// Service provides a safe, read-mostly application facade for the Wails desktop installer.
+// Service provides a safe application facade for the Wails desktop installer.
+// Its only mutation is ApplyProcessingMode, which writes exclusively through
+// config.WritePersistentValues (allowlisted keys, atomic, with rollback).
 // It never acquires the exclusive instance lock and never leaks secrets to callers.
 type Service struct {
 	DataDir            string
@@ -26,6 +29,10 @@ type Service struct {
 	HealthAddr         string
 	httpClient         *http.Client
 	EnrollmentProvider EnrollmentProvider
+	// applyMu serializes ApplyProcessingMode so two concurrent Apply calls
+	// (e.g. a double click) can never race on the same persistent config
+	// file.
+	applyMu sync.Mutex
 }
 
 // NewService creates a configured installer service instance.
@@ -165,7 +172,7 @@ func DeriveInstallerState(
 			ReasonCode:         ReasonDeviceEnrolled,
 			SafeMessage:        "Device is enrolled with valid identity and credentials.",
 			Recoverable:        true,
-			NextAllowedActions: []string{ActionViewDashboard, ActionReconfigure, ActionRefresh},
+			NextAllowedActions: []string{ActionViewDashboard, ActionConfigureProcessingMode, ActionReconfigure, ActionRefresh},
 			DeviceID:           id.EdgeID,
 		}
 	}

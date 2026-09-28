@@ -40,3 +40,32 @@ func (a *App) GetInstallerState() (*installer.InstallerState, error) {
 func (a *App) ClaimDevice(req installer.ClaimRequest) (*installer.ClaimResult, error) {
 	return a.installer.ClaimDevice(a.ctx, req)
 }
+
+// GetProcessingModeOptions returns the three selectable processing modes
+// with their real, observed capability on this host.
+func (a *App) GetProcessingModeOptions() ([]installer.ProcessingModeOption, error) {
+	return a.installer.GetProcessingModeOptions(a.ctx)
+}
+
+// GetCurrentProcessingMode returns the processing mode this Edge is
+// configured for and, when reachable, actually running.
+func (a *App) GetCurrentProcessingMode() (*installer.CurrentProcessingMode, error) {
+	return a.installer.GetCurrentProcessingMode(a.ctx)
+}
+
+// ValidateProcessingMode checks a requested mode against real host facts.
+func (a *App) ValidateProcessingMode(req installer.ProcessingModeRequest) (*installer.ProcessingModeOption, error) {
+	return a.installer.ValidateProcessingMode(a.ctx, req)
+}
+
+// PlanProcessingMode describes what ApplyProcessingMode would do, without
+// mutating any configuration.
+func (a *App) PlanProcessingMode(req installer.ProcessingModeRequest) (*installer.ProcessingModePlan, error) {
+	return a.installer.PlanProcessingMode(a.ctx, req)
+}
+
+// ApplyProcessingMode atomically persists the requested processing mode and
+// verifies the write before reporting success.
+func (a *App) ApplyProcessingMode(req installer.ProcessingModeRequest) (*installer.ProcessingModeApplyResult, error) {
+	return a.installer.ApplyProcessingMode(a.ctx, req)
+}

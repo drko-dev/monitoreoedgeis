@@ -550,3 +550,96 @@ body {
   font-size: 0.8125rem;
   margin: 0;
 }
+
+/* Processing mode wizard (UX-3) */
+.mode-selector-card {
+  text-align: left;
+}
+
+.mode-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.mode-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+  text-align: left;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: 1.25rem;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  transition: border-color 0.15s ease;
+}
+
+.mode-card:hover:not(:disabled) {
+  border-color: var(--accent-primary);
+}
+
+.mode-card-selected {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 1px var(--accent-primary);
+}
+
+.mode-card-disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.mode-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.mode-card-name {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.mode-card-description {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  margin: 0;
+}
+
+.mode-card-facts {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.25rem 0;
+  width: 100%;
+  margin: 0;
+}
+
+.mode-card-facts dt {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  display: inline;
+}
+
+.mode-card-facts dd {
+  color: var(--text-primary);
+  font-size: 0.75rem;
+  display: inline;
+  margin: 0 0 0 0.25rem;
+}
+
+.mode-card-reason {
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  margin: 0;
+}
+
+.mode-result-grid {
+  max-width: none;
+  margin-bottom: 1.25rem;
+}
