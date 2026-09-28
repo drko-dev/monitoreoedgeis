@@ -413,17 +413,25 @@ Exit criterion: GUI can call a safe Go status method and display real Edge state
 
 ### UX-2 — Enrollment wizard
 
-Status: `TODO`
+Status: `IMPLEMENTED`
+
+Branch (SaaS): `feature/ux2-edge-claim`
+Branch (Edge): `feature/ux2-secure-enrollment`
+Detailed documentation: `docs/product/UX2_SECURE_ENROLLMENT.md`
 
 Deliverables:
 
-- short-lived enrollment flow
-- device credential provisioning
-- secure local persistence
-- no SaaS admin password persistence
-- retry/revocation/error UX
+- ✅ short-lived enrollment flow (Crockford Base32 one-time codes)
+- ✅ device credential provisioning (atomic persistence, 0600 perms)
+- ✅ secure local persistence (temp+rename+fsync, SHA-256 hash only to SaaS)
+- ✅ no SaaS admin password persistence (only one-time code used, consumed on claim)
+- ✅ retry/revocation/error UX (SafeError codes, anti-brute-force, idempotent replay)
+- ✅ React EnrollmentWizard with code auto-formatting and error states
+- ✅ Go EnrollmentProvider with injectable SaaS client for testing
+- ✅ SaaS endpoints: enrollment code generation (admin) + public claim
+- ✅ 9 SaaS integration tests + 8 Edge Go tests + TypeScript/Vite build clean
 
-Exit criterion: fresh install becomes an authenticated Edge device without storing a long-lived admin password.
+Exit criterion: fresh install becomes an authenticated Edge device without storing a long-lived admin password. ✅ Verified
 
 ### UX-3 — Mode/profile configuration
 
