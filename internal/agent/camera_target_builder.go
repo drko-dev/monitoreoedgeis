@@ -16,13 +16,12 @@ import (
 type TargetSkipReason string
 
 const (
-	// SkipMultichannelNotSupported means the device has zero or more than
-	// one VideoSource. Hito Z G1 is single-source only; DVR/NVR support
-	// remains NOT_VALIDATED (see docs/product/G1_CAMERA_TARGET_WIRING.md).
-	SkipMultichannelNotSupported TargetSkipReason = "multichannel_not_supported"
-	// SkipNoUsableProfile means the device's single VideoSource has no
-	// profile with a StreamURI, or none matches the desired role and more
-	// than one candidate remains without an unambiguous fallback.
+	// SkipNoVideoSource means the device reported zero VideoSources at
+	// all -- never fabricated as a fallback single channel.
+	SkipNoVideoSource TargetSkipReason = "no_video_source"
+	// SkipNoUsableProfile means a VideoSource has no profile with a
+	// StreamURI, or none matches the desired role and more than one
+	// candidate remains without an unambiguous fallback.
 	SkipNoUsableProfile TargetSkipReason = "no_usable_profile"
 	// SkipInvalidStreamURI means the selected profile's StreamURI failed
 	// rtsp.ParseTarget (unsupported scheme, missing host, ...).
@@ -40,18 +39,30 @@ type TargetSkip struct {
 	Reason       TargetSkipReason
 }
 
-// buildCameraTargets is Hito Z G1-B's pure target builder: a deterministic,
-// side-effect-free function from an Inventory snapshot plus a credential
-// resolver to the RTSP targets rtsp.Manager.SetTargets can safely be given.
+// buildCameraTargets is Hito Z G1-B's pure target builder, extended by
+// UX-6 for multi-source (DVR/NVR) devices: a deterministic, side-effect-free
+// function from an Inventory snapshot plus a credential resolver to the RTSP
+// targets rtsp.Manager.SetTargets can safely be given.
 //
-// CandidateKey is always exactly DiscoveredDevice.StableIdentity — never an
-// IP address, never a synthesized identity. Output is sorted by
-// CandidateKey so callers (and tests) see deterministic ordering regardless
-// of the Inventory's internal map iteration order.
+// CandidateKey is exactly DiscoveredDevice.StableIdentity for a
+// single-VideoSource device (unchanged since Hito Z G1 -- this is the
+// majority case and its CandidateKey format never changes). For a device
+// with more than one VideoSource, each channel gets its own CandidateKey
+// via discovery.ChannelCandidateKey(StableIdentity, SourceToken) and its own
+// independent rtsp.CameraTarget -- never an IP address, never collapsed
+// into the device's identity alone. The device's credential is resolved
+// once, by its StableIdentity, and shared across all its channels (DVR/NVR
+// devices authenticate once for the whole unit); each channel still gets
+// its own SaaS onboarding record with its own composite CandidateKey (see
+// UX6_DVR_NVR_MULTICHANNEL.md), so per-channel credential rotation and
+// isolation still work independently even though the plaintext is shared.
+// Output is sorted by CandidateKey so callers (and tests) see deterministic
+// ordering regardless of the Inventory's internal map iteration order.
 //
 // See internal/agent/camera_target_reconciler.go for the thin layer that
 // calls this against live Inventory/Provider state, and
-// docs/product/G1_CAMERA_TARGET_WIRING.md for the product contract.
+// docs/product/G1_CAMERA_TARGET_WIRING.md /
+// docs/product/UX6_DVR_NVR_MULTICHANNEL.md for the product contract.
 func buildCameraTargets(
 	devices []discovery.DiscoveredDevice,
 	resolve discovery.CredentialResolver,
@@ -61,8 +72,8 @@ func buildCameraTargets(
 	var skips []TargetSkip
 
 	for _, dev := range devices {
-		candidateKey := dev.StableIdentity
-		if candidateKey == "" {
+		deviceKey := dev.StableIdentity
+		if deviceKey == "" {
 			// An inventory entry can only lack StableIdentity if something
 			// upstream is badly broken; silently skipping it (no
 			// diagnostic keyed on an empty string) is safer than
@@ -70,10 +81,13 @@ func buildCameraTargets(
 			continue
 		}
 
+		// The credential is resolved once per physical device and shared
+		// across all its channels -- a DVR/NVR authenticates once for the
+		// whole unit, not once per channel.
 		var username, password string
 		var credOk bool
 		if resolve != nil {
-			username, password, credOk = resolve(candidateKey)
+			username, password, credOk = resolve(deviceKey)
 		}
 
 		if dev.AuthRequired && (!credOk || username == "") {
@@ -82,46 +96,56 @@ func buildCameraTargets(
 			// fail authentication, and never guess a default
 			// username/password. This must be evaluated before VideoSources
 			// checks so an un-enriched auth-required device with 0 sources
-			// is correctly reported as auth_required_no_credential rather
-			// than multichannel_not_supported. Other cameras still reconcile.
-			skips = append(skips, TargetSkip{CandidateKey: candidateKey, Reason: SkipAuthRequiredNoCredential})
+			// is correctly reported as auth_required_no_credential. Other
+			// cameras still reconcile.
+			skips = append(skips, TargetSkip{CandidateKey: deviceKey, Reason: SkipAuthRequiredNoCredential})
 			continue
 		}
 
-		// Hito Z G1 is single-source only: DVR/NVR/multichannel is
-		// NOT_VALIDATED and deliberately out of scope. Never collapse two
-		// channels under one CandidateKey.
-		if len(dev.VideoSources) != 1 {
-			skips = append(skips, TargetSkip{CandidateKey: candidateKey, Reason: SkipMultichannelNotSupported})
+		if len(dev.VideoSources) == 0 {
+			skips = append(skips, TargetSkip{CandidateKey: deviceKey, Reason: SkipNoVideoSource})
 			continue
 		}
 
-		profile, ok := selectProfile(dev.VideoSources[0].Profiles, desiredRole)
-		if !ok {
-			skips = append(skips, TargetSkip{CandidateKey: candidateKey, Reason: SkipNoUsableProfile})
-			continue
-		}
+		multiSource := len(dev.VideoSources) > 1
+		for _, vs := range dev.VideoSources {
+			candidateKey := deviceKey
+			if multiSource {
+				if vs.SourceToken == "" {
+					// Never fabricate a per-channel identity out of an
+					// empty token -- skip only this channel, the device's
+					// other channels are unaffected.
+					skips = append(skips, TargetSkip{CandidateKey: deviceKey, Reason: SkipNoVideoSource})
+					continue
+				}
+				candidateKey = discovery.ChannelCandidateKey(deviceKey, vs.SourceToken)
+			}
 
-		addr, path, err := rtsp.ParseTarget(profile.StreamURI)
-		if err != nil {
-			skips = append(skips, TargetSkip{CandidateKey: candidateKey, Reason: SkipInvalidStreamURI})
-			continue
-		}
+			profile, ok := selectProfile(vs.Profiles, desiredRole)
+			if !ok {
+				skips = append(skips, TargetSkip{CandidateKey: candidateKey, Reason: SkipNoUsableProfile})
+				continue
+			}
 
-		target := rtsp.CameraTarget{
-			CandidateKey: candidateKey,
-			Addr:         addr,
-			RTSPPath:     path,
-			StreamRole:   string(profile.Role),
-			Codec:        profile.Codec,
-			Width:        profile.Width,
-			Height:       profile.Height,
-			FPS:          profile.FPS,
-			Username:     username,
-			Password:     password,
-		}
+			addr, path, err := rtsp.ParseTarget(profile.StreamURI)
+			if err != nil {
+				skips = append(skips, TargetSkip{CandidateKey: candidateKey, Reason: SkipInvalidStreamURI})
+				continue
+			}
 
-		targets = append(targets, target)
+			targets = append(targets, rtsp.CameraTarget{
+				CandidateKey: candidateKey,
+				Addr:         addr,
+				RTSPPath:     path,
+				StreamRole:   string(profile.Role),
+				Codec:        profile.Codec,
+				Width:        profile.Width,
+				Height:       profile.Height,
+				FPS:          profile.FPS,
+				Username:     username,
+				Password:     password,
+			})
+		}
 	}
 
 	sort.Slice(targets, func(i, j int) bool { return targets[i].CandidateKey < targets[j].CandidateKey })

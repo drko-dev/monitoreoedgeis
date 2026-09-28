@@ -176,3 +176,58 @@ func TestNoopCredentialProvider(t *testing.T) {
 		t.Errorf("NoopCredentialProvider must return empty credentials")
 	}
 }
+
+// TestGetProfiles_VideoCodecNotOverwrittenByAudioEncoding guards against a
+// real bug found against a physical TP-Link Tapo TC70 during UX5
+// commissioning: a profile's AudioEncoderConfiguration also declares an
+// <Encoding> element (G711), which appears after VideoEncoderConfiguration
+// in document order. Without scoping encoding/width/height/frameratelimit to
+// VideoEncoderConfiguration, the audio codec silently overwrote the video
+// codec while width/height/fps stayed correct (audio has none) -- reported
+// as codec "G711" for a 1920x1080 H264 video profile.
+func TestGetProfiles_VideoCodecNotOverwrittenByAudioEncoding(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/soap+xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+  <SOAP-ENV:Body>
+    <trt:GetProfilesResponse>
+      <trt:Profiles token="profile_1">
+        <tt:Name>MainStream</tt:Name>
+        <tt:VideoEncoderConfiguration>
+          <tt:Encoding>H264</tt:Encoding>
+          <tt:Resolution><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:Resolution>
+          <tt:RateControl><tt:FrameRateLimit>15</tt:FrameRateLimit></tt:RateControl>
+        </tt:VideoEncoderConfiguration>
+        <tt:AudioEncoderConfiguration>
+          <tt:Encoding>G711</tt:Encoding>
+          <tt:Bitrate>64</tt:Bitrate>
+        </tt:AudioEncoderConfiguration>
+      </trt:Profiles>
+    </trt:GetProfilesResponse>
+  </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>`))
+	}))
+	defer ts.Close()
+
+	client := NewClient(2*time.Second, nil)
+	client.SetXAddrValidator(func(raw string) (*url.URL, int, error) {
+		u, err := url.Parse(raw)
+		return u, 80, err
+	})
+	profiles, err := client.GetProfiles(context.Background(), ts.URL)
+	if err != nil {
+		t.Fatalf("GetProfiles: %v", err)
+	}
+	if len(profiles) != 1 {
+		t.Fatalf("expected 1 profile, got %d", len(profiles))
+	}
+	p := profiles[0]
+	if p.Codec != "H264" {
+		t.Fatalf("expected video Codec H264, got %q (audio encoding leaked into video codec)", p.Codec)
+	}
+	if p.Width != 1920 || p.Height != 1080 || p.FPS != 15 {
+		t.Fatalf("expected 1920x1080@15, got %dx%d@%v", p.Width, p.Height, p.FPS)
+	}
+}

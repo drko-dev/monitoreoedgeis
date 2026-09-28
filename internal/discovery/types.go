@@ -109,6 +109,43 @@ func (d *DiscoveredDevice) ChannelCount() int {
 	return len(d.VideoSources)
 }
 
+// channelCandidateKeySeparator joins a device's StableIdentity with one of
+// its VideoSource.SourceToken values. It is intentionally not a character
+// StableIdentity or SourceToken can themselves start with in practice
+// (both are opaque vendor/protocol identifiers, never containing "|ch=" in
+// any known ONVIF implementation), so the composite stays unambiguous.
+const channelCandidateKeySeparator = "|ch="
+
+// ChannelCandidateKey builds the stable, opaque candidate key for one
+// channel of a multi-source (DVR/NVR) device: the device's own
+// StableIdentity plus that channel's SourceToken. It is never used for a
+// single-source device, whose CandidateKey stays exactly StableIdentity
+// (see UX6_DVR_NVR_MULTICHANNEL.md) -- every layer that already treats
+// CandidateKey as an opaque string (installer, SaaS onboarding,
+// cameracreds sync, rtsp.CameraTarget) needs no further change to support
+// this, as long as discovery, the installer, and the reconciler all build
+// exactly this same string for the same (device, channel) pair.
+func ChannelCandidateKey(deviceStableIdentity, sourceToken string) string {
+	return deviceStableIdentity + channelCandidateKeySeparator + sourceToken
+}
+
+// ParseChannelSourceToken extracts a channel candidate key's SourceToken
+// given the device's own StableIdentity, the inverse of ChannelCandidateKey.
+// Returns ("", false) for a single-source candidateKey (one that is exactly
+// deviceStableIdentity) or anything that isn't
+// deviceStableIdentity+channelCandidateKeySeparator+<token>.
+func ParseChannelSourceToken(candidateKey, deviceStableIdentity string) (string, bool) {
+	prefix := deviceStableIdentity + channelCandidateKeySeparator
+	if !strings.HasPrefix(candidateKey, prefix) {
+		return "", false
+	}
+	token := candidateKey[len(prefix):]
+	if token == "" {
+		return "", false
+	}
+	return token, true
+}
+
 // Inventory is a thread-safe local cache of discovered devices.
 type Inventory struct {
 	mu      sync.RWMutex

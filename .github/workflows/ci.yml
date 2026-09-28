@@ -21,6 +21,16 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # internal/installer's Full Edge capability check shells out to a real
+      # `ffmpeg` binary. Other jobs in this workflow already install/build one
+      # for their own use (see package-ffmpeg-fail-closed, the LGPL smoke
+      # job) but this job never did -- go test ./... ran without it and every
+      # Full-Edge-capability test failed closed with "ffmpeg not found",
+      # which is the correct behavior for a host that truly lacks ffmpeg, not
+      # a bug in that logic.
+      - name: Install ffmpeg (required by internal/installer capability tests)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
       - name: Test
         run: go test ./...
 
