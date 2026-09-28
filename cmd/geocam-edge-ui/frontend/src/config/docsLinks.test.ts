@@ -38,6 +38,12 @@ test('no docs link embeds a credential, token, or code', () => {
   }
 });
 
+test('every docs link uses the canonical Help Center route (/ayuda?tema=<slug>)', () => {
+  for (const [key, url] of Object.entries(docsLinks)) {
+    assert.ok(url.startsWith(`${SAAS_PUBLIC_BASE_URL}/ayuda?tema=`), `${key} is not the canonical /ayuda?tema= route: ${url}`);
+  }
+});
+
 test('docs links do not point at github.com', () => {
   for (const [key, url] of Object.entries(docsLinks)) {
     assert.ok(!url.includes('github.com'), `${key} points at GitHub, not the SaaS: ${url}`);
