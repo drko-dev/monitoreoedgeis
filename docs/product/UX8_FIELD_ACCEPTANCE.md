@@ -65,10 +65,14 @@ matrix, not the same evidence.
 ## UX-6 DVR/NVR status feeding this matrix
 
 `UX6_SOFTWARE_STATUS = COMPLETE`: discovery, ONVIF profile resolution,
-installer onboarding, and the daemon's own reconciler/runtime all support
-independent per-channel identity now (`docs/product/UX6_DVR_NVR_MULTICHANNEL.md`).
-`UX6_PHYSICAL_DVR_NVR = NOT_VALIDATED` — no DVR/NVR hardware exists in this
-session. `DVR_NVR_UI_PRODUCTION_ENABLED = NO` (no wizard UI was built).
+installer onboarding, the daemon's own reconciler/runtime, and the
+onboarding wizard UI (channel discovery, selection, credential test,
+onboarding, result) all support independent per-channel identity now
+(`docs/product/UX6_DVR_NVR_MULTICHANNEL.md`). `UX6_PHYSICAL_DVR_NVR =
+NOT_VALIDATED` — no DVR/NVR hardware exists in this session.
+`DVR_NVR_UI_PRODUCTION_ENABLED = NO` — the wizard is real and testable in
+development, but this is a product/commercial-support statement, not a
+capability gap: no physical DVR/NVR has ever driven it.
 
 ## What UX-8 does not claim
 
@@ -78,6 +82,6 @@ session. `DVR_NVR_UI_PRODUCTION_ENABLED = NO` (no wizard UI was built).
   can provide (a CI runner is not a representative field/customer host).
 - No multi-camera capacity, throughput, or stability claim is made (Z3
   blocked).
-- No DVR/NVR **physical** field case exists — the software contract is
-  complete and tested, but no real multi-channel device was ever
-  connected to a real Edge in this session.
+- No DVR/NVR **physical** field case exists — the software contract and
+  onboarding wizard UI are both complete and tested, but no real
+  multi-channel device was ever connected to a real Edge in this session.

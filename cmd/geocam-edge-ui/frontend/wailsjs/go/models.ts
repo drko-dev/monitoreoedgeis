@@ -1,16 +1,16 @@
 export namespace installer {
-
+	
 	export class CameraOnboardingApplyResult {
 	    status: string;
 	    operation_id?: number;
 	    candidate_key: string;
 	    safe_message: string;
 	    sync_observed: boolean;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new CameraOnboardingApplyResult(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.status = source["status"];
@@ -25,11 +25,11 @@ export namespace installer {
 	    width?: number;
 	    height?: number;
 	    fps?: number;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new StreamProfile(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.codec = source["codec"];
@@ -46,11 +46,11 @@ export namespace installer {
 	    credentials_valid: boolean;
 	    blockers?: string[];
 	    warnings?: string[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new CameraOnboardingPlan(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.candidate_key = source["candidate_key"];
@@ -61,7 +61,7 @@ export namespace installer {
 	        this.blockers = source["blockers"];
 	        this.warnings = source["warnings"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -87,11 +87,11 @@ export namespace installer {
 	    model?: string;
 	    username: string;
 	    password: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new CameraOnboardingRequest(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.candidate_key = source["candidate_key"];
@@ -111,11 +111,11 @@ export namespace installer {
 	    rtsp_reason?: string;
 	    profile?: StreamProfile;
 	    passed: boolean;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new CameraValidationResult(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.candidate_key = source["candidate_key"];
@@ -127,7 +127,7 @@ export namespace installer {
 	        this.profile = this.convertValues(source["profile"], StreamProfile);
 	        this.passed = source["passed"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -150,11 +150,11 @@ export namespace installer {
 	    code: string;
 	    device_name?: string;
 	    saas_url?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ClaimRequest(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.code = source["code"];
@@ -168,11 +168,11 @@ export namespace installer {
 	    device_kind: string;
 	    status: string;
 	    edge_id: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ClaimResult(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.device_id = source["device_id"];
@@ -187,11 +187,11 @@ export namespace installer {
 	    pipeline_enabled: boolean;
 	    effective_profile: string;
 	    source: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new CurrentProcessingMode(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.mode = source["mode"];
@@ -208,11 +208,14 @@ export namespace installer {
 	    onvif_available: boolean;
 	    auth_required: boolean;
 	    multi_source: boolean;
-
+	    channel_label?: string;
+	    channel_index?: number;
+	    channel_count?: number;
+	
 	    static createFrom(source: any = {}) {
 	        return new OnboardingCandidate(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.candidate_key = source["candidate_key"];
@@ -222,22 +225,25 @@ export namespace installer {
 	        this.onvif_available = source["onvif_available"];
 	        this.auth_required = source["auth_required"];
 	        this.multi_source = source["multi_source"];
+	        this.channel_label = source["channel_label"];
+	        this.channel_index = source["channel_index"];
+	        this.channel_count = source["channel_count"];
 	    }
 	}
 	export class DiscoverCamerasResult {
 	    candidates: OnboardingCandidate[];
 	    duration_ms: number;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new DiscoverCamerasResult(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.candidates = this.convertValues(source["candidates"], OnboardingCandidate);
 	        this.duration_ms = source["duration_ms"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -263,11 +269,11 @@ export namespace installer {
 	    recoverable: boolean;
 	    next_allowed_actions: string[];
 	    device_id?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new InstallerState(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.state = source["state"];
@@ -278,7 +284,7 @@ export namespace installer {
 	        this.device_id = source["device_id"];
 	    }
 	}
-
+	
 	export class ProcessingModeApplyResult {
 	    requested_product_mode: string;
 	    expected_processing_mode: string;
@@ -291,11 +297,11 @@ export namespace installer {
 	    rolled_back: boolean;
 	    safe_message: string;
 	    warnings?: string[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ProcessingModeApplyResult(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.requested_product_mode = source["requested_product_mode"];
@@ -322,11 +328,11 @@ export namespace installer {
 	    capability_reason?: string;
 	    warnings?: string[];
 	    blockers?: string[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ProcessingModeOption(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.mode = source["mode"];
@@ -352,11 +358,11 @@ export namespace installer {
 	    warnings?: string[];
 	    blockers?: string[];
 	    rollback_available: boolean;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ProcessingModePlan(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.requested_mode = source["requested_mode"];
@@ -373,17 +379,17 @@ export namespace installer {
 	}
 	export class ProcessingModeRequest {
 	    mode: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ProcessingModeRequest(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.mode = source["mode"];
 	    }
 	}
-
+	
 	export class SystemReport {
 	    os: string;
 	    arch: string;
@@ -408,11 +414,11 @@ export namespace installer {
 	    ffprobe_path?: string;
 	    has_gpu_support: boolean;
 	    gpu_info?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new SystemReport(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.os = source["os"];
@@ -444,11 +450,11 @@ export namespace installer {
 	    candidate_key: string;
 	    username: string;
 	    password: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new TestCameraCredentialsRequest(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.candidate_key = source["candidate_key"];
@@ -458,3 +464,4 @@ export namespace installer {
 	}
 
 }
+

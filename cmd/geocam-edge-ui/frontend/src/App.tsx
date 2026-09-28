@@ -13,6 +13,7 @@ import { CameraDiscovery } from './components/CameraDiscovery';
 import { CameraCredentialsForm } from './components/CameraCredentialsForm';
 import { CameraOnboardingResultView } from './components/CameraOnboardingResult';
 import { useCameraOnboarding } from './hooks/useCameraOnboarding';
+import { candidateKeyForRequest, candidateDisplayName } from './utils/cameraOnboardingDisplay';
 import { ProcessingMode, OnboardingCandidate } from './types/installer';
 import './App.css';
 
@@ -70,9 +71,10 @@ export const App: React.FC = () => {
   ) => {
     if (!selectedCandidate) return;
     setPendingCameraForm({ cameraName, manufacturer, model, username, password });
-    const validation = await cameraOnboarding.validate(selectedCandidate.candidate_key, username, password);
+    const candidateKey = candidateKeyForRequest(selectedCandidate);
+    const validation = await cameraOnboarding.validate(candidateKey, username, password);
     if (validation.passed) {
-      await cameraOnboarding.requestPlan(selectedCandidate.candidate_key, cameraName, manufacturer, model, username, password);
+      await cameraOnboarding.requestPlan(candidateKey, cameraName, manufacturer, model, username, password);
     }
   };
 
@@ -81,7 +83,7 @@ export const App: React.FC = () => {
     setCameraStep('result');
     try {
       await cameraOnboarding.apply(
-        selectedCandidate.candidate_key,
+        candidateKeyForRequest(selectedCandidate),
         pendingCameraForm.cameraName,
         pendingCameraForm.manufacturer,
         pendingCameraForm.model,
@@ -194,6 +196,7 @@ export const App: React.FC = () => {
         <CameraOnboardingResultView
           applyResult={cameraOnboarding.applyResult}
           applyError={cameraOnboarding.applyError}
+          cameraLabel={selectedCandidate ? candidateDisplayName(selectedCandidate) : undefined}
           onAddAnother={handleAddAnotherCamera}
           onDone={handleCameraDone}
           onRetry={handleCameraContinue}

@@ -1,7 +1,7 @@
 import React from 'react';
 import { OnboardingCandidate } from '../types/installer';
 import { ScanState } from '../hooks/useCameraOnboarding';
-import { candidateSelectable } from '../utils/cameraOnboardingDisplay';
+import { candidateSelectable, candidateChannelLabel } from '../utils/cameraOnboardingDisplay';
 import { Button } from './Button';
 
 interface CameraDiscoveryProps {
@@ -72,8 +72,13 @@ export const CameraDiscovery: React.FC<CameraDiscoveryProps> = ({
                 <div>
                   <span className="check-label">{c.model || c.manufacturer || c.host}</span>
                   <span className="check-value"> · {c.host}</span>
-                  {c.multi_source && <span className="badge badge-neutral">DVR/NVR not supported</span>}
-                  {!c.onvif_available && !c.multi_source && <span className="badge badge-warning">No ONVIF</span>}
+                  {candidateChannelLabel(c) && (
+                    <span className="badge badge-neutral">{candidateChannelLabel(c)}</span>
+                  )}
+                  {c.multi_source && !candidateChannelLabel(c) && (
+                    <span className="badge badge-warning">Channel identity unresolved</span>
+                  )}
+                  {!c.onvif_available && <span className="badge badge-warning">No ONVIF</span>}
                 </div>
                 <Button
                   variant="secondary"

@@ -6,6 +6,11 @@ import { ErrorAlert } from './ErrorAlert';
 interface CameraOnboardingResultProps {
   applyResult: CameraOnboardingApplyResult | null;
   applyError: SafeError | null;
+  // Device + channel description for the camera this result is about (e.g.
+  // "NVR-8CH · Channel 2 of 4 (CH2)"). Sourced from the candidate the
+  // operator selected, never re-derived from applyResult.candidate_key, so a
+  // DVR/NVR's channels can never be confused with each other here.
+  cameraLabel?: string;
   onAddAnother: () => void;
   onDone: () => void;
   onRetry: () => void;
@@ -14,6 +19,7 @@ interface CameraOnboardingResultProps {
 export const CameraOnboardingResultView: React.FC<CameraOnboardingResultProps> = ({
   applyResult,
   applyError,
+  cameraLabel,
   onAddAnother,
   onDone,
   onRetry,
@@ -42,6 +48,7 @@ export const CameraOnboardingResultView: React.FC<CameraOnboardingResultProps> =
           ✓
         </span>
         <h3 className="card-title">Camera added</h3>
+        {cameraLabel && <p className="state-message">{cameraLabel}</p>}
         <ul className="check-list">
           <li className="check-item">
             <span className="check-icon pass">✓</span>

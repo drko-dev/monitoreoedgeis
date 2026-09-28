@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { OnboardingCandidate, CameraValidationResult, CameraOnboardingPlan } from '../types/installer';
+import { candidateDisplayName, candidateChannelLabel } from '../utils/cameraOnboardingDisplay';
 import { Button } from './Button';
 
 interface CameraCredentialsFormProps {
@@ -31,7 +32,7 @@ export const CameraCredentialsForm: React.FC<CameraCredentialsFormProps> = ({
   onContinue,
   onBack,
 }) => {
-  const [cameraName, setCameraName] = useState(candidate.model || candidate.manufacturer || 'Camera');
+  const [cameraName, setCameraName] = useState(candidateDisplayName({ ...candidate, model: candidate.model || candidate.manufacturer || 'Camera' }));
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
 
@@ -45,6 +46,7 @@ export const CameraCredentialsForm: React.FC<CameraCredentialsFormProps> = ({
       <h3 className="card-title">Camera credentials</h3>
       <p className="state-message">
         {candidate.model || 'Camera'} · {candidate.host}
+        {candidateChannelLabel(candidate) && <> · {candidateChannelLabel(candidate)}</>}
       </p>
 
       <form className="enrollment-form" onSubmit={handleTest}>

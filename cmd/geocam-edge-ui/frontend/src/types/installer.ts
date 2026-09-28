@@ -153,6 +153,14 @@ export interface OnboardingCandidate {
   onvif_available: boolean;
   auth_required: boolean;
   multi_source: boolean;
+  // Present only on a DVR/NVR expanded channel candidate (UX-6). A bare
+  // multi-source device-level candidate never appears in DiscoverCameras
+  // results -- discovery always expands straight to per-channel candidates
+  // (or produces none, if no channel has a usable source token) -- so
+  // multi_source === true implies these three fields are set.
+  channel_label?: string;
+  channel_index?: number;
+  channel_count?: number;
 }
 
 export interface DiscoverCamerasResult {

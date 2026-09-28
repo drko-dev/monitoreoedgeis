@@ -1,9 +1,13 @@
 # UX-6 — DVR/NVR Multichannel Support
 
 **Status:** `UX6_SOFTWARE_STATUS = COMPLETE` (backend: discovery through
-runtime, end to end, with tests). `UX6_PHYSICAL_DVR_NVR = NOT_VALIDATED` (no
-DVR/NVR hardware available to this session). `DVR_NVR_UI_PRODUCTION_ENABLED
-= NO` (no wizard UI was built in this pass — see "What is not built" below).
+runtime, end to end, with tests; onboarding wizard UI: channel discovery,
+selection, credential test, and onboarding, end to end, with tests).
+`UX6_PHYSICAL_DVR_NVR = NOT_VALIDATED` (no DVR/NVR hardware available to
+this session). `DVR_NVR_UI_PRODUCTION_ENABLED = NO` (a product/commercial
+statement, not a code gate: the wizard is real and fully exercisable in
+development/test, but no DVR/NVR has ever driven it physically — see
+"Physical status" below).
 
 ## Channel identity model
 
@@ -118,16 +122,59 @@ token) and the `UNIQUE(device_id, edge_camera_identifier)` constraint
 itself (same token on another device cannot collide, since the constraint
 is scoped per device already).
 
-## What is not built (explicitly out of scope for this pass)
+## The onboarding wizard UI (`cmd/geocam-edge-ui/frontend`)
 
-- **The DVR/NVR onboarding wizard UI** (React): channel enumeration,
-  multi-select, per-channel credential test screen. The backend contract
-  this UI would call is complete and tested; the screens themselves were
-  not built. `DVR_NVR_UI_PRODUCTION_ENABLED` stays `NO` regardless — no UI
-  means nothing to gate.
-- **Profile selection remains automatic** per channel (first usable
-  profile), same simplification as single-source UX-4 — no physical
-  blocker demonstrated a need for a manual per-channel selector.
+The React onboarding wizard consumes the backend contract above with no
+changes to the SaaS/backend surface:
+
+- **Discovery** (`CameraDiscovery.tsx`): `DiscoverCameras` already returns
+  one `OnboardingCandidate` per channel for a multi-source device (never a
+  bare device-level candidate) — the existing flat candidate list therefore
+  already shows each DVR/NVR channel as its own row; no regrouping was
+  needed. Each row's badge shows `candidateChannelLabel()` (e.g.
+  `Channel 2 of 4 (CH2)`) instead of the old blanket "DVR/NVR not
+  supported".
+- **Selection** (`utils/cameraOnboardingDisplay.ts`): `candidateSelectable()`
+  no longer rejects every `multi_source` candidate. It rejects a candidate
+  only when ONVIF is unreachable, or when it is `multi_source` with no
+  resolved `channel_index` (a bare device-level candidate — never actually
+  emitted by `DiscoverCameras`, but the UI stays fail-closed against it
+  defensively). An expanded channel candidate (`multi_source: true` +
+  `channel_index` set) is selectable exactly like a single-source one.
+- **Credential test** (`CameraCredentialsForm.tsx`): unchanged flow, reused
+  as-is. The channel's own composite `candidate_key`
+  (`candidateKeyForRequest()`) is the only key ever sent — never
+  reconstructed or swapped for a sibling channel's — and the header now
+  shows the channel label so the operator knows exactly which stream is
+  being tested. The backend already filters `GetProfilesAuth` results down
+  to that channel's `VideoSourceToken` (see above), so the test result
+  (ONVIF/RTSP/profile) can never belong to another channel.
+- **Onboarding** (`App.tsx` → `PlanCameraOnboarding`/`ApplyCameraOnboarding`):
+  reused exactly as UX-4 built it, keyed by the channel's `candidate_key`.
+  No `channel_id` field was added outside `candidate_key` — the backend
+  doesn't need one.
+- **Result** (`CameraOnboardingResult.tsx`): shows a `cameraLabel`
+  (`candidateDisplayName()`, e.g. `NVR-8CH · Channel 2 of 4 (CH2)`) sourced
+  from the selected candidate in memory, never re-derived from the apply
+  result — so two channels of the same device can never be confused in the
+  success screen.
+- **Multiple channels**: the operator onboards one channel, then clicks
+  "Add another camera" (pre-existing `handleAddAnotherCamera`, unchanged),
+  which re-scans and shows the remaining channels as independent
+  candidates. No batch/multi-select onboarding was added — not required to
+  close UX-6.
+
+Frontend tests (`src/types/cameraOnboarding.test.ts`, pure `node:test`, no
+jsdom — this repo's established pattern): single-source selectable,
+single-source no-ONVIF disabled, bare multi-source disabled, expanded
+channel candidate selectable, channel candidate missing identity disabled,
+distinct channel labels/display names for two channels of the same device
+(never collapse), and `candidateKeyForRequest` echoing each channel's exact
+key unchanged.
+
+**Profile selection remains automatic** per channel (first usable profile),
+same simplification as single-source UX-4 — no physical blocker
+demonstrated a need for a manual per-channel selector.
 
 ## Physical status
 

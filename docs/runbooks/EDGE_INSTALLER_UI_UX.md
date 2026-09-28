@@ -130,17 +130,19 @@ This is the first production target for the UI/UX installer and should use the e
 
 ### DVR / NVR
 
-DVR/NVR is a separate technical milestone.
+`UX6_SOFTWARE_STATUS = COMPLETE`: discovery, ONVIF profile resolution,
+installer onboarding, and the daemon's reconciler/runtime all support
+independent per-channel identity end to end, and the onboarding wizard
+(`CameraDiscovery`, `CameraCredentialsForm`, `CameraOnboardingResult`)
+consumes it — a DVR/NVR's channels are listed as distinct selectable
+candidates (`Channel N of M`), each with its own credential test, plan, and
+apply, never collapsed into one camera target. See
+`docs/product/UX6_DVR_NVR_MULTICHANNEL.md` for the full contract and tests.
 
-Current product status: `NOT_VALIDATED` for multi-source/multi-channel devices.
-
-The current camera-target identity model is device-oriented and the existing technical design intentionally avoids collapsing multiple DVR/NVR channels into one camera target. Until per-channel identity, discovery, credentials, RTSP selection, status, and processing are implemented and physically validated, the UI must not claim DVR/NVR support.
-
-During early UI development, the DVR/NVR option may be visible but disabled with an explicit status such as:
-
-`DVR/NVR multichannel support: not available in this version.`
-
-DVR/NVR implementation belongs to its own technical milestone/runbook and must not block completion of the first camera-IP installer.
+`UX6_PHYSICAL_DVR_NVR = NOT_VALIDATED` — no DVR/NVR hardware has exercised
+this UI. `DVR_NVR_UI_PRODUCTION_ENABLED = NO` remains the product's
+commercial-support gate: the code path is real and testable in
+development, but nothing here claims a physical device has ever driven it.
 
 ## 8. Camera discovery flow
 
@@ -475,8 +477,9 @@ Deliverables:
 - ✅ local discovery screen (`CameraDiscovery.tsx`, `discovery.Engine` run
   as an independent in-process instance — same engine `internal/agent`
   runs, no conflict with a live daemon)
-- ✅ camera selection (opaque `StableIdentity` candidate key; DVR/NVR
-  refused, disabled in the UI and independently rejected by the backend)
+- ✅ camera selection (opaque `StableIdentity` candidate key; DVR/NVR was
+  refused at UX-4 time — superseded by UX-6, see below, which supports
+  independent per-channel candidates)
 - ✅ credential entry and safe test (`CameraCredentialsForm.tsx` +
   `TestCameraCredentials`: real ONVIF auth → profiles → stream URI → real
   RTSP DESCRIBE, never persisted client-side)
@@ -517,18 +520,26 @@ Exit criterion: installer cannot show success unless the selected runtime path i
 
 ### UX-6 — DVR/NVR multichannel
 
-Status: `SEPARATE MILESTONE / NOT_VALIDATED`
+Status: `UX6_SOFTWARE_STATUS = COMPLETE`, `UX6_PHYSICAL_DVR_NVR = NOT_VALIDATED`.
 
-Required technical work before enabling the GUI option:
+All of the following are implemented and tested (see
+`docs/product/UX6_DVR_NVR_MULTICHANNEL.md`):
 
-- per-channel stable identity
-- channel enumeration/discovery
-- per-channel credential/stream mapping
+- per-channel stable identity (`discovery.ChannelCandidateKey`)
+- channel enumeration/discovery (ONVIF `VideoSourceToken` per channel)
+- per-channel credential/stream mapping (one credential test per channel,
+  filtered to that channel's own ONVIF profile)
 - RTSP URI/profile selection per channel
-- independent supervisor/pipeline/status per channel
-- SaaS camera/channel model agreement
-- Cloud/Hybrid/Full Edge behavior per channel
-- physical DVR/NVR E2E test
+- independent reconciler target per channel (`buildCameraTargets`)
+- SaaS camera/channel model agreement (opaque `candidate_key`, migration 083)
+- onboarding wizard UI (`CameraDiscovery`, `CameraCredentialsForm`,
+  `CameraOnboardingResult`) lists, tests, and onboards each channel
+  independently
+
+Still open: Cloud/Hybrid/Full Edge behavior per channel was not specifically
+re-tested per channel (it is per-camera-target, already channel-independent
+by construction, but no dedicated test asserts it), and the physical DVR/NVR
+E2E test — no DVR/NVR hardware exists in this session.
 
 Exit criterion: multiple channels from one real DVR/NVR operate independently without identity collapse or silent loss.
 
@@ -584,8 +595,8 @@ Exit criterion: a technician unfamiliar with repository internals can complete i
 | Cloud/Hybrid/Full Edge selector | **UX3_STATUS = COMPLETE** — verifies effective profile against real daemon state | — |
 | Camera IP onboarding GUI | **UX4_STATUS = COMPLETE** | — |
 | Commissioning dashboard / physical validation | **UX5_STATUS = PHYSICAL PASS** (real TP-Link Tapo TC70, `UX5_PHYSICAL_COMMISSIONING.md`) | Second camera/model, deliberate fault-injection remain open evidence |
-| DVR/NVR multichannel | **UX6_SOFTWARE_STATUS = PARTIAL** (data model exists, onboarding/reconciler/SaaS layers still fail-closed by design); **UX6_PHYSICAL = NOT_VALIDATED**; `DVR_NVR_ENABLED = NO` | `UX6_DVR_NVR_MULTICHANNEL.md` has the audited gap + proposed design |
-| Windows/Linux/macOS GUI release pipeline | **UX7_BUILD_PIPELINE_WRITTEN = YES** (`installer-release.yml`), never executed; **UX7_OFFICIAL_SIGNING = BLOCKED_EXTERNAL_SECRET** | Trigger a real tag run; provide signing secrets |
+| DVR/NVR multichannel | **UX6_SOFTWARE_STATUS = COMPLETE** (backend + onboarding wizard UI, both real and tested); **UX6_PHYSICAL_DVR_NVR = NOT_VALIDATED**; `DVR_NVR_UI_PRODUCTION_ENABLED = NO` | `UX6_DVR_NVR_MULTICHANNEL.md` has the implementation, tests, and physical gate |
+| Windows/Linux/macOS GUI release pipeline | **UX7_BUILD_PIPELINE = COMPLETE** (all 4 platforms built for real on GitHub Actions); **UX7_SIGNING_IMPLEMENTATION = COMPLETE**, **UX7_*_SIGNING_EXECUTION = BLOCKED_EXTERNAL_SECRET** | Provide signing secrets; push an official tag when ready |
 | End-user installer E2E / field acceptance | **UX8** — see `UX8_FIELD_ACCEPTANCE.md` matrix; multi-camera pilot (Z3) `BLOCKED_PHYSICAL_RESOURCES` (1 of 5 minimum cameras available) | Additional physical hardware/platforms |
 
 ## 19. Recommended implementation order
@@ -602,7 +613,9 @@ Recommended order:
 6. UX-5 — commissioning/diagnostics.
 7. UX-7 — cross-platform release automation.
 8. UX-8 — full installer E2E/field validation.
-9. UX-6 — DVR/NVR can proceed as a parallel technical track, but its UI must stay disabled until its own acceptance criteria are green.
+9. UX-6 — DVR/NVR: software (backend + onboarding wizard UI) is complete and
+   testable in development; `DVR_NVR_UI_PRODUCTION_ENABLED` stays a distinct,
+   explicit gate until a real DVR/NVR has been physically validated.
 
 ## 20. Definition of done for Installer v1
 
