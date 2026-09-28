@@ -1,7 +1,7 @@
 # UX-1: Wails v2 + React Desktop Installer Application Shell
 
 > **Target Version:** GEO CAM Edge Installer v1.0  
-> **Status:** IMPLEMENTED / TESTED LOCAL  
+> **Status:** IMPLEMENTED / TESTED LOCAL — **UX1_STATUS = COMPLETE** (re-verified during Final UX Closure: go build/vet/test, frontend tsc/Vite build, Wails darwin/arm64 build all green, no redesign)
 > **Scope:** Working desktop application shell bridging Wails v2 to the Go installer facade.  
 > **Reference Documents:**  
 > - [`docs/runbooks/EDGE_INSTALLER_UI_UX.md`](../runbooks/EDGE_INSTALLER_UI_UX.md)  

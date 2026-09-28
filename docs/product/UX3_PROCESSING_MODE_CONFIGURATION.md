@@ -1,6 +1,6 @@
 # UX-3 — Processing Mode / Effective Profile Configuration
 
-**Status:** Implemented / Tested Local
+**Status:** Implemented / Tested Local — **UX3_STATUS = COMPLETE** (re-verified during Final UX Closure: `internal/installer/processing_mode.go` verifies `ExpectedEffectiveProfile` against `ActualEffectiveProfile`/`snap.Profile` read from the real running daemon's status snapshot — selecting "edge" without the pipeline actually enabled never reports Full Edge)
 **Branch:** `feature/ux3-processing-mode`
 **Base:** `feature/ux2-secure-enrollment` @ `20c91e9`
 **Milestone:** UX-3

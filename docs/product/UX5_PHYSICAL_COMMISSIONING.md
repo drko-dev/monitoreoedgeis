@@ -44,11 +44,24 @@ independently confirmed for real (`GET /api/v1/edge/me` -> 200, correct
 `device_kind=edge`, correct organization) before touching the camera flow.
 
 ```
-EDGE_PROVISIONING_FOR_UX5   = ADMIN_API_REAL
-UX2_SELF_SERVICE_CLAIM      = NOT_AVAILABLE_ON_MAIN (exists only on feature/ux2-edge-claim, unmerged)
-UX2_SELF_SERVICE_CLAIM_VALIDATED = NO
+EDGE_PROVISIONING_FOR_UX5   = ADMIN_API_REAL (this milestone's own run predates the claim closure below)
+UX2_SELF_SERVICE_CLAIM_IMPLEMENTED = YES
+UX2_SELF_SERVICE_CLAIM_BRANCH      = feature/ux2-claim-closure (monitoreoia)
+UX2_SELF_SERVICE_CLAIM_FUNCTIONAL  = PASS (real HTTP, real Postgres, real Go ClaimDevice, GET /edge/me 200 — see docs/saas/21-edge-self-service-claim.md)
+UX2_SELF_SERVICE_CLAIM_ON_MAIN     = NO
 EDGE_CREDENTIAL_AUTH        = PASS
 ```
+
+*Update (Final UX Closure):* the self-service claim gap this section
+originally flagged is closed functionally — `feature/ux2-claim-closure`
+reconciled `POST /api/v1/edge/claim` onto the SaaS base and validated it
+end-to-end with the real, unmodified Go `ClaimDevice` code, including a
+correct `edge_id` binding that the admin-API workaround above did not
+produce. It is **not yet on SaaS `main`**, so a fresh commissioning run
+today still needs that branch deployed, or the admin-API path above, to
+provision the Edge. This does not reopen UX-5's PASS: the camera-onboarding
+contract validated in this document never depended on which provisioning
+path produced the Edge credential.
 
 This is a real integration gap for **UX-2's own** self-service enrollment on
 `main`, tracked separately — it does not affect the UX-4/UX-5 camera

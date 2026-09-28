@@ -157,7 +157,7 @@ func TestWritePersistentValuesCreatesFileAndRoundTrips(t *testing.T) {
 	t.Setenv(ConfigFileEnv, path)
 
 	if err := WritePersistentValues(map[string]string{
-		"GEOCAM_PROCESSING_MODE":       "edge",
+		"GEOCAM_PROCESSING_MODE":        "edge",
 		"GEOCAM_VIDEO_PIPELINE_ENABLED": "true",
 	}); err != nil {
 		t.Fatalf("WritePersistentValues: %v", err)

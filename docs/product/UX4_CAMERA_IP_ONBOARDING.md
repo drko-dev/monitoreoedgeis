@@ -1,6 +1,6 @@
 # UX-4 — Camera IP Onboarding
 
-**Status:** Implemented / Tested Local
+**Status:** Implemented / Tested Local — **UX4_STATUS = COMPLETE** (physically confirmed end-to-end against a real camera in UX-5; SaaS remains sole credential authority, Installer never calls `cameracreds.Store.Apply` directly, DVR/NVR stays out of scope)
 **Branch:** `feature/ux4-camera-ip-onboarding`
 **Base:** `feature/ux3-processing-mode` @ `261189e82a5f48b9749ad2e92b609b10ddfc88b1`
 **Cross-repo counterpart:** `drko-dev/monitoreoia`,

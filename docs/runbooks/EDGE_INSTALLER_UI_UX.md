@@ -575,19 +575,18 @@ Exit criterion: a technician unfamiliar with repository internals can complete i
 | Area | Current state | Next action |
 |---|---|---|
 | Core Edge/CLI | Exists | Reuse, do not duplicate |
-| Backend/UI Contract Audit | Completed (`UX0_INSTALLER_CONTRACT_AUDIT.md`) | Base for UX-1 facade |
+| Backend/UI Contract Audit | **UX0_STATUS = COMPLETE** (`UX0_INSTALLER_CONTRACT_AUDIT.md`) | — |
 | Camera technical runbook | Exists | Use as backend truth for UI |
 | Full Edge technical runbook | Exists | Use as backend truth for UI |
-| Linux release workflow | Exists for current appliance artifacts | Extend for GUI/cross-platform |
-| GUI installer | Shell implemented (`cmd/geocam-edge-ui`) | UX-2 (Enrollment) |
-| Enrollment UX | Needs productized flow | UX-2 |
-| Cloud/Hybrid/Full Edge selector | Backend modes exist; GUI absent | UX-3 |
-| Camera IP onboarding GUI | Backend pieces exist; GUI absent | UX-4 |
-| Commissioning dashboard | Not implemented | UX-5 |
-| DVR/NVR multichannel | Not validated / separate milestone | UX-6 |
-| Windows GUI release | Not implemented | UX-7 |
-| macOS Apple Silicon GUI release | Not implemented | UX-7 |
-| End-user installer E2E | Not done | UX-8 |
+| Linux appliance release workflow | Exists (`release.yml`, daemon only) | Separate from GUI — see UX-7 |
+| GUI installer shell | **UX1_STATUS = COMPLETE** (`cmd/geocam-edge-ui`, Wails v2 + React, build/tests verified) | — |
+| Enrollment UX (self-service claim) | **UX2_STATUS = COMPLETE (functional)**, SaaS-side on `feature/ux2-claim-closure`, not `main` | Merge SaaS claim closure branch when authorized |
+| Cloud/Hybrid/Full Edge selector | **UX3_STATUS = COMPLETE** — verifies effective profile against real daemon state | — |
+| Camera IP onboarding GUI | **UX4_STATUS = COMPLETE** | — |
+| Commissioning dashboard / physical validation | **UX5_STATUS = PHYSICAL PASS** (real TP-Link Tapo TC70, `UX5_PHYSICAL_COMMISSIONING.md`) | Second camera/model, deliberate fault-injection remain open evidence |
+| DVR/NVR multichannel | **UX6_SOFTWARE_STATUS = PARTIAL** (data model exists, onboarding/reconciler/SaaS layers still fail-closed by design); **UX6_PHYSICAL = NOT_VALIDATED**; `DVR_NVR_ENABLED = NO` | `UX6_DVR_NVR_MULTICHANNEL.md` has the audited gap + proposed design |
+| Windows/Linux/macOS GUI release pipeline | **UX7_BUILD_PIPELINE_WRITTEN = YES** (`installer-release.yml`), never executed; **UX7_OFFICIAL_SIGNING = BLOCKED_EXTERNAL_SECRET** | Trigger a real tag run; provide signing secrets |
+| End-user installer E2E / field acceptance | **UX8** — see `UX8_FIELD_ACCEPTANCE.md` matrix; multi-camera pilot (Z3) `BLOCKED_PHYSICAL_RESOURCES` (1 of 5 minimum cameras available) | Additional physical hardware/platforms |
 
 ## 19. Recommended implementation order
 

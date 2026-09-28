@@ -1,7 +1,7 @@
 # UX-0: Edge Installer UI/UX Backend Contract Audit & Architectural Specification
 
 > **Target Version:** GEO CAM Edge Installer v1.0  
-> **Status:** AUDITED & APPROVED FOR UX-1  
+> **Status:** AUDITED & APPROVED FOR UX-1 — **UX0_STATUS = COMPLETE** (see Final UX Closure Update at the end of this document; the SaaS enrollment gap this document originally flagged as blocking is resolved)
 > **Scope:** Definitive technical bridge between the planned Wails v2 + React desktop interface and the existing Go backend services.  
 > **Reference Runbook:** [`docs/runbooks/EDGE_INSTALLER_UI_UX.md`](file:///Users/gustavomarcon/Documents/proyectos/monitoreoedgeis-worktrees/ux0-installer-contract-audit/docs/runbooks/EDGE_INSTALLER_UI_UX.md)
 
@@ -16,7 +16,7 @@ This document defines the architectural contract between the proposed Wails v2 d
 ### Key Findings
 1. **Core Domain Completeness:** Approximately 70% of the underlying business logic required for installation already exists in mature Go packages (`internal/discovery`, `internal/onviftest`, `internal/rtsptest`, `internal/cameracreds`, `internal/credentials`, `internal/identity`, `internal/config`, and `internal/health`).
 2. **Missing Architectural Facade:** The existing code is exposed primarily via CLI subcommands (`cmd/geocam-edge/*.go`) or background daemon subsystems. It lacks a cohesive, structured, in-process Application Service layer (`internal/installer`) with typed request/response contracts, timeout handling, and progress streaming suitable for desktop GUI bindings.
-3. **Primary External Blocker (SaaS Enrollment Gap):** Current enrollment (`internal/credentials.Enroll`) requires long-lived SaaS administrator credentials (`admin_user`, `admin_password`) transmitted directly to SaaS `POST /api/v1/edge/enroll`. This violates the security boundary for field technician tools. A short-lived, single-use claim token workflow (`POST /api/v1/edge/claim`) must be introduced on SaaS or emulated safely.
+3. **Primary External Blocker (SaaS Enrollment Gap) — RESOLVED.** Current enrollment (`internal/credentials.Enroll`) requires long-lived SaaS administrator credentials (`admin_user`, `admin_password`) transmitted directly to SaaS `POST /api/v1/edge/enroll`. This violates the security boundary for field technician tools. A short-lived, single-use claim token workflow (`POST /api/v1/edge/claim`) must be introduced on SaaS or emulated safely. *Update (Final UX Closure): this is implemented. The Edge side (`internal/installer.Service.ClaimDevice`, short-lived Crockford enrollment code, zero-knowledge device credential) has existed since UX-2. The SaaS side (`POST /api/v1/edge/claim` + `POST/GET /api/v1/edge/enrollment-codes`) is implemented and functionally validated end-to-end (real HTTP, real Postgres, real Go installer) on `monitoreoia` branch `feature/ux2-claim-closure` — not yet on `main`. No admin password is ever transmitted by the Edge for this flow.*
 4. **Process Concurrency & Lock Contention:** The daemon (`geocam-edge run`) enforces single-instance mutual exclusion via `internal/instance.Acquire(dataDir)`. A pure in-process Wails application cannot inspect or control a running daemon if it attempts to re-acquire the same file lock. Consequently, a **Hybrid Architecture** is mandated: an in-process Facade during pre-installation/configuration, transitioning to an authenticated local loopback HTTP client (`127.0.0.1:8091`) once the background service is running.
 5. **DVR/NVR Multi-channel Isolation:** Multi-channel DVR/NVR onboarding remains categorized as `SEPARATE_MILESTONE` / `NOT_VALIDATED` due to unaddressed identity collapse risks and channel multiplexing constraints. The UI must explicitly disable or hide multi-channel DVR/NVR options in Installer v1.
 
@@ -84,7 +84,7 @@ The following matrix maps every technician action across the installation and co
 |---|---|---|---|---|---|---|---|
 | **A: Pre-flight System Check** | Step 1: Welcome & Prerequisites | `internal/platform`, `internal/rtsptest` | `platform.DefaultDataDir()`, check `exec.LookPath("ffmpeg")` | Local OS user | Read CPU/RAM/Disk stats, verify write permissions on DataDir | `REUSE_WITH_FACADE` | Needs unified `SystemReport` returning OS, arch, memory, disk space, and external binaries (`ffmpeg`, `ffprobe`). |
 | **B: Read Current Device State** | Step 1: Welcome | `internal/identity`, `internal/credentials` | `identity.Load()`, `credentials.Load()` | Local OS user | Read `identity.json`, `credentials.json` | `REUSE_DIRECT` | Returns whether device is already enrolled, device ID, and tenant/site metadata. |
-| **C: Enroll with Short-Lived Code** | Step 2: SaaS Enrollment | `internal/credentials` | `credentials.Enroll(ctx, ...)` | Short-lived claim token (OTP) | Network request to SaaS, writes `credentials.json`, `identity.json` | `MISSING_BACKEND` | Existing `credentials.Enroll` expects SaaS admin user/password. SaaS must provide `POST /api/v1/edge/claim` accepting claim token. |
+| **C: Enroll with Short-Lived Code** | Step 2: SaaS Enrollment | `internal/installer` (`Service.ClaimDevice`) | `ClaimDevice(ctx, ClaimRequest)` | Short-lived Crockford claim code | Network request to SaaS `POST /api/v1/edge/claim`, writes `credentials.json`, `identity.json` via `credentials.Save`/`identity.Load` | `IMPLEMENTED` (was `MISSING_BACKEND`) | Resolved: SaaS `POST /api/v1/edge/claim` + admin `POST/GET /api/v1/edge/enrollment-codes` exist on `monitoreoia` `feature/ux2-claim-closure`, functionally validated end-to-end. Not yet on SaaS `main`. |
 | **D: Configure Device Identity** | Step 2: SaaS Enrollment | `internal/identity` | `identity.Save(deviceIdentity)` | Local OS user | Writes `identity.json` | `REUSE_DIRECT` | Allows operator to set human-readable Edge name and site tag if not assigned by SaaS claim response. |
 | **E: Select Processing Mode** | Step 3: Mode & Profile Selection | `internal/config` | `config.Load()`, validation logic | None | Modifies in-memory config struct | `REUSE_WITH_FACADE` | UI presents Cloud, Hybrid, Full Edge. Must map to `GEOCAM_PROCESSING_MODE` and profile requirements. |
 | **F: Validate Mode Hardware Compatibility** | Step 3: Mode & Profile Selection | `internal/fulledge`, `internal/platform` | Custom inspection logic | None | Probes GPU (CUDA/DirectML/Metal), RAM (>4GB for Full Edge) | `MISSING_EDGE_SERVICE` | Full Edge requires local YOLO worker. Must check RAM and Python/model runtime availability before allowing selection. |
@@ -635,7 +635,7 @@ Before writing Wails v2 frontend code in milestone UX-1, the following foundatio
 
 | Priority | Blocker ID | Description | Impact | Resolution Path |
 |---|---|---|---|---|
-| **P0** | `BLK-ENROLL-SaaS` | SaaS lacks single-use short-lived claim token API (`POST /api/v1/edge/claim`). | Installer cannot meet security requirement 4.3 without storing admin password. | Coordinate with SaaS team to implement claim endpoint; provide mock claim provider in Edge tests. |
+| **P0** | `BLK-ENROLL-SaaS` — **RESOLVED** | SaaS lacks single-use short-lived claim token API (`POST /api/v1/edge/claim`). | Installer cannot meet security requirement 4.3 without storing admin password. | Implemented on `monitoreoia` `feature/ux2-claim-closure`: `POST /api/v1/edge/claim` + admin `enrollment-codes` API, functionally validated end-to-end. Merge to `main` pending. |
 | **P0** | `BLK-LOCK-COLLISION` | `internal/instance.Acquire` blocks GUI from inspecting local status if running in same process. | GUI crashes or hangs if attempting to start pipelines while daemon is active. | Mandate Hybrid Architecture (Section 5): GUI connects via loopback HTTP once service is started. |
 | **P1** | `BLK-ELEVATION-FLOW` | Cross-platform service installation lacks standard unprivileged-to-privileged escalation bridge. | Service registration fails silently on Linux/macOS when run as normal user. | Implement helper subcommand (`geocam-edge service install --elevated`) triggered via OS dialog. |
 | **P2** | `BLK-FULL-EDGE-BUNDLE`| Full Edge mode requires external Python worker and ONNX models on local disk. | Full Edge fails to commission on machines without Python/models pre-installed. | Include pre-packaged standalone Python worker binary or flag Full Edge as requiring manual runtime setup. |
@@ -698,3 +698,18 @@ To ensure rapid, defect-free execution without building unbacked UI screens, imp
 | - End-to-end field testing on physical hardware with IP cameras.      |
 +-----------------------------------------------------------------------+
 ```
+
+---
+
+## Final UX Closure Update
+
+`UX0_STATUS = COMPLETE`
+
+This audit's P0 architectural blocker (`BLK-ENROLL-SaaS`) is resolved: the
+claim contract this document specified (`POST /api/v1/edge/claim`) is
+implemented on both sides and validated end-to-end (see
+`docs/product/UX5_PHYSICAL_COMMISSIONING.md` and, in `monitoreoia`,
+`docs/saas/21-edge-self-service-claim.md`). Everything else this document
+predicted about the in-process facade / hybrid architecture / instance-lock
+handling was confirmed correct by UX1–UX5's actual implementation — no
+architectural rework was needed.

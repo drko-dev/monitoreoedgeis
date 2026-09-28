@@ -24,11 +24,11 @@ func TestCrockfordNormalization(t *testing.T) {
 		{"K9X4-7MB2", "K9X47MB2", true},
 		{"k9x4-7mb2", "K9X47MB2", true},
 		{"k9x4 7mb2", "K9X47MB2", true},
-		{"O9X4-LMB2", "09X41MB2", true},  // O -> 0, L -> 1
-		{"i9x4-7mb2", "19X47MB2", true},  // i -> 1
-		{"k9x4", "K9X4", false},          // Too short
+		{"O9X4-LMB2", "09X41MB2", true},             // O -> 0, L -> 1
+		{"i9x4-7mb2", "19X47MB2", true},             // i -> 1
+		{"k9x4", "K9X4", false},                     // Too short
 		{"k9x4-7mb2-extra", "K9X47MB2EXTRA", false}, // Too long
-		{"k9x4-7mb!", "", false},         // Invalid char
+		{"k9x4-7mb!", "", false},                    // Invalid char
 	}
 
 	for _, tc := range cases {

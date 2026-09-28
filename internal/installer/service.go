@@ -53,9 +53,9 @@ func NewService(dataDir, configFilePath string) *Service {
 		dataDir = config.DefaultDataDir
 	}
 	return &Service{
-		DataDir:            dataDir,
-		ConfigFilePath:     configFilePath,
-		HealthAddr:         config.DefaultHealthAddr,
+		DataDir:        dataDir,
+		ConfigFilePath: configFilePath,
+		HealthAddr:     config.DefaultHealthAddr,
 		httpClient: &http.Client{
 			Timeout: 350 * time.Millisecond,
 		},

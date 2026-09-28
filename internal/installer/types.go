@@ -96,11 +96,11 @@ const (
 
 // Allowed Actions for UI navigation
 const (
-	ActionProceedToEnrollment    = "PROCEED_TO_ENROLLMENT"
-	ActionRefresh                = "REFRESH"
-	ActionViewDashboard          = "VIEW_DASHBOARD"
-	ActionReconfigure            = "RECONFIGURE"
-	ActionReEnroll               = "RE_ENROLL"
-	ActionFactoryReset           = "FACTORY_RESET"
+	ActionProceedToEnrollment     = "PROCEED_TO_ENROLLMENT"
+	ActionRefresh                 = "REFRESH"
+	ActionViewDashboard           = "VIEW_DASHBOARD"
+	ActionReconfigure             = "RECONFIGURE"
+	ActionReEnroll                = "RE_ENROLL"
+	ActionFactoryReset            = "FACTORY_RESET"
 	ActionConfigureProcessingMode = "CONFIGURE_PROCESSING_MODE"
 )
