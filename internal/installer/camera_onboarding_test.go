@@ -193,3 +193,111 @@ func TestNewIdempotencyKeyIsUniquePerCall(t *testing.T) {
 		t.Fatalf("idempotency keys not unique/non-empty: %q %q", a, b)
 	}
 }
+
+// seedChannelCandidates injects a multi-source device into the discovery
+// cache the same way a real DiscoverCameras call does since UX-6: one map
+// entry per channel, keyed by its own composite candidate key.
+func seedChannelCandidates(svc *Service, d discovery.DiscoveredDevice) {
+	svc.discoveryMu.Lock()
+	if svc.discoveredDevices == nil {
+		svc.discoveredDevices = map[string]discovery.DiscoveredDevice{}
+	}
+	for _, vs := range d.VideoSources {
+		if vs.SourceToken == "" {
+			continue
+		}
+		svc.discoveredDevices[discovery.ChannelCandidateKey(d.StableIdentity, vs.SourceToken)] = d
+	}
+	svc.discoveryMu.Unlock()
+}
+
+// TestNewChannelOnboardingCandidates_OneCandidatePerChannel guards UX-6's
+// core Edge-side model: a multi-source device expands into N independent
+// OnboardingCandidate entries, each with its own composite CandidateKey,
+// never a single disabled "device" entry.
+func TestNewChannelOnboardingCandidates_OneCandidatePerChannel(t *testing.T) {
+	d := discovery.DiscoveredDevice{
+		StableIdentity: "epr:nvr-42",
+		IP:             "192.168.1.60",
+		Manufacturer:   "Hikvision",
+		Model:          "DS-7608NI",
+		XAddr:          "http://192.168.1.60/onvif/device_service",
+		AuthRequired:   true,
+		VideoSources: []discovery.VideoSource{
+			{SourceToken: "ch1", Label: "Front door"},
+			{SourceToken: "ch2", Label: "Warehouse"},
+			{SourceToken: "ch3", Label: "Loading dock"},
+			{SourceToken: "ch4", Label: "Office"},
+		},
+	}
+
+	candidates := newChannelOnboardingCandidates(d)
+	if len(candidates) != 4 {
+		t.Fatalf("expected 4 channel candidates, got %d", len(candidates))
+	}
+
+	seenKeys := map[string]bool{}
+	for i, c := range candidates {
+		if !c.MultiSource {
+			t.Fatalf("candidate %d: expected MultiSource=true", i)
+		}
+		wantKey := discovery.ChannelCandidateKey("epr:nvr-42", d.VideoSources[i].SourceToken)
+		if c.CandidateKey != wantKey {
+			t.Fatalf("candidate %d: expected CandidateKey %q, got %q", i, wantKey, c.CandidateKey)
+		}
+		if seenKeys[c.CandidateKey] {
+			t.Fatalf("candidate %d: duplicate CandidateKey %q -- two channels collapsed", i, c.CandidateKey)
+		}
+		seenKeys[c.CandidateKey] = true
+		if c.ChannelLabel != d.VideoSources[i].Label {
+			t.Fatalf("candidate %d: expected ChannelLabel %q, got %q", i, d.VideoSources[i].Label, c.ChannelLabel)
+		}
+		if c.ChannelCount != 4 {
+			t.Fatalf("candidate %d: expected ChannelCount 4, got %d", i, c.ChannelCount)
+		}
+	}
+}
+
+// TestNewChannelOnboardingCandidates_EmptySourceTokenSkipped guards against
+// fabricating an identity for a channel the device itself didn't give a
+// stable token for -- matching buildCameraTargets' same rule.
+func TestNewChannelOnboardingCandidates_EmptySourceTokenSkipped(t *testing.T) {
+	d := discovery.DiscoveredDevice{
+		StableIdentity: "epr:nvr-43",
+		VideoSources: []discovery.VideoSource{
+			{SourceToken: "ch1"},
+			{SourceToken: ""}, // malformed/unsupported device response
+		},
+	}
+	candidates := newChannelOnboardingCandidates(d)
+	if len(candidates) != 1 {
+		t.Fatalf("expected exactly 1 candidate (empty-token channel skipped), got %d: %+v", len(candidates), candidates)
+	}
+}
+
+// TestGetDiscoveredCamera_ResolvesSpecificChannel guards that
+// GetDiscoveredCamera, given one channel's composite candidate key, returns
+// that channel's own OnboardingCandidate -- not the device's first channel,
+// not an error, not another channel's data.
+func TestGetDiscoveredCamera_ResolvesSpecificChannel(t *testing.T) {
+	svc := newIsolatedService(t)
+	d := discovery.DiscoveredDevice{
+		StableIdentity: "epr:nvr-44",
+		IP:             "192.168.1.61",
+		XAddr:          "http://192.168.1.61/onvif/device_service",
+		VideoSources: []discovery.VideoSource{
+			{SourceToken: "ch1", Label: "Lobby"},
+			{SourceToken: "ch2", Label: "Parking"},
+		},
+	}
+	seedChannelCandidates(svc, d)
+
+	ch2Key := discovery.ChannelCandidateKey("epr:nvr-44", "ch2")
+	got, err := svc.GetDiscoveredCamera(context.Background(), ch2Key)
+	if err != nil {
+		t.Fatalf("GetDiscoveredCamera: %v", err)
+	}
+	if got.CandidateKey != ch2Key || got.ChannelLabel != "Parking" {
+		t.Fatalf("expected channel 2 (Parking), got %+v", got)
+	}
+}

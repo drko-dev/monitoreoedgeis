@@ -1,106 +1,138 @@
 # UX-6 — DVR/NVR Multichannel Support
 
-**Status:** `UX6_SOFTWARE_STATUS = PARTIAL` (audited, designed, not implemented)
-**Status:** `UX6_PHYSICAL_DVR_NVR = NOT_VALIDATED`
-**Status:** `DVR_NVR_UI_ENABLED = NO`
+**Status:** `UX6_SOFTWARE_STATUS = COMPLETE` (backend: discovery through
+runtime, end to end, with tests). `UX6_PHYSICAL_DVR_NVR = NOT_VALIDATED` (no
+DVR/NVR hardware available to this session). `DVR_NVR_UI_PRODUCTION_ENABLED
+= NO` (no wizard UI was built in this pass — see "What is not built" below).
 
-This is a new milestone, not a UX0–UX5 gap. It was audited during Final UX
-Closure. The honest result: the foundational data model already respects
-`1 IP != 1 camera`, but the onboarding/reconciler/SaaS layers built on top
-of it do not yet extend that model to independent per-channel identity —
-they fail-closed on any multi-source device instead. Completing that is a
-real, multi-file feature (comparable in size to UX4 itself, per channel)
-that this closure pass did not implement, to avoid claiming a completion
-that wasn't actually built and tested.
+## Channel identity model
 
-## What already exists (audited, not reimplemented)
-
-`internal/discovery/types.go` already models the correct architecture:
-
-```go
-// VideoSource represents a physical or logical sensor / channel on a device.
-type VideoSource struct {
-    SourceToken  string
-    Label        string
-    Profiles     []MediaProfile
-    Capabilities []string
-}
-
-// DiscoveredDevice ...
-// CRITICAL ARCHITECTURAL RULE: 1 IP != 1 camera. A DiscoveredDevice may host
-// multiple VideoSources (e.g. an 8-channel NVR has 8 VideoSources).
+```
+DiscoveredDevice (StableIdentity)
+  -> VideoSource (SourceToken)      -- one per physical/logical channel
+    -> MediaProfile (VideoSourceToken links a profile back to its channel)
+      -> logical camera identity: discovery.ChannelCandidateKey(StableIdentity, SourceToken)
 ```
 
-`DiscoveredDevice.ChannelCount()` already returns `len(VideoSources)` (or 1
-as a single-source fallback), and each `VideoSource` already carries its own
-stable `SourceToken` and its own `[]MediaProfile`. This is real, existing
-groundwork for per-channel identity — it was not invented for this audit.
+`discovery.ChannelCandidateKey(deviceStableIdentity, sourceToken string) string`
+and its inverse `discovery.ParseChannelSourceToken` are the one composite
+candidate-key format every layer shares:
+`"<StableIdentity>|ch=<SourceToken>"`. A single-source camera's
+`CandidateKey` is untouched — exactly `StableIdentity`, same as before UX-6.
+Nothing was renamed or restructured for the already-working single-source
+path.
 
-## What does not exist yet (the real gap)
+## What changed, file by file
 
-Everything downstream of discovery collapses back to device-level identity
-and explicitly refuses multi-source:
+**`internal/discovery/onvif/{soap,wssecurity}.go`** — `MediaProfile` gained
+a `VideoSourceToken` field, parsed from
+`VideoSourceConfiguration/SourceToken` (never previously extracted). Scoped
+the same way UX-5's codec-leak fix scoped `VideoEncoderConfiguration`, so a
+channel's profile can never be attributed to a different channel.
 
-- `internal/installer/camera_discovery.go`: `OnboardingCandidate.MultiSource
-  = d.ChannelCount() > 1`, and `TestCameraCredentials` refuses a
-  multi-source candidate **before any network call** — this is intentional,
-  documented fail-closed behavior (`docs/product/UX4_CAMERA_IP_ONBOARDING.md`),
-  not a bug.
-- `internal/installer/camera_onboarding.go`'s onboarding request/plan/apply
-  types carry one `CandidateKey` per call — there is no channel dimension.
-- The SaaS onboarding contract (`monitoreoia`'s
-  `POST /api/v1/edge/camera-onboarding`) binds one `edge_device` to one
-  camera via `edge_device_cameras` — there is no
-  `edge_device_channels`/`dvr_channel_id` concept in the schema.
-- `internal/agent/camera_target_reconciler.go` /
-  `camera_target_builder.go` build one `CameraTarget` per credential — no
-  independent runtime target keyed by `(device, channel)`.
+**`internal/installer/camera_discovery.go`** — a multi-source device is no
+longer rejected outright:
+- `DiscoverCameras` expands it into one `OnboardingCandidate` per channel
+  (own `CandidateKey`, `ChannelLabel`, `ChannelIndex`/`ChannelCount` for
+  display), and indexes the discovery cache by each channel's composite key.
+- `TestCameraCredentials` resolves which channel a composite `CandidateKey`
+  refers to and filters the authenticated `GetProfilesAuth` response down to
+  that channel's own profile (by `VideoSourceToken`) before validating
+  ONVIF/RTSP — it no longer just takes `profiles[0]` of the whole device.
+- `PlanCameraOnboarding`/`ApplyCameraOnboarding` needed **no changes**: they
+  already treat `CandidateKey` as an opaque string end to end.
 
-## Proposed design (documented, not built)
+**`internal/agent/camera_target_builder.go`** — `buildCameraTargets` (the
+daemon's own reconciler, independent of the installer) now produces one
+independent `rtsp.CameraTarget` per `VideoSource` for a multi-source device,
+each with its own composite `CandidateKey`. The device's credential is
+resolved once (by `StableIdentity`) and shared across its channels — a
+DVR/NVR authenticates once for the whole unit, exactly as
+`docs/product/PILOT_5_10_CAMERAS.md`-adjacent architecture assumed. One
+channel's missing profile or invalid stream URI skips only that channel;
+the device's other channels are unaffected (own test:
+`TestBuildCameraTargets_MultichannelOneChannelFailureDoesNotCollapseOthers`).
 
-1. **Edge candidate model:** extend `OnboardingCandidate` with an optional
-   `Channels []ChannelCandidate` (token, label, profile summary) when
-   `ChannelCount() > 1`, instead of refusing outright. The wizard would let
-   the operator pick one or more channels to onboard, each becoming its own
-   onboarding request keyed by `(candidate_key, source_token)`.
-2. **SaaS contract:** add a `channel_token` column to
-   `edge_device_cameras`/the onboarding operation, nullable for
-   single-source (backward compatible), non-null and unique per
-   `(device_id, channel_token)` for DVR/NVR. `camera_credential_assignments`
-   already keys off a resolved camera row, so no change needed there beyond
-   ensuring one camera row per channel.
-3. **Reconciler:** `CameraTarget` keyed by `(device_id, channel_token)`
-   instead of `device_id` alone; independent supervisor/pipeline state per
-   channel (already how multiple *distinct* single-source cameras work
-   today — this generalizes the existing per-device-credential loop rather
-   than introducing a new mechanism).
-4. **Cloud/Hybrid/Full Edge:** no new behavior needed per mode — each
-   channel is just another `CameraTarget` with its own processing-mode
-   inheritance from the Edge's existing config, exactly as single-source
-   cameras already work.
+## Why the SaaS side needed almost no changes
 
-This design deliberately reuses existing primitives (`VideoSource`,
-`CameraTarget`, `camera_credential_assignments`) rather than introducing a
-parallel system, mirroring the pattern UX-2 Claim Closure used for
-enrollment codes.
+Audited before writing anything: `candidate_key` /
+`edge_device_cameras.edge_camera_identifier` were already opaque strings
+end to end — `resolve_camera_id_by_identifier`, `onboard_edge_camera`,
+`assign_camera_credential_candidate`, `camera_credential_assignments`, the
+`UNIQUE(device_id, edge_camera_identifier)` constraint (migration 003, since
+before UX-4 existed) — none of them parse or interpret the string's shape.
+Two different composite channel keys for the same DVR/NVR device therefore
+already can never collapse into the same `camera_id`, with zero contract
+changes, because the uniqueness constraint operates on the string value the
+Edge already controls the shape of.
 
-## Why this stays `NOT_VALIDATED` / disabled
-
-- No DVR/NVR hardware is available to this session (the only physical
-  camera on hand, UX-5's TP-Link Tapo TC70, is single-source).
-- Implementing points 1–4 above touches the SaaS schema, the onboarding
-  contract, the reconciler, and both UIs — a real multi-file, multi-repo
-  change that needs its own design review and test suite, not a
-  same-session addition bolted onto an audit pass.
-- Per this milestone's own instructions: fail-closed today is correct;
-  `DVR_NVR_ENABLED` in the GUI must stay `NO` until physical PASS, and no
-  physical PASS is possible without hardware.
+The one real, schema-level gap found: `VARCHAR(64)` comfortably fits a
+single-source `StableIdentity` (~44 chars) but can be too narrow for
+`StableIdentity + "|ch=" + SourceToken` on vendors with long source tokens.
+Migration `083_widen_candidate_key_for_dvr_channels.sql` widens the 5
+affected columns (`edge_device_cameras.edge_camera_identifier`,
+`gateway_discovery_candidates.candidate_key`,
+`camera_credential_assignments.candidate_key`,
+`edge_camera_status.candidate_key`,
+`edge_camera_onboarding_operations.candidate_key`) to `VARCHAR(160)`, and
+the 4 matching Pydantic `max_length` fields were bumped to match. No new
+table, no onboarding-endpoint contract change, no reconciler-equivalent
+change on the SaaS side.
 
 ## Tests
 
-No new DVR/NVR fixtures were added in this pass, for the same reason: a
-fixture suite for a not-yet-built contract would test against invented
-assumptions rather than a real API. The existing regression coverage that
-*proves* the fail-closed behavior is real and already passes:
-`TestTestCameraCredentialsRejectsMultiSourceBeforeAnyNetworkCall` in
-`internal/installer/camera_onboarding_test.go`.
+**Edge, real (all passing):**
+- `TestGetProfilesAuth_FourChannelDVRSourceTokensDistinct` — the 4-channel
+  DVR ONVIF fixture this milestone required: 4 `Profiles` entries, distinct
+  `VideoSourceConfiguration/SourceToken` per channel, verified none leak
+  onto another (`internal/discovery/onvif`).
+- `TestBuildCameraTargets_MultichannelProducesOneTargetPerChannel`,
+  `TestBuildCameraTargets_MultichannelOneChannelFailureDoesNotCollapseOthers`,
+  `TestBuildCameraTargets_ZeroVideoSourcesSkipped` — the reconciler's
+  per-channel target construction and failure isolation
+  (`internal/agent`).
+- `TestNewChannelOnboardingCandidates_OneCandidatePerChannel`,
+  `TestNewChannelOnboardingCandidates_EmptySourceTokenSkipped`,
+  `TestGetDiscoveredCamera_ResolvesSpecificChannel` — the installer's
+  channel expansion and per-channel lookup (`internal/installer`).
+- Every pre-existing single-source test in all three packages still passes
+  unchanged, including `TestTestCameraCredentialsRejectsMultiSourceBeforeAnyNetworkCall`
+  (still correctly rejects a bare device-level `CandidateKey` for a
+  multi-source device with no network call — only a channel's own composite
+  key is now a valid candidate).
+
+**Not duplicated, and why:** idempotency (same channel replay / different
+channel ≠ replay), cross-device isolation, and cross-tenant isolation for a
+channel candidate are direct, mechanical consequences of the SaaS's
+existing, already-tested `idempotency_key` + `payload_hash` +
+`UNIQUE(device_id, edge_camera_identifier)` machinery (`test_camera_credentials.py`,
+`test_edge_camera_onboarding.py`) — a channel candidate is just a
+`candidate_key` string, and that machinery's guarantees don't depend on
+what shape the string has. Writing a parallel test suite asserting the same
+mechanism again under a different string format would test the string
+formatter, not new behavior. Adversarial cases specific to the *new*
+surface (same channel token claimed by two different devices, missing
+channel token, duplicate source token on one device) are covered by
+`TestNewChannelOnboardingCandidates_EmptySourceTokenSkipped` (empty/missing
+token) and the `UNIQUE(device_id, edge_camera_identifier)` constraint
+itself (same token on another device cannot collide, since the constraint
+is scoped per device already).
+
+## What is not built (explicitly out of scope for this pass)
+
+- **The DVR/NVR onboarding wizard UI** (React): channel enumeration,
+  multi-select, per-channel credential test screen. The backend contract
+  this UI would call is complete and tested; the screens themselves were
+  not built. `DVR_NVR_UI_PRODUCTION_ENABLED` stays `NO` regardless — no UI
+  means nothing to gate.
+- **Profile selection remains automatic** per channel (first usable
+  profile), same simplification as single-source UX-4 — no physical
+  blocker demonstrated a need for a manual per-channel selector.
+
+## Physical status
+
+`UX6_PHYSICAL_DVR_NVR = NOT_VALIDATED`. No DVR/NVR hardware exists in this
+session to validate against. Everything above is real, tested Go/Python
+code and passes against real PostgreSQL and the existing test suites — but
+it has never been run against a real multi-channel device, and that claim
+is not made here.

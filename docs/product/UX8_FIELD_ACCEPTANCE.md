@@ -52,12 +52,32 @@ ONVIF camera (the TC70); the pilot's own minimum is 5. This blocks
 `UX8_AUTOMATED_MATRIX` or the single-camera rows above, which are backed by
 real evidence independent of camera count.
 
+## UX-7 build status feeding this matrix
+
+`UX7_WINDOWS_AMD64_BUILD = PASS`, `UX7_LINUX_AMD64_BUILD = PASS`,
+`UX7_LINUX_ARM64_BUILD = PASS`, `UX7_MACOS_ARM64_BUILD = PASS` — all four
+real, on GitHub Actions native runners (`docs/product/UX7_CROSS_PLATFORM_RELEASE.md`).
+This proves the installer **builds** for all four platforms. It does not
+by itself prove a physical/field run on Windows, Linux x86_64, or Linux
+ARM64 hardware — building and field-running are different rows in this
+matrix, not the same evidence.
+
+## UX-6 DVR/NVR status feeding this matrix
+
+`UX6_SOFTWARE_STATUS = COMPLETE`: discovery, ONVIF profile resolution,
+installer onboarding, and the daemon's own reconciler/runtime all support
+independent per-channel identity now (`docs/product/UX6_DVR_NVR_MULTICHANNEL.md`).
+`UX6_PHYSICAL_DVR_NVR = NOT_VALIDATED` — no DVR/NVR hardware exists in this
+session. `DVR_NVR_UI_PRODUCTION_ENABLED = NO` (no wizard UI was built).
+
 ## What UX-8 does not claim
 
-- No Windows, Linux x86_64, or Linux ARM64 physical run of the Wails
-  installer exists yet — those require the platform builds in
-  `docs/product/UX7_CROSS_PLATFORM_RELEASE.md` and a physical or VM host
-  per platform, neither of which this session has access to.
+- No Windows, Linux x86_64, or Linux ARM64 **physical field run** of the
+  Wails installer exists yet — UX-7 proved the build, not a field run on
+  that hardware, which neither this session nor a GitHub Actions runner
+  can provide (a CI runner is not a representative field/customer host).
 - No multi-camera capacity, throughput, or stability claim is made (Z3
   blocked).
-- No DVR/NVR field case exists (UX-6 stays `NOT_VALIDATED` physically).
+- No DVR/NVR **physical** field case exists — the software contract is
+  complete and tested, but no real multi-channel device was ever
+  connected to a real Edge in this session.

@@ -3,19 +3,19 @@ name: Installer Build Validation
 # UX-7: build-only CI for the Wails installer GUI, one job per target
 # platform, on native runners. Produces GitHub Actions artifacts for
 # inspection -- it never creates a GitHub Release and never touches signing
-# secrets, so it needs no external credentials and is safe to run on any
-# push to a feature branch. This is the workflow meant to validate that the
-# four platform builds actually work, without requiring an official
-# `installer-v*.*.*` tag.
+# secrets, so it needs no external credentials.
 #
-# The final, maintainable design point is `pull_request`, so any change to
-# the installer gets built on all four platforms before merge. `push` on
-# feature branches is also included so this specific validation branch can
-# produce real runner evidence without opening a PR.
+# Design point: `pull_request`, so any change to the installer gets built
+# on all four platforms before merge, plus `workflow_dispatch` for a manual
+# on-demand run. A temporary `push: branches: [feature/ux-final-closure]`
+# trigger was used once, on this branch, to get real runner evidence for
+# all four platforms without opening a PR -- all four passed for real
+# (Windows amd64, Linux amd64, Linux arm64 native, macOS arm64; the Linux
+# jobs needed `-tags webkit2_41`, a real gap this run found and fixed, see
+# docs/product/UX7_CROSS_PLATFORM_RELEASE.md) -- and was then removed, per
+# this milestone's own instruction not to leave a temporary trigger in the
+# permanent design.
 on:
-  push:
-    branches:
-      - 'feature/**'
   pull_request:
   workflow_dispatch: {}
 
