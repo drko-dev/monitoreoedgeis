@@ -1,6 +1,7 @@
 import React from 'react';
 import { OnboardingCandidate } from '../types/installer';
 import { ScanState } from '../hooks/useCameraOnboarding';
+import { candidateSelectable } from '../utils/cameraOnboardingDisplay';
 import { Button } from './Button';
 
 interface CameraDiscoveryProps {
@@ -77,7 +78,7 @@ export const CameraDiscovery: React.FC<CameraDiscoveryProps> = ({
                 <Button
                   variant="secondary"
                   onClick={() => onSelect(c)}
-                  disabled={c.multi_source || !c.onvif_available}
+                  disabled={!candidateSelectable(c)}
                 >
                   Select
                 </Button>
