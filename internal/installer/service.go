@@ -15,6 +15,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/agent"
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
+	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 )
@@ -33,6 +34,17 @@ type Service struct {
 	// (e.g. a double click) can never race on the same persistent config
 	// file.
 	applyMu sync.Mutex
+
+	// discoveryMu guards discoveredDevices, the in-memory cache of the last
+	// DiscoverCameras scan (UX-4). Ephemeral and process-local by design: it
+	// is wizard state, not a fact about the Edge, so it is never persisted
+	// and always resets on the next scan or app restart.
+	discoveryMu       sync.Mutex
+	discoveredDevices map[string]discovery.DiscoveredDevice
+
+	// onboardMu serializes ApplyCameraOnboarding the same way applyMu does
+	// for ApplyProcessingMode.
+	onboardMu sync.Mutex
 }
 
 // NewService creates a configured installer service instance.

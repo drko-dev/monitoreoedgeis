@@ -1,5 +1,151 @@
 export namespace installer {
 
+	export class CameraOnboardingApplyResult {
+	    status: string;
+	    operation_id?: number;
+	    candidate_key: string;
+	    safe_message: string;
+	    sync_observed: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new CameraOnboardingApplyResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.status = source["status"];
+	        this.operation_id = source["operation_id"];
+	        this.candidate_key = source["candidate_key"];
+	        this.safe_message = source["safe_message"];
+	        this.sync_observed = source["sync_observed"];
+	    }
+	}
+	export class StreamProfile {
+	    codec?: string;
+	    width?: number;
+	    height?: number;
+	    fps?: number;
+
+	    static createFrom(source: any = {}) {
+	        return new StreamProfile(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.codec = source["codec"];
+	        this.width = source["width"];
+	        this.height = source["height"];
+	        this.fps = source["fps"];
+	    }
+	}
+	export class CameraOnboardingPlan {
+	    candidate_key: string;
+	    camera_name: string;
+	    profile?: StreamProfile;
+	    processing_mode: string;
+	    credentials_valid: boolean;
+	    blockers?: string[];
+	    warnings?: string[];
+
+	    static createFrom(source: any = {}) {
+	        return new CameraOnboardingPlan(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.candidate_key = source["candidate_key"];
+	        this.camera_name = source["camera_name"];
+	        this.profile = this.convertValues(source["profile"], StreamProfile);
+	        this.processing_mode = source["processing_mode"];
+	        this.credentials_valid = source["credentials_valid"];
+	        this.blockers = source["blockers"];
+	        this.warnings = source["warnings"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class CameraOnboardingRequest {
+	    candidate_key: string;
+	    camera_name: string;
+	    manufacturer?: string;
+	    model?: string;
+	    username: string;
+	    password: string;
+
+	    static createFrom(source: any = {}) {
+	        return new CameraOnboardingRequest(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.candidate_key = source["candidate_key"];
+	        this.camera_name = source["camera_name"];
+	        this.manufacturer = source["manufacturer"];
+	        this.model = source["model"];
+	        this.username = source["username"];
+	        this.password = source["password"];
+	    }
+	}
+	export class CameraValidationResult {
+	    candidate_key: string;
+	    multi_source: boolean;
+	    onvif_status: string;
+	    onvif_reason?: string;
+	    rtsp_status: string;
+	    rtsp_reason?: string;
+	    profile?: StreamProfile;
+	    passed: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new CameraValidationResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.candidate_key = source["candidate_key"];
+	        this.multi_source = source["multi_source"];
+	        this.onvif_status = source["onvif_status"];
+	        this.onvif_reason = source["onvif_reason"];
+	        this.rtsp_status = source["rtsp_status"];
+	        this.rtsp_reason = source["rtsp_reason"];
+	        this.profile = this.convertValues(source["profile"], StreamProfile);
+	        this.passed = source["passed"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class ClaimRequest {
 	    code: string;
 	    device_name?: string;
@@ -54,6 +200,62 @@ export namespace installer {
 	        this.source = source["source"];
 	    }
 	}
+	export class OnboardingCandidate {
+	    candidate_key: string;
+	    host: string;
+	    manufacturer?: string;
+	    model?: string;
+	    onvif_available: boolean;
+	    auth_required: boolean;
+	    multi_source: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new OnboardingCandidate(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.candidate_key = source["candidate_key"];
+	        this.host = source["host"];
+	        this.manufacturer = source["manufacturer"];
+	        this.model = source["model"];
+	        this.onvif_available = source["onvif_available"];
+	        this.auth_required = source["auth_required"];
+	        this.multi_source = source["multi_source"];
+	    }
+	}
+	export class DiscoverCamerasResult {
+	    candidates: OnboardingCandidate[];
+	    duration_ms: number;
+
+	    static createFrom(source: any = {}) {
+	        return new DiscoverCamerasResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.candidates = this.convertValues(source["candidates"], OnboardingCandidate);
+	        this.duration_ms = source["duration_ms"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class InstallerState {
 	    state: string;
 	    reason_code: string;
@@ -76,6 +278,7 @@ export namespace installer {
 	        this.device_id = source["device_id"];
 	    }
 	}
+
 	export class ProcessingModeApplyResult {
 	    requested_product_mode: string;
 	    expected_processing_mode: string;
@@ -180,6 +383,7 @@ export namespace installer {
 	        this.mode = source["mode"];
 	    }
 	}
+
 	export class SystemReport {
 	    os: string;
 	    arch: string;
@@ -234,6 +438,22 @@ export namespace installer {
 	        this.ffprobe_path = source["ffprobe_path"];
 	        this.has_gpu_support = source["has_gpu_support"];
 	        this.gpu_info = source["gpu_info"];
+	    }
+	}
+	export class TestCameraCredentialsRequest {
+	    candidate_key: string;
+	    username: string;
+	    password: string;
+
+	    static createFrom(source: any = {}) {
+	        return new TestCameraCredentialsRequest(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.candidate_key = source["candidate_key"];
+	        this.username = source["username"];
+	        this.password = source["password"];
 	    }
 	}
 

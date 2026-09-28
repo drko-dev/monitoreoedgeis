@@ -455,18 +455,51 @@ Exit criterion: selected product mode matches reported effective runtime profile
 
 ### UX-4 — Camera IP onboarding
 
-Status: `PARTIAL BACKEND EXISTS / UI TODO`
+Status: `IMPLEMENTED / TESTED LOCAL`
+
+Branch: `feature/ux4-camera-ip-onboarding`
+Detailed documentation: [`docs/product/UX4_CAMERA_IP_ONBOARDING.md`](../product/UX4_CAMERA_IP_ONBOARDING.md)
+Cross-repo counterpart (`drko-dev/monitoreoia`): `docs/saas/20-edge-camera-onboarding.md`,
+branch `feature/ux4-camera-onboarding-api`
+
+Two mandatory preflight fixes landed first (real bugs found during audit,
+not hypothetical): `checkConfigPresent()` now agrees with
+`config.PersistentConfigPath()` instead of a location nothing wrote to; a
+darwin service-label mismatch (`io.sidom.geocam-edge` vs. the real
+`io.geocam.edge`) meant `checkServiceInstalled()` could never detect a real
+install — both fixed and tested
+(`internal/installer/daemon_control.go`/`_test.go`).
 
 Deliverables:
 
-- local discovery screen
-- camera selection
-- credential entry and safe test
-- assignment
-- RTSP validation
-- camera health/status presentation
+- ✅ local discovery screen (`CameraDiscovery.tsx`, `discovery.Engine` run
+  as an independent in-process instance — same engine `internal/agent`
+  runs, no conflict with a live daemon)
+- ✅ camera selection (opaque `StableIdentity` candidate key; DVR/NVR
+  refused, disabled in the UI and independently rejected by the backend)
+- ✅ credential entry and safe test (`CameraCredentialsForm.tsx` +
+  `TestCameraCredentials`: real ONVIF auth → profiles → stream URI → real
+  RTSP DESCRIBE, never persisted client-side)
+- ✅ assignment: `POST /api/v1/edge/camera-onboarding` on the SaaS
+  (device-authenticated, not admin/CSRF) creates the authoritative
+  camera/binding/credential/assignment; this installer never calls
+  `cameracreds.Store.Apply` (that stays exclusively the Syncer's job — a
+  hard architectural constraint discovered and documented, not a policy
+  choice)
+- ✅ RTSP validation (`internal/rtsptest.TestDescribe`, real DESCRIBE against
+  the resolved stream)
+- ✅ result screen reporting `SUCCESS`/`ACTION_REQUIRED`/`BLOCKED`/`ROLLED_BACK`
+  and whether the local encrypted cache already observed the sync
+  (bounded 3s poll, never a false claim of instant sync)
 
-Exit criterion: technician can add a supported IP camera without CLI/config-file editing.
+Exit criterion: technician can add a supported single-source IP camera
+without CLI/config-file editing, without the installer being able to write
+a local credential that a real SaaS sync would silently revoke moments
+later. Met, with the UI reduced from six sketched screens to three
+(Discovery, combined Credentials+Validation+Review, Result) — see the
+design doc's "Known gaps" for the full list of documented scope
+reductions (ONVIF error classification granularity, no fake-ONVIF-server
+integration test, camera removal deferred to UX-5).
 
 ### UX-5 — Commissioning and diagnostics
 

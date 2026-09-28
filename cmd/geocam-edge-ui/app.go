@@ -69,3 +69,35 @@ func (a *App) PlanProcessingMode(req installer.ProcessingModeRequest) (*installe
 func (a *App) ApplyProcessingMode(req installer.ProcessingModeRequest) (*installer.ProcessingModeApplyResult, error) {
 	return a.installer.ApplyProcessingMode(a.ctx, req)
 }
+
+// DiscoverCameras runs one bounded local network scan for IP cameras.
+func (a *App) DiscoverCameras() (*installer.DiscoverCamerasResult, error) {
+	return a.installer.DiscoverCameras(a.ctx)
+}
+
+// GetDiscoveredCamera returns one previously discovered candidate by its
+// opaque candidate key.
+func (a *App) GetDiscoveredCamera(candidateKey string) (*installer.OnboardingCandidate, error) {
+	return a.installer.GetDiscoveredCamera(a.ctx, candidateKey)
+}
+
+// TestCameraCredentials validates a candidate's credentials over ONVIF and
+// RTSP without persisting anything.
+func (a *App) TestCameraCredentials(req installer.TestCameraCredentialsRequest) (*installer.CameraValidationResult, error) {
+	return a.installer.TestCameraCredentials(a.ctx, req)
+}
+
+// PlanCameraOnboarding previews an onboarding without mutating anything.
+func (a *App) PlanCameraOnboarding(req installer.CameraOnboardingRequest) (*installer.CameraOnboardingPlan, error) {
+	return a.installer.PlanCameraOnboarding(a.ctx, req)
+}
+
+// ApplyCameraOnboarding asks the SaaS to authoritatively onboard the camera.
+func (a *App) ApplyCameraOnboarding(req installer.CameraOnboardingRequest) (*installer.CameraOnboardingApplyResult, error) {
+	return a.installer.ApplyCameraOnboarding(a.ctx, req)
+}
+
+// CancelCameraOnboarding reverses a SaaS onboarding operation this Edge just created.
+func (a *App) CancelCameraOnboarding(operationID int64) error {
+	return a.installer.CancelCameraOnboarding(a.ctx, operationID)
+}

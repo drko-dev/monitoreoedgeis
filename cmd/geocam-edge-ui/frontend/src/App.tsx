@@ -9,10 +9,15 @@ import { ErrorAlert } from './components/ErrorAlert';
 import { EnrollmentWizard } from './components/EnrollmentWizard';
 import { ProcessingModeSelector } from './components/ProcessingModeSelector';
 import { ProcessingModeReview } from './components/ProcessingModeReview';
-import { ProcessingMode } from './types/installer';
+import { CameraDiscovery } from './components/CameraDiscovery';
+import { CameraCredentialsForm } from './components/CameraCredentialsForm';
+import { CameraOnboardingResultView } from './components/CameraOnboardingResult';
+import { useCameraOnboarding } from './hooks/useCameraOnboarding';
+import { ProcessingMode, OnboardingCandidate } from './types/installer';
 import './App.css';
 
 type ModeWizardStep = 'dashboard' | 'select' | 'review';
+type CameraWizardStep = 'dashboard' | 'discover' | 'credentials' | 'result';
 
 export const App: React.FC = () => {
   const { report, state, loading, error, refresh } = useInstaller();
@@ -20,6 +25,17 @@ export const App: React.FC = () => {
   const [modeStep, setModeStep] = useState<ModeWizardStep>('dashboard');
   const [selectedMode, setSelectedMode] = useState<ProcessingMode | null>(null);
   const processingMode = useProcessingMode();
+
+  const [cameraStep, setCameraStep] = useState<CameraWizardStep>('dashboard');
+  const [selectedCandidate, setSelectedCandidate] = useState<OnboardingCandidate | null>(null);
+  const [pendingCameraForm, setPendingCameraForm] = useState<{
+    cameraName: string;
+    manufacturer: string;
+    model: string;
+    username: string;
+    password: string;
+  } | null>(null);
+  const cameraOnboarding = useCameraOnboarding();
 
   const needsEnrollment = state?.state === 'NEEDS_ENROLLMENT' || state?.state === 'NEW';
   const isEnrolled = state?.state === 'ENROLLED';
@@ -31,6 +47,65 @@ export const App: React.FC = () => {
       return;
     }
     refresh();
+  };
+
+  const handleAddCamera = () => {
+    setCameraStep('discover');
+    cameraOnboarding.scan();
+  };
+
+  const handleSelectCandidate = (candidate: OnboardingCandidate) => {
+    setSelectedCandidate(candidate);
+    setPendingCameraForm(null);
+    cameraOnboarding.reset();
+    setCameraStep('credentials');
+  };
+
+  const handleValidateCamera = async (
+    cameraName: string,
+    manufacturer: string,
+    model: string,
+    username: string,
+    password: string,
+  ) => {
+    if (!selectedCandidate) return;
+    setPendingCameraForm({ cameraName, manufacturer, model, username, password });
+    const validation = await cameraOnboarding.validate(selectedCandidate.candidate_key, username, password);
+    if (validation.passed) {
+      await cameraOnboarding.requestPlan(selectedCandidate.candidate_key, cameraName, manufacturer, model, username, password);
+    }
+  };
+
+  const handleCameraContinue = async () => {
+    if (!selectedCandidate || !pendingCameraForm) return;
+    setCameraStep('result');
+    try {
+      await cameraOnboarding.apply(
+        selectedCandidate.candidate_key,
+        pendingCameraForm.cameraName,
+        pendingCameraForm.manufacturer,
+        pendingCameraForm.model,
+        pendingCameraForm.username,
+        pendingCameraForm.password,
+      );
+    } catch {
+      // surfaced via cameraOnboarding.applyError in the result screen
+    }
+  };
+
+  const handleCameraDone = () => {
+    cameraOnboarding.reset();
+    setSelectedCandidate(null);
+    setPendingCameraForm(null);
+    setCameraStep('dashboard');
+  };
+
+  const handleAddAnotherCamera = () => {
+    cameraOnboarding.reset();
+    setSelectedCandidate(null);
+    setPendingCameraForm(null);
+    setCameraStep('discover');
+    cameraOnboarding.scan();
   };
 
   const handleSelectContinue = async () => {
@@ -96,6 +171,33 @@ export const App: React.FC = () => {
           onApply={handleApply}
           onDone={handleModeDone}
         />
+      ) : isEnrolled && cameraStep === 'discover' ? (
+        <CameraDiscovery
+          scanState={cameraOnboarding.scanState}
+          candidates={cameraOnboarding.candidates}
+          scanError={cameraOnboarding.scanError}
+          onScan={cameraOnboarding.scan}
+          onSelect={handleSelectCandidate}
+        />
+      ) : isEnrolled && cameraStep === 'credentials' && selectedCandidate ? (
+        <CameraCredentialsForm
+          candidate={selectedCandidate}
+          validating={cameraOnboarding.validating}
+          validation={cameraOnboarding.validation}
+          planning={cameraOnboarding.planning}
+          plan={cameraOnboarding.plan}
+          onValidate={handleValidateCamera}
+          onContinue={handleCameraContinue}
+          onBack={() => setCameraStep('discover')}
+        />
+      ) : isEnrolled && cameraStep === 'result' ? (
+        <CameraOnboardingResultView
+          applyResult={cameraOnboarding.applyResult}
+          applyError={cameraOnboarding.applyError}
+          onAddAnother={handleAddAnotherCamera}
+          onDone={handleCameraDone}
+          onRetry={handleCameraContinue}
+        />
       ) : (
         <>
           <div className="dashboard-grid">
@@ -111,6 +213,11 @@ export const App: React.FC = () => {
             >
               {isEnrolled ? 'Configure Processing Mode' : 'Continue'}
             </Button>
+            {isEnrolled && (
+              <Button variant="secondary" onClick={handleAddCamera}>
+                Add camera
+              </Button>
+            )}
             <Button variant="secondary" onClick={refresh}>
               Refresh Diagnostics
             </Button>

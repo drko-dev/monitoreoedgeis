@@ -142,3 +142,74 @@ export interface ProcessingModeApplyResult {
   warnings?: string[];
 }
 
+// Camera IP onboarding (UX-4). CandidateKey is always opaque: it comes from
+// a DiscoverCameras/TestCameraCredentials response and is only ever echoed
+// back, never constructed by the frontend.
+export interface OnboardingCandidate {
+  candidate_key: string;
+  host: string;
+  manufacturer?: string;
+  model?: string;
+  onvif_available: boolean;
+  auth_required: boolean;
+  multi_source: boolean;
+}
+
+export interface DiscoverCamerasResult {
+  candidates: OnboardingCandidate[];
+  duration_ms: number;
+}
+
+export interface TestCameraCredentialsRequest {
+  candidate_key: string;
+  username: string;
+  password: string;
+}
+
+export interface StreamProfile {
+  codec?: string;
+  width?: number;
+  height?: number;
+  fps?: number;
+}
+
+export interface CameraValidationResult {
+  candidate_key: string;
+  multi_source: boolean;
+  onvif_status: string;
+  onvif_reason?: string;
+  rtsp_status: string;
+  rtsp_reason?: string;
+  profile?: StreamProfile;
+  passed: boolean;
+}
+
+export interface CameraOnboardingRequest {
+  candidate_key: string;
+  camera_name: string;
+  manufacturer?: string;
+  model?: string;
+  username: string;
+  password: string;
+}
+
+export interface CameraOnboardingPlan {
+  candidate_key: string;
+  camera_name: string;
+  profile?: StreamProfile;
+  processing_mode: string;
+  credentials_valid: boolean;
+  blockers?: string[];
+  warnings?: string[];
+}
+
+export type CameraOnboardingStatus = 'SUCCESS' | 'ACTION_REQUIRED' | 'BLOCKED' | 'ROLLED_BACK';
+
+export interface CameraOnboardingApplyResult {
+  status: CameraOnboardingStatus;
+  operation_id?: number;
+  candidate_key: string;
+  safe_message: string;
+  sync_observed: boolean;
+}
+
