@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 	"github.com/drko-dev/monitoreoedgeis/internal/instance"
@@ -155,6 +156,30 @@ func TestConfigPresenceDetection(t *testing.T) {
 
 	if !svc.checkConfigPresent() {
 		t.Error("Expected config to be reported present after file write")
+	}
+}
+
+// TestConfigPresenceUsesCanonicalPersistentPathByDefault pins the UX-4
+// config source-of-truth fix: with no explicit ConfigFilePath override (the
+// only way the real app ever constructs a Service, see cmd/geocam-edge-ui/app.go),
+// checkConfigPresent must agree with config.PersistentConfigPath() -- the
+// exact file config.Load() and ApplyProcessingMode's WritePersistentValues
+// use -- not some unrelated DataDir/config.env location nothing else writes.
+func TestConfigPresenceUsesCanonicalPersistentPathByDefault(t *testing.T) {
+	canonicalPath := filepath.Join(t.TempDir(), "edge.env")
+	t.Setenv(config.ConfigFileEnv, canonicalPath)
+
+	svc := NewService(t.TempDir(), "")
+	if svc.checkConfigPresent() {
+		t.Error("Expected config to be reported absent before the canonical file exists")
+	}
+
+	if err := config.WritePersistentValues(map[string]string{"GEOCAM_PROCESSING_MODE": "cloud"}); err != nil {
+		t.Fatalf("WritePersistentValues: %v", err)
+	}
+
+	if !svc.checkConfigPresent() {
+		t.Error("Expected config to be reported present once the canonical persistent file exists")
 	}
 }
 

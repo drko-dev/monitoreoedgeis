@@ -226,15 +226,25 @@ func (s *Service) checkGPU() (bool, string) {
 	}
 }
 
+// checkConfigPresent reports whether the canonical persistent config file
+// exists. ConfigFilePath is a narrow override (used by tests and any future
+// explicit-path deployment) for exactly this check; the default (empty, the
+// only value the real app ever passes) resolves to
+// config.PersistentConfigPath() -- the same file config.Load() and
+// ApplyProcessingMode's config.WritePersistentValues use. This used to check
+// DataDir/config.env instead, a location nothing else in this codebase ever
+// wrote to, which made ConfigPresent silently dead in the real app; see
+// docs/product/UX4_CAMERA_IP_ONBOARDING.md ("Config source of truth").
 func (s *Service) checkConfigPresent() bool {
-	if s.ConfigFilePath != "" {
-		if _, err := os.Stat(s.ConfigFilePath); err == nil {
-			return true
+	path := s.ConfigFilePath
+	if path == "" {
+		resolved, err := config.PersistentConfigPath()
+		if err != nil {
+			return false
 		}
+		path = resolved
 	}
-	// Check common location in DataDir
-	candidate := filepath.Join(s.DataDir, "config.env")
-	if _, err := os.Stat(candidate); err == nil {
+	if _, err := os.Stat(path); err == nil {
 		return true
 	}
 	return false
@@ -255,20 +265,54 @@ func (s *Service) checkDaemonRunning(ctx context.Context) bool {
 }
 
 func (s *Service) checkServiceInstalled() bool {
+	installed, _ := s.serviceInstallScope()
+	return installed
+}
+
+// serviceInstallScopeDetector is overridable in tests so no test ever probes
+// or depends on the real user's LaunchAgents/systemd directories.
+var serviceInstallScopeDetector = detectServiceInstallScope
+
+// ServiceScope reports where a detected service manager entry lives:
+// "user" (unprivileged, e.g. a macOS LaunchAgent) or "system" (privileged,
+// e.g. a systemd system unit or a macOS LaunchDaemon). "" means no entry was
+// found.
+type ServiceScope string
+
+const (
+	ServiceScopeUser   ServiceScope = "user"
+	ServiceScopeSystem ServiceScope = "system"
+	ServiceScopeNone   ServiceScope = ""
+)
+
+// serviceInstallScope detects a real service manager entry and its
+// privilege scope.
+//
+// The darwin case previously checked for label "io.sidom.geocam-edge" at
+// both a LaunchAgents and a LaunchDaemons path. Neither ever matches what
+// internal/service actually manages: internal/service.Command always
+// targets label "io.geocam.edge" (macOSLabel, service_darwin.go) as a
+// LaunchAgent under "gui/<uid>" -- it never touches LaunchDaemons at all.
+// So the previous check could never detect a real install, making
+// ServiceInstalled silently dead on darwin. This checks the label and scope
+// internal/service actually uses (found during the UX-4 daemon-control
+// preflight audit; see docs/product/UX4_CAMERA_IP_ONBOARDING.md).
+func (s *Service) serviceInstallScope() (installed bool, scope ServiceScope) {
+	return serviceInstallScopeDetector()
+}
+
+func detectServiceInstallScope() (installed bool, scope ServiceScope) {
 	switch runtime.GOOS {
 	case "darwin":
 		home, err := os.UserHomeDir()
-		if err == nil {
-			userPlist := filepath.Join(home, "Library", "LaunchAgents", "io.sidom.geocam-edge.plist")
-			if _, err := os.Stat(userPlist); err == nil {
-				return true
-			}
+		if err != nil {
+			return false, ServiceScopeNone
 		}
-		daemonPlist := "/Library/LaunchDaemons/io.sidom.geocam-edge.plist"
-		if _, err := os.Stat(daemonPlist); err == nil {
-			return true
+		userPlist := filepath.Join(home, "Library", "LaunchAgents", "io.geocam.edge.plist")
+		if _, err := os.Stat(userPlist); err == nil {
+			return true, ServiceScopeUser
 		}
-		return false
+		return false, ServiceScopeNone
 	case "linux":
 		candidates := []string{
 			"/etc/systemd/system/geocam-edge.service",
@@ -276,15 +320,17 @@ func (s *Service) checkServiceInstalled() bool {
 		}
 		for _, c := range candidates {
 			if _, err := os.Stat(c); err == nil {
-				return true
+				return true, ServiceScopeSystem
 			}
 		}
-		return false
+		return false, ServiceScopeNone
 	case "windows":
-		// Windows service check degrades safely to false without elevated probe
-		return false
+		// Windows SCM services always require an elevated probe this
+		// installer does not perform; degrade safely to "not detected"
+		// rather than guessing.
+		return false, ServiceScopeNone
 	default:
-		return false
+		return false, ServiceScopeNone
 	}
 }
 
