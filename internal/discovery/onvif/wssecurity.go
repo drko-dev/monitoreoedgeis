@@ -228,6 +228,9 @@ func parseProfilesStrict(body []byte) ([]MediaProfile, error) {
 	// overwrite the video codec. Same bug as soap.go's GetProfiles parser,
 	// found against a physical TP-Link Tapo TC70 during UX5 commissioning.
 	inVideoEncoderConfig := false
+	// inVideoSourceConfig gates sourcetoken to VideoSourceConfiguration
+	// only -- same reasoning as soap.go's GetProfiles parser (UX-6).
+	inVideoSourceConfig := false
 	for {
 		t, err := dec.Token()
 		if err != nil {
@@ -250,12 +253,22 @@ func parseProfilesStrict(body []byte) ([]MediaProfile, error) {
 				current = &MediaProfile{Token: token}
 			} else if local == "videoencoderconfiguration" {
 				inVideoEncoderConfig = true
+			} else if local == "videosourceconfiguration" {
+				inVideoSourceConfig = true
 			} else if current != nil {
 				switch local {
 				case "name":
 					var name string
 					if dec.DecodeElement(&name, &elem) == nil {
 						current.Name = sanitizeText(name, 64)
+					}
+				case "sourcetoken":
+					if !inVideoSourceConfig {
+						continue
+					}
+					var st string
+					if dec.DecodeElement(&st, &elem) == nil {
+						current.VideoSourceToken = sanitizeText(st, 128)
 					}
 				case "encoding":
 					if !inVideoEncoderConfig {
@@ -294,6 +307,9 @@ func parseProfilesStrict(body []byte) ([]MediaProfile, error) {
 		case xml.EndElement:
 			if strings.EqualFold(elem.Name.Local, "videoencoderconfiguration") {
 				inVideoEncoderConfig = false
+			}
+			if strings.EqualFold(elem.Name.Local, "videosourceconfiguration") {
+				inVideoSourceConfig = false
 			}
 			if strings.EqualFold(elem.Name.Local, "profiles") && current != nil {
 				if current.Token != "" {

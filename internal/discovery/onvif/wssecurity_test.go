@@ -273,3 +273,83 @@ func TestGetProfilesAuth_VideoCodecNotOverwrittenByAudioEncoding(t *testing.T) {
 		t.Fatalf("expected 1920x1080@15, got %dx%d@%v", p.Width, p.Height, p.FPS)
 	}
 }
+
+// TestGetProfilesAuth_FourChannelDVRSourceTokensDistinct is UX-6's minimum
+// required fixture: a realistic 4-channel DVR/NVR response where each
+// Profiles entry names a different VideoSourceConfiguration/SourceToken.
+// Guards that per-channel identity survives the authenticated parser
+// unmixed -- no channel's token leaks onto another's profile.
+func TestGetProfilesAuth_FourChannelDVRSourceTokensDistinct(t *testing.T) {
+	client, ts := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/soap+xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+  <SOAP-ENV:Body>
+    <trt:GetProfilesResponse>
+      <trt:Profiles token="profile_ch1">
+        <tt:Name>Channel1</tt:Name>
+        <tt:VideoSourceConfiguration token="vsc_ch1"><tt:SourceToken>ch1</tt:SourceToken></tt:VideoSourceConfiguration>
+        <tt:VideoEncoderConfiguration>
+          <tt:Encoding>H264</tt:Encoding>
+          <tt:Resolution><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:Resolution>
+        </tt:VideoEncoderConfiguration>
+      </trt:Profiles>
+      <trt:Profiles token="profile_ch2">
+        <tt:Name>Channel2</tt:Name>
+        <tt:VideoSourceConfiguration token="vsc_ch2"><tt:SourceToken>ch2</tt:SourceToken></tt:VideoSourceConfiguration>
+        <tt:VideoEncoderConfiguration>
+          <tt:Encoding>H264</tt:Encoding>
+          <tt:Resolution><tt:Width>1280</tt:Width><tt:Height>720</tt:Height></tt:Resolution>
+        </tt:VideoEncoderConfiguration>
+      </trt:Profiles>
+      <trt:Profiles token="profile_ch3">
+        <tt:Name>Channel3</tt:Name>
+        <tt:VideoSourceConfiguration token="vsc_ch3"><tt:SourceToken>ch3</tt:SourceToken></tt:VideoSourceConfiguration>
+        <tt:VideoEncoderConfiguration>
+          <tt:Encoding>H265</tt:Encoding>
+          <tt:Resolution><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:Resolution>
+        </tt:VideoEncoderConfiguration>
+      </trt:Profiles>
+      <trt:Profiles token="profile_ch4">
+        <tt:Name>Channel4</tt:Name>
+        <tt:VideoSourceConfiguration token="vsc_ch4"><tt:SourceToken>ch4</tt:SourceToken></tt:VideoSourceConfiguration>
+        <tt:VideoEncoderConfiguration>
+          <tt:Encoding>H264</tt:Encoding>
+          <tt:Resolution><tt:Width>640</tt:Width><tt:Height>480</tt:Height></tt:Resolution>
+        </tt:VideoEncoderConfiguration>
+      </trt:Profiles>
+    </trt:GetProfilesResponse>
+  </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>`))
+	})
+	defer ts.Close()
+
+	profiles, err := client.GetProfilesAuth(context.Background(), ts.URL, "admin", "secret")
+	if err != nil {
+		t.Fatalf("GetProfilesAuth: %v", err)
+	}
+	if len(profiles) != 4 {
+		t.Fatalf("expected 4 channel profiles, got %d", len(profiles))
+	}
+	wantTokens := map[string]string{
+		"profile_ch1": "ch1",
+		"profile_ch2": "ch2",
+		"profile_ch3": "ch3",
+		"profile_ch4": "ch4",
+	}
+	seen := map[string]bool{}
+	for _, p := range profiles {
+		want, ok := wantTokens[p.Token]
+		if !ok {
+			t.Fatalf("unexpected profile token %q", p.Token)
+		}
+		if p.VideoSourceToken != want {
+			t.Fatalf("profile %q: expected VideoSourceToken %q, got %q (channel identity leaked/mixed)", p.Token, want, p.VideoSourceToken)
+		}
+		seen[p.VideoSourceToken] = true
+	}
+	if len(seen) != 4 {
+		t.Fatalf("expected 4 distinct VideoSourceTokens, got %d: %v", len(seen), seen)
+	}
+}

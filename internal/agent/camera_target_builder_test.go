@@ -139,7 +139,13 @@ func TestBuildCameraTargets_InvalidStreamURISkipped(t *testing.T) {
 	}
 }
 
-func TestBuildCameraTargets_MultichannelSkipped(t *testing.T) {
+// TestBuildCameraTargets_MultichannelProducesOneTargetPerChannel is the
+// UX-6 replacement for the old Hito Z G1 "multichannel is always skipped"
+// behavior: a device with N VideoSources now produces N independent
+// targets, each with its own composite CandidateKey
+// (discovery.ChannelCandidateKey), never collapsed into the device's
+// identity alone.
+func TestBuildCameraTargets_MultichannelProducesOneTargetPerChannel(t *testing.T) {
 	dev := discovery.DiscoveredDevice{
 		StableIdentity: "epr:nvr-1",
 		VideoSources: []discovery.VideoSource{
@@ -148,18 +154,49 @@ func TestBuildCameraTargets_MultichannelSkipped(t *testing.T) {
 		},
 	}
 	targets, skips := buildCameraTargets([]discovery.DiscoveredDevice{dev}, nil, "sub")
-	if len(targets) != 0 {
-		t.Fatalf("expected no targets for multichannel device, got %+v", targets)
+	if len(skips) != 0 {
+		t.Fatalf("expected no skips, got %+v", skips)
 	}
-	if len(skips) != 1 || skips[0].Reason != SkipMultichannelNotSupported {
-		t.Fatalf("expected SkipMultichannelNotSupported, got %+v", skips)
+	if len(targets) != 2 {
+		t.Fatalf("expected 2 targets (one per channel), got %+v", targets)
 	}
+	wantCh1 := discovery.ChannelCandidateKey("epr:nvr-1", "ch1")
+	wantCh2 := discovery.ChannelCandidateKey("epr:nvr-1", "ch2")
+	// targets are sorted by CandidateKey.
+	if targets[0].CandidateKey != wantCh1 || targets[1].CandidateKey != wantCh2 {
+		t.Fatalf("expected composite candidate keys %q and %q, got %+v", wantCh1, wantCh2, targets)
+	}
+	if targets[0].RTSPPath == targets[1].RTSPPath {
+		t.Fatalf("expected each channel to resolve its own stream, got identical paths: %+v", targets)
+	}
+}
 
-	// Zero video sources also counts as "not exactly one".
+// TestBuildCameraTargets_MultichannelOneChannelFailureDoesNotCollapseOthers
+// guards the UX-6 requirement that one channel's failure never removes,
+// silently degrades, or overwrites another channel's target on the same
+// device.
+func TestBuildCameraTargets_MultichannelOneChannelFailureDoesNotCollapseOthers(t *testing.T) {
+	dev := discovery.DiscoveredDevice{
+		StableIdentity: "epr:nvr-2",
+		VideoSources: []discovery.VideoSource{
+			{SourceToken: "ch1", Profiles: []discovery.MediaProfile{{Token: "a", StreamURI: "rtsp://10.0.0.5:554/1"}}},
+			{SourceToken: "ch2", Profiles: nil}, // no usable profile
+		},
+	}
+	targets, skips := buildCameraTargets([]discovery.DiscoveredDevice{dev}, nil, "sub")
+	if len(targets) != 1 || targets[0].CandidateKey != discovery.ChannelCandidateKey("epr:nvr-2", "ch1") {
+		t.Fatalf("expected exactly ch1's target to survive, got %+v", targets)
+	}
+	if len(skips) != 1 || skips[0].Reason != SkipNoUsableProfile || skips[0].CandidateKey != discovery.ChannelCandidateKey("epr:nvr-2", "ch2") {
+		t.Fatalf("expected ch2 alone to be skipped with SkipNoUsableProfile, got %+v", skips)
+	}
+}
+
+func TestBuildCameraTargets_ZeroVideoSourcesSkipped(t *testing.T) {
 	zero := discovery.DiscoveredDevice{StableIdentity: "epr:zero-1"}
-	_, skips = buildCameraTargets([]discovery.DiscoveredDevice{zero}, nil, "sub")
-	if len(skips) != 1 || skips[0].Reason != SkipMultichannelNotSupported {
-		t.Fatalf("expected SkipMultichannelNotSupported for zero video sources, got %+v", skips)
+	_, skips := buildCameraTargets([]discovery.DiscoveredDevice{zero}, nil, "sub")
+	if len(skips) != 1 || skips[0].Reason != SkipNoVideoSource {
+		t.Fatalf("expected SkipNoVideoSource for zero video sources, got %+v", skips)
 	}
 }
 

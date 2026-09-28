@@ -44,6 +44,15 @@ type MediaProfile struct {
 	FPS       float64
 	StreamURI string
 	Role      string
+	// VideoSourceToken is this profile's VideoSourceConfiguration's
+	// SourceToken -- the ONVIF-native identifier tying a media profile back
+	// to the physical/logical video source (channel) it belongs to. Empty
+	// on a device that never reports it (most single-source cameras don't
+	// need it; UX-6 multichannel onboarding uses it to pick the right
+	// channel's profile). Never confused with VideoEncoderConfiguration's
+	// unrelated fields by the parser -- see the inVideoSourceConfig /
+	// inVideoEncoderConfig scoping below.
+	VideoSourceToken string
 }
 
 // DeviceInfo holds hardware identity returned by GetDeviceInformation.
@@ -336,6 +345,10 @@ func (c *Client) GetProfiles(ctx context.Context, mediaXAddr string) ([]MediaPro
 	// TP-Link Tapo TC70 during UX5 commissioning: reported codec "G711"
 	// for a 1920x1080 H264 video profile.
 	inVideoEncoderConfig := false
+	// inVideoSourceConfig gates sourcetoken to VideoSourceConfiguration
+	// only -- other blocks (e.g. PTZConfiguration) can carry their own
+	// unrelated token-like fields, and this must never pick those up.
+	inVideoSourceConfig := false
 	for {
 		t, err := dec.Token()
 		if err != nil {
@@ -355,12 +368,22 @@ func (c *Client) GetProfiles(ctx context.Context, mediaXAddr string) ([]MediaPro
 				current = &MediaProfile{Token: token}
 			} else if local == "videoencoderconfiguration" {
 				inVideoEncoderConfig = true
+			} else if local == "videosourceconfiguration" {
+				inVideoSourceConfig = true
 			} else if current != nil {
 				switch local {
 				case "name":
 					var name string
 					if dec.DecodeElement(&name, &elem) == nil {
 						current.Name = sanitizeText(name, 64)
+					}
+				case "sourcetoken":
+					if !inVideoSourceConfig {
+						continue
+					}
+					var st string
+					if dec.DecodeElement(&st, &elem) == nil {
+						current.VideoSourceToken = sanitizeText(st, 128)
 					}
 				case "encoding":
 					if !inVideoEncoderConfig {
@@ -399,6 +422,9 @@ func (c *Client) GetProfiles(ctx context.Context, mediaXAddr string) ([]MediaPro
 		case xml.EndElement:
 			if strings.EqualFold(elem.Name.Local, "videoencoderconfiguration") {
 				inVideoEncoderConfig = false
+			}
+			if strings.EqualFold(elem.Name.Local, "videosourceconfiguration") {
+				inVideoSourceConfig = false
 			}
 			if strings.EqualFold(elem.Name.Local, "profiles") && current != nil {
 				if current.Token != "" {

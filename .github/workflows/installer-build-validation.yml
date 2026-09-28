@@ -56,7 +56,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
       - name: Build Wails app (linux/amd64)
         working-directory: cmd/geocam-edge-ui
-        run: go run github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }} build -platform linux/amd64
+        run: go run github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }} build -platform linux/amd64 -tags webkit2_41
       - uses: actions/upload-artifact@v4
         with:
           name: installer-linux-amd64-test-build
@@ -79,7 +79,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
       - name: Build Wails app (linux/arm64, native)
         working-directory: cmd/geocam-edge-ui
-        run: go run github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }} build -platform linux/arm64
+        run: go run github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }} build -platform linux/arm64 -tags webkit2_41
       - uses: actions/upload-artifact@v4
         with:
           name: installer-linux-arm64-test-build
