@@ -1,5 +1,5 @@
-import { SystemReport, InstallerState } from '../types/installer';
-import { GetSystemReport, GetInstallerState } from '../../wailsjs/go/main/App';
+import { SystemReport, InstallerState, ClaimRequest, ClaimResult } from '../types/installer';
+import { GetSystemReport, GetInstallerState, ClaimDevice } from '../../wailsjs/go/main/App';
 
 // fetchSystemReport calls the Go facade via Wails binding
 export async function fetchSystemReport(): Promise<SystemReport> {
@@ -57,5 +57,34 @@ export async function fetchInstallerState(): Promise<InstallerState> {
     safe_message: 'Edge requires enrollment with GEO CAM SaaS.',
     recoverable: true,
     next_allowed_actions: ['PROCEED_TO_ENROLLMENT', 'REFRESH'],
+  };
+}
+
+// claimDevice calls the Go facade to enroll the edge device with a one-time code
+export async function claimDevice(req: ClaimRequest): Promise<ClaimResult> {
+  try {
+    const result = await ClaimDevice(req);
+    if (result && result.device_id) {
+      return result as unknown as ClaimResult;
+    }
+  } catch (err: unknown) {
+    // Re-throw structured SafeError from Go facade
+    if (err && typeof err === 'object' && 'code' in err) {
+      throw err;
+    }
+    throw {
+      code: 'NETWORK_ERROR',
+      safe_message: 'Could not connect to SaaS server. Check your connection.',
+      recoverable: true,
+    };
+  }
+
+  // Safe mock for standalone browser dev mode / headless unit tests
+  return {
+    device_id: 'mock-device-id',
+    organization_id: 1,
+    device_kind: 'edge',
+    status: 'active',
+    edge_id: 'edge-dev-0001',
   };
 }

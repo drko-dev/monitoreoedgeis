@@ -21,10 +21,11 @@ import (
 // Service provides a safe, read-mostly application facade for the Wails desktop installer.
 // It never acquires the exclusive instance lock and never leaks secrets to callers.
 type Service struct {
-	DataDir        string
-	ConfigFilePath string
-	HealthAddr     string
-	httpClient     *http.Client
+	DataDir            string
+	ConfigFilePath     string
+	HealthAddr         string
+	httpClient         *http.Client
+	EnrollmentProvider EnrollmentProvider
 }
 
 // NewService creates a configured installer service instance.
@@ -33,12 +34,13 @@ func NewService(dataDir, configFilePath string) *Service {
 		dataDir = config.DefaultDataDir
 	}
 	return &Service{
-		DataDir:        dataDir,
-		ConfigFilePath: configFilePath,
-		HealthAddr:     config.DefaultHealthAddr,
+		DataDir:            dataDir,
+		ConfigFilePath:     configFilePath,
+		HealthAddr:         config.DefaultHealthAddr,
 		httpClient: &http.Client{
 			Timeout: 350 * time.Millisecond,
 		},
+		EnrollmentProvider: NewSaaSEnrollmentProvider(nil),
 	}
 }
 

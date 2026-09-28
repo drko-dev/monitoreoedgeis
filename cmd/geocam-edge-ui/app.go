@@ -35,3 +35,8 @@ func (a *App) GetSystemReport() (*installer.SystemReport, error) {
 func (a *App) GetInstallerState() (*installer.InstallerState, error) {
 	return a.installer.GetInstallerState(a.ctx)
 }
+
+// ClaimDevice executes the secure one-time enrollment flow.
+func (a *App) ClaimDevice(req installer.ClaimRequest) (*installer.ClaimResult, error) {
+	return a.installer.ClaimDevice(a.ctx, req)
+}

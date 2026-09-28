@@ -53,3 +53,32 @@ export interface SafeError {
   recoverable: boolean;
   details?: string;
 }
+
+export interface ClaimRequest {
+  code: string;
+  device_name?: string;
+  saas_url?: string;
+}
+
+export interface ClaimResult {
+  device_id: string;
+  organization_id: number;
+  device_kind: string;
+  status: string;
+  edge_id: string;
+}
+
+export type EnrollmentStatus =
+  | 'IDLE'
+  | 'VALIDATING'
+  | 'CLAIMING'
+  | 'SUCCESS'
+  | 'INVALID_CODE'
+  | 'EXPIRED_CODE'
+  | 'ALREADY_USED'
+  | 'RATE_LIMITED'
+  | 'NETWORK_ERROR'
+  | 'SERVER_ERROR'
+  | 'PERSISTENCE_ERROR'
+  | 'EDGE_ID_CONFLICT';
+

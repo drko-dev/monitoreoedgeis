@@ -5,30 +5,14 @@ import { SystemCard } from './components/SystemCard';
 import { StateCard } from './components/StateCard';
 import { Button } from './components/Button';
 import { ErrorAlert } from './components/ErrorAlert';
+import { EnrollmentWizard } from './components/EnrollmentWizard';
 import './App.css';
 
 export const App: React.FC = () => {
   const { report, state, loading, error, refresh } = useInstaller();
   const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
-  const [continueNotice, setContinueNotice] = useState<string | null>(null);
 
-  const handleContinue = () => {
-    if (!state) return;
-
-    if (state.state === 'NEEDS_ENROLLMENT' || state.state === 'NEW') {
-      setContinueNotice(
-        'SaaS Enrollment wizard will be available in milestone UX-2. No productive actions taken in UX-1 shell.'
-      );
-    } else if (state.state === 'ENROLLED') {
-      setContinueNotice(
-        'Device is already enrolled. Configuration wizard will be available in milestone UX-3.'
-      );
-    } else if (state.state === 'BLOCKED') {
-      setContinueNotice(
-        'Installation is blocked due to platform incompatibility or missing prerequisites.'
-      );
-    }
-  };
+  const needsEnrollment = state?.state === 'NEEDS_ENROLLMENT' || state?.state === 'NEW';
 
   if (loading) {
     return (
@@ -51,42 +35,31 @@ export const App: React.FC = () => {
         />
       )}
 
-      {continueNotice && (
-        <div className="alert alert-info" role="status">
-          <div className="alert-content">
-            <span className="alert-icon" aria-hidden="true">ℹ️</span>
-            <div>
-              <h4 className="alert-title">Milestone Boundary</h4>
-              <p className="alert-message">{continueNotice}</p>
-            </div>
+      {needsEnrollment ? (
+        <EnrollmentWizard onComplete={refresh} />
+      ) : (
+        <>
+          <div className="dashboard-grid">
+            {report && <SystemCard report={report} />}
+            {state && <StateCard state={state} />}
           </div>
-          <button
-            type="button"
-            className="btn-alert-close"
-            onClick={() => setContinueNotice(null)}
-            aria-label="Close notification"
-          >
-            ✕
-          </button>
-        </div>
+
+          <div className="actions-bar">
+            <Button
+              variant="primary"
+              onClick={refresh}
+              disabled={state?.state === 'BLOCKED'}
+            >
+              Continue
+            </Button>
+            <Button variant="secondary" onClick={refresh}>
+              Refresh Diagnostics
+            </Button>
+          </div>
+        </>
       )}
 
-      <div className="dashboard-grid">
-        {report && <SystemCard report={report} />}
-        {state && <StateCard state={state} />}
-      </div>
-
       <div className="actions-bar">
-        <Button
-          variant="primary"
-          onClick={handleContinue}
-          disabled={state?.state === 'BLOCKED'}
-        >
-          Continue
-        </Button>
-        <Button variant="secondary" onClick={refresh}>
-          Refresh Diagnostics
-        </Button>
         <button
           type="button"
           className="btn-link"

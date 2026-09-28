@@ -415,3 +415,138 @@ body {
     transform: rotate(360deg);
   }
 }
+
+/* ===== Enrollment Wizard ===== */
+
+.enrollment-card {
+  max-width: 520px;
+  margin: 0 auto;
+}
+
+.enrollment-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+  color: var(--text-primary);
+}
+
+.enrollment-description {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  margin-bottom: 1.5rem;
+}
+
+.enrollment-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.form-label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.form-label .required {
+  color: var(--danger);
+}
+
+.form-label .optional {
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.form-input {
+  padding: 0.625rem 0.875rem;
+  font-size: 1rem;
+  font-family: var(--font-family);
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.form-input:focus {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px var(--accent-focus);
+}
+
+.form-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.form-input.input-error {
+  border-color: var(--danger);
+}
+
+.code-input {
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+  font-size: 1.5rem;
+  letter-spacing: 0.15em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.enrollment-error {
+  margin-top: 0;
+}
+
+.enrollment-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+}
+
+/* Enrollment success */
+
+.enrollment-success {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 0.75rem;
+  padding: 1rem 0;
+}
+
+.success-icon {
+  font-size: 2.5rem;
+}
+
+.enrollment-message {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  max-width: 360px;
+}
+
+.enrollment-result-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.375rem 1rem;
+  text-align: left;
+  width: 100%;
+  max-width: 360px;
+  margin: 0.75rem 0;
+}
+
+.enrollment-result-grid dt {
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.enrollment-result-grid dd {
+  color: var(--text-primary);
+  font-size: 0.8125rem;
+  margin: 0;
+}

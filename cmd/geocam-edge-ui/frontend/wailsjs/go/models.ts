@@ -78,6 +78,41 @@ export namespace installer {
 	        this.gpu_info = source["gpu_info"];
 	    }
 	}
+	export class ClaimRequest {
+	    code: string;
+	    device_name?: string;
+	    saas_url?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new ClaimRequest(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.code = source["code"];
+	        this.device_name = source["device_name"];
+	        this.saas_url = source["saas_url"];
+	    }
+	}
+	export class ClaimResult {
+	    device_id: string;
+	    organization_id: number;
+	    device_kind: string;
+	    status: string;
+	    edge_id: string;
+
+	    static createFrom(source: any = {}) {
+	        return new ClaimResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.device_id = source["device_id"];
+	        this.organization_id = source["organization_id"];
+	        this.device_kind = source["device_kind"];
+	        this.status = source["status"];
+	        this.edge_id = source["edge_id"];
+	    }
+	}
 
 }
-
