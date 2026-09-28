@@ -581,6 +581,44 @@ Test matrix:
 
 Exit criterion: a technician unfamiliar with repository internals can complete installation using only the product UI and documented prerequisites.
 
+### UX-9 — Localization, branding, and contextual documentation links
+
+Status: `UX9_STATUS = COMPLETE`
+
+- **i18n**: a small custom `src/i18n/` context (no new dependency — a
+  React context + one flat dictionary per language is sufficient for this
+  app's size) replaces every hardcoded UI string across `App.tsx` and all
+  components/hooks (including client-side validation/fallback error text,
+  not just static labels). Spanish (`es`) is the default; English (`en`) is
+  selectable from a switcher in the Header and persists in `localStorage`.
+  Backend-generated `safe_message`/`reason` strings are intentionally left
+  as the backend returns them — translating those would mean giving the Go
+  backend its own i18n layer, which is backend architecture work out of
+  scope for this UI/branding pass, not a missed string.
+- **Branding**: the official GEO CAM logo (isotype + wordmark + tagline)
+  is cropped into derived assets (`cmd/geocam-edge-ui/frontend/src/assets/`)
+  for the Header badge and an About panel (toggled from the Header logo),
+  and into `build/appicon.png` (the source Wails' own `wails build` uses to
+  generate `iconfile.icns` for macOS), `build/windows/icon.ico`, and
+  `build/linux/icons/*.png` — the source JPG itself is untouched.
+- **Contextual help**: `src/config/docsLinks.ts` is the single source of
+  truth for every documentation URL the installer shows, all derived from
+  the confirmed public SaaS base URL and pointing at real, audited routes
+  in the SaaS's existing Help Center (`/ayuda/articulos/{slug}`,
+  `geocam/routers/help.py` → `HELP_DOC_ARTICLES`, in the SaaS repo). Each
+  wizard step (enrollment, processing mode, camera discovery/credentials,
+  DVR/NVR, commissioning) has a small "? " help link that opens the
+  matching guide in the OS default browser via Wails' `BrowserOpenURL`
+  runtime API — never inside the app's own WebView.
+- **Device Role**: audited before building anything (see
+  `docs/product/EDGE_INSTALLER_DEVICE_ROLE.md` in the SaaS repo). The only
+  real backend concept is `device_kind` (`gateway` | `edge`), and
+  `claim_edge_device` in the SaaS hardcodes `device_kind="edge"` for every
+  device this installer enrolls — it is not a technician choice. The
+  enrollment success screen shows it as a **read-only** fact ("Tipo de
+  dispositivo: Edge completo"), not a selector — a selector would show an
+  option that can never actually change.
+
 ## 18. Current state summary
 
 | Area | Current state | Next action |
@@ -598,6 +636,7 @@ Exit criterion: a technician unfamiliar with repository internals can complete i
 | DVR/NVR multichannel | **UX6_SOFTWARE_STATUS = COMPLETE** (backend + onboarding wizard UI, both real and tested); **UX6_PHYSICAL_DVR_NVR = NOT_VALIDATED**; `DVR_NVR_UI_PRODUCTION_ENABLED = NO` | `UX6_DVR_NVR_MULTICHANNEL.md` has the implementation, tests, and physical gate |
 | Windows/Linux/macOS GUI release pipeline | **UX7_BUILD_PIPELINE = COMPLETE** (all 4 platforms built for real on GitHub Actions); **UX7_SIGNING_IMPLEMENTATION = COMPLETE**, **UX7_*_SIGNING_EXECUTION = BLOCKED_EXTERNAL_SECRET** | Provide signing secrets; push an official tag when ready |
 | End-user installer E2E / field acceptance | **UX8** — see `UX8_FIELD_ACCEPTANCE.md` matrix; multi-camera pilot (Z3) `BLOCKED_PHYSICAL_RESOURCES` (1 of 5 minimum cameras available) | Additional physical hardware/platforms |
+| i18n, branding, contextual docs links | **UX9_STATUS = COMPLETE** (es default + en, GEO CAM branding/icons, `docsLinks.ts` wired to real SaaS Help Center routes, Device Role resolved as a read-only fact) | — |
 
 ## 19. Recommended implementation order
 

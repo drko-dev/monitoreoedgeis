@@ -13,10 +13,12 @@ import {
   applyCameraOnboarding,
   cancelCameraOnboarding,
 } from '../services/api';
+import { useI18n } from '../i18n/I18nContext';
 
 export type ScanState = 'IDLE' | 'SCANNING' | 'FOUND' | 'NONE_FOUND' | 'ERROR';
 
 export function useCameraOnboarding() {
+  const { t } = useI18n();
   const [scanState, setScanState] = useState<ScanState>('IDLE');
   const [candidates, setCandidates] = useState<OnboardingCandidate[]>([]);
   const [scanError, setScanError] = useState<string | null>(null);
@@ -39,10 +41,10 @@ export function useCameraOnboarding() {
       setCandidates(result.candidates);
       setScanState(result.candidates.length > 0 ? 'FOUND' : 'NONE_FOUND');
     } catch (err: unknown) {
-      setScanError(err instanceof Error ? err.message : 'Discovery scan failed');
+      setScanError(err instanceof Error ? err.message : t('errors.discoveryScanFailed'));
       setScanState('ERROR');
     }
-  }, []);
+  }, [t]);
 
   const validate = useCallback(async (candidateKey: string, username: string, password: string) => {
     setValidating(true);

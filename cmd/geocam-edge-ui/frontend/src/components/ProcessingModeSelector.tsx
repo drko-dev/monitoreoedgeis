@@ -2,6 +2,9 @@ import React from 'react';
 import { ProcessingModeOption, ProcessingMode } from '../types/installer';
 import { capabilityBadge } from '../utils/processingModeDisplay';
 import { Button } from './Button';
+import { HelpLink } from './HelpLink';
+import { useI18n } from '../i18n/I18nContext';
+import { docsLinks } from '../config/docsLinks';
 
 interface ProcessingModeSelectorProps {
   options: ProcessingModeOption[];
@@ -20,9 +23,13 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
   onContinue,
   loading,
 }) => {
+  const { t } = useI18n();
   return (
     <div className="card mode-selector-card">
-      <h3 className="card-title">Choose processing mode</h3>
+      <div className="card-header-row">
+        <h3 className="card-title">{t('mode.chooseTitle')}</h3>
+        <HelpLink href={docsLinks.processingModes}>{t('mode.whichShouldIChoose')}</HelpLink>
+      </div>
       <div className="mode-card-grid">
         {options.map((option) => {
           const badge = capabilityBadge(option);
@@ -39,27 +46,27 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
             >
               <div className="mode-card-header">
                 <span className="mode-card-name">{option.display_name}</span>
-                {currentMode === option.mode && <span className="badge badge-info">Current</span>}
+                {currentMode === option.mode && <span className="badge badge-info">{t('mode.current')}</span>}
               </div>
               <p className="mode-card-description">{option.description}</p>
               <dl className="mode-card-facts">
                 <div>
-                  <dt>Local compute</dt>
+                  <dt>{t('mode.localCompute')}</dt>
                   <dd>{option.local_compute}</dd>
                 </div>
                 <div>
-                  <dt>Network dependency</dt>
+                  <dt>{t('mode.networkDependency')}</dt>
                   <dd>{option.network_dependency}</dd>
                 </div>
                 <div>
-                  <dt>Inference</dt>
+                  <dt>{t('mode.inference')}</dt>
                   <dd>{option.inference_location}</dd>
                 </div>
               </dl>
               <span className={`badge ${badge.className}`}>{badge.label}</span>
               {option.capability_reason && <p className="mode-card-reason">{option.capability_reason}</p>}
               {isUnavailable && option.blockers && option.blockers.length > 0 && (
-                <p className="mode-card-reason">Reason: {option.blockers[0]}</p>
+                <p className="mode-card-reason">{t('mode.reason', { reason: option.blockers[0] })}</p>
               )}
               {option.capability === 'SUPPORTED_WITH_WARNINGS' && option.warnings && option.warnings.length > 0 && (
                 <p className="mode-card-reason">{option.warnings[0]}</p>
@@ -70,7 +77,7 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
       </div>
       <div className="actions-bar">
         <Button variant="primary" onClick={onContinue} disabled={!selected} loading={loading}>
-          Continue
+          {t('mode.continue')}
         </Button>
       </div>
     </div>

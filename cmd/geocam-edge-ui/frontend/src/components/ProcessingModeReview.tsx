@@ -3,6 +3,7 @@ import { ProcessingModePlan, ProcessingModeApplyResult, SafeError } from '../typ
 import { MODE_LABELS, describeConfigKey } from '../utils/processingModeDisplay';
 import { Button } from './Button';
 import { ErrorAlert } from './ErrorAlert';
+import { useI18n } from '../i18n/I18nContext';
 
 interface ProcessingModeReviewProps {
   plan: ProcessingModePlan | null;
@@ -25,6 +26,8 @@ export const ProcessingModeReview: React.FC<ProcessingModeReviewProps> = ({
   onApply,
   onDone,
 }) => {
+  const { t } = useI18n();
+
   if (applyResult) {
     const isSuccess = applyResult.status === 'SUCCESS';
     const isRestartRequired = applyResult.status === 'RESTART_REQUIRED';
@@ -32,25 +35,25 @@ export const ProcessingModeReview: React.FC<ProcessingModeReviewProps> = ({
     return (
       <div className="card mode-selector-card">
         <h3 className="card-title">
-          {isSuccess && 'Configuration applied'}
-          {isRestartRequired && 'Restart required'}
-          {isRolledBack && 'Change rolled back'}
-          {applyResult.status === 'BLOCKED' && 'Mode not available'}
+          {isSuccess && t('mode.configurationApplied')}
+          {isRestartRequired && t('mode.restartRequired')}
+          {isRolledBack && t('mode.changeRolledBack')}
+          {applyResult.status === 'BLOCKED' && t('mode.modeNotAvailable')}
         </h3>
         <p className="state-message">{applyResult.safe_message}</p>
         <dl className="advanced-grid mode-result-grid">
-          <dt>Requested mode</dt>
+          <dt>{t('mode.requestedMode')}</dt>
           <dd>{MODE_LABELS[applyResult.requested_product_mode]}</dd>
-          <dt>Expected profile</dt>
+          <dt>{t('mode.expectedProfile')}</dt>
           <dd>{applyResult.expected_effective_profile || '—'}</dd>
-          <dt>Actual profile</dt>
+          <dt>{t('mode.actualProfile')}</dt>
           <dd>{applyResult.actual_effective_profile || '—'}</dd>
-          <dt>Match</dt>
-          <dd className={applyResult.match ? 'text-success' : ''}>{applyResult.match ? 'Yes' : 'No'}</dd>
+          <dt>{t('mode.match')}</dt>
+          <dd className={applyResult.match ? 'text-success' : ''}>{applyResult.match ? t('mode.yes') : t('mode.no')}</dd>
         </dl>
         <div className="actions-bar">
           <Button variant="secondary" onClick={onDone}>
-            Done
+            {t('mode.done')}
           </Button>
         </div>
       </div>
@@ -63,7 +66,7 @@ export const ProcessingModeReview: React.FC<ProcessingModeReviewProps> = ({
         <ErrorAlert message={applyError.safe_message} code={applyError.code} onRetry={onApply} />
         <div className="actions-bar">
           <Button variant="secondary" onClick={onBack}>
-            Back
+            {t('mode.back')}
           </Button>
         </div>
       </div>
@@ -73,24 +76,24 @@ export const ProcessingModeReview: React.FC<ProcessingModeReviewProps> = ({
   if (planning || !plan) {
     return (
       <div className="card mode-selector-card">
-        <h3 className="card-title">Review configuration</h3>
-        <p className="state-message">Checking current configuration…</p>
+        <h3 className="card-title">{t('mode.reviewTitle')}</h3>
+        <p className="state-message">{t('mode.checking')}</p>
       </div>
     );
   }
 
   return (
     <div className="card mode-selector-card">
-      <h3 className="card-title">Review configuration</h3>
+      <h3 className="card-title">{t('mode.reviewTitle')}</h3>
       <dl className="advanced-grid mode-result-grid">
-        <dt>Current</dt>
+        <dt>{t('mode.currentLabel')}</dt>
         <dd>{MODE_LABELS[plan.current_mode] ?? plan.current_mode}</dd>
-        <dt>Selected</dt>
+        <dt>{t('mode.selectedLabel')}</dt>
         <dd>{MODE_LABELS[plan.requested_mode]}</dd>
       </dl>
       {Object.keys(plan.config_changes).length > 0 && (
         <>
-          <p className="card-header-row">Changes</p>
+          <p className="card-header-row">{t('mode.changes')}</p>
           <ul className="check-list">
             {Object.entries(plan.config_changes).map(([key, value]) => (
               <li key={key} className="check-item">
@@ -103,7 +106,7 @@ export const ProcessingModeReview: React.FC<ProcessingModeReviewProps> = ({
       )}
       {plan.components_required && plan.components_required.length > 0 && (
         <>
-          <p className="card-header-row">Components required</p>
+          <p className="card-header-row">{t('mode.componentsRequired')}</p>
           <ul className="check-list">
             {plan.components_required.map((c) => (
               <li key={c} className="check-item">
@@ -116,13 +119,13 @@ export const ProcessingModeReview: React.FC<ProcessingModeReviewProps> = ({
       {plan.warnings && plan.warnings.length > 0 && (
         <p className="mode-card-reason">{plan.warnings.join(' ')}</p>
       )}
-      <p className="state-message">Restart required: {plan.restart_required ? 'Yes' : 'No'}</p>
+      <p className="state-message">{t('mode.restartRequiredLine', { value: plan.restart_required ? t('mode.yes') : t('mode.no') })}</p>
       <div className="actions-bar">
         <Button variant="secondary" onClick={onBack} disabled={applying}>
-          Back
+          {t('mode.back')}
         </Button>
         <Button variant="primary" onClick={onApply} loading={applying}>
-          Apply
+          {t('mode.apply')}
         </Button>
       </div>
     </div>

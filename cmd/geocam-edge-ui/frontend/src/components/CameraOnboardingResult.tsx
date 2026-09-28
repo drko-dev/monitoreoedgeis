@@ -2,6 +2,7 @@ import React from 'react';
 import { CameraOnboardingApplyResult, SafeError } from '../types/installer';
 import { Button } from './Button';
 import { ErrorAlert } from './ErrorAlert';
+import { useI18n } from '../i18n/I18nContext';
 
 interface CameraOnboardingResultProps {
   applyResult: CameraOnboardingApplyResult | null;
@@ -24,13 +25,15 @@ export const CameraOnboardingResultView: React.FC<CameraOnboardingResultProps> =
   onDone,
   onRetry,
 }) => {
+  const { t } = useI18n();
+
   if (applyError) {
     return (
       <div className="card mode-selector-card">
         <ErrorAlert message={applyError.safe_message} code={applyError.code} onRetry={onRetry} />
         <div className="actions-bar">
           <Button variant="secondary" onClick={onDone}>
-            Back
+            {t('camera.back')}
           </Button>
         </div>
       </div>
@@ -47,32 +50,32 @@ export const CameraOnboardingResultView: React.FC<CameraOnboardingResultProps> =
         <span className="success-icon" aria-hidden="true">
           ✓
         </span>
-        <h3 className="card-title">Camera added</h3>
+        <h3 className="card-title">{t('camera.added')}</h3>
         {cameraLabel && <p className="state-message">{cameraLabel}</p>}
         <ul className="check-list">
           <li className="check-item">
             <span className="check-icon pass">✓</span>
-            <span className="check-label">Camera configured</span>
+            <span className="check-label">{t('camera.configured')}</span>
           </li>
           <li className="check-item">
             <span className="check-icon pass">✓</span>
-            <span className="check-label">Stream validated</span>
+            <span className="check-label">{t('camera.streamValidated')}</span>
           </li>
           <li className="check-item">
             <span className={`check-icon ${applyResult.sync_observed ? 'pass' : ''}`}>
               {applyResult.sync_observed ? '✓' : '…'}
             </span>
-            <span className="check-label">GEO CAM Edge recognizes this camera</span>
-            <span className="check-value">{applyResult.sync_observed ? 'Synced' : 'Syncing shortly'}</span>
+            <span className="check-label">{t('camera.recognizes')}</span>
+            <span className="check-value">{applyResult.sync_observed ? t('camera.synced') : t('camera.syncingShortly')}</span>
           </li>
         </ul>
         <p className="enrollment-message">{applyResult.safe_message}</p>
         <div className="actions-bar">
           <Button variant="secondary" onClick={onAddAnother}>
-            Add another camera
+            {t('camera.addAnother')}
           </Button>
           <Button variant="primary" onClick={onDone}>
-            Continue
+            {t('camera.continue')}
           </Button>
         </div>
       </div>
@@ -82,12 +85,12 @@ export const CameraOnboardingResultView: React.FC<CameraOnboardingResultProps> =
   return (
     <div className="card mode-selector-card">
       <h3 className="card-title">
-        {applyResult.status === 'ACTION_REQUIRED' ? 'Action required' : applyResult.status === 'BLOCKED' ? 'Camera not added' : 'Change rolled back'}
+        {applyResult.status === 'ACTION_REQUIRED' ? t('camera.actionRequired') : applyResult.status === 'BLOCKED' ? t('camera.notAdded') : t('camera.rolledBack')}
       </h3>
       <p className="state-message">{applyResult.safe_message}</p>
       <div className="actions-bar">
         <Button variant="secondary" onClick={onDone}>
-          Back
+          {t('camera.back')}
         </Button>
       </div>
     </div>

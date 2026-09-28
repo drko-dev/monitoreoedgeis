@@ -3,6 +3,9 @@ import { OnboardingCandidate } from '../types/installer';
 import { ScanState } from '../hooks/useCameraOnboarding';
 import { candidateSelectable, candidateChannelLabel } from '../utils/cameraOnboardingDisplay';
 import { Button } from './Button';
+import { HelpLink } from './HelpLink';
+import { useI18n } from '../i18n/I18nContext';
+import { docsLinks } from '../config/docsLinks';
 
 interface CameraDiscoveryProps {
   scanState: ScanState;
@@ -19,16 +22,20 @@ export const CameraDiscovery: React.FC<CameraDiscoveryProps> = ({
   onScan,
   onSelect,
 }) => {
+  const { t } = useI18n();
   return (
     <div className="card mode-selector-card">
-      <h3 className="card-title">Add camera</h3>
+      <div className="card-header-row">
+        <h3 className="card-title">{t('camera.discoveryTitle')}</h3>
+        <HelpLink href={docsLinks.cameraDiscovery}>{t('camera.discoveryHelp')}</HelpLink>
+      </div>
 
       {scanState === 'IDLE' && (
         <>
-          <p className="state-message">Search the local network for IP cameras.</p>
+          <p className="state-message">{t('camera.searchLocalNetwork')}</p>
           <div className="actions-bar">
             <Button variant="primary" onClick={onScan}>
-              Start scan
+              {t('camera.startScan')}
             </Button>
           </div>
         </>
@@ -37,16 +44,16 @@ export const CameraDiscovery: React.FC<CameraDiscoveryProps> = ({
       {scanState === 'SCANNING' && (
         <div className="loading-container">
           <div className="spinner" aria-hidden="true" />
-          <p className="state-message">Searching local network...</p>
+          <p className="state-message">{t('camera.scanning')}</p>
         </div>
       )}
 
       {scanState === 'ERROR' && (
         <>
-          <p className="state-message">{scanError || 'Discovery scan failed.'}</p>
+          <p className="state-message">{scanError || t('camera.scanFailed')}</p>
           <div className="actions-bar">
             <Button variant="secondary" onClick={onScan}>
-              Scan again
+              {t('camera.scanAgain')}
             </Button>
           </div>
         </>
@@ -54,10 +61,10 @@ export const CameraDiscovery: React.FC<CameraDiscoveryProps> = ({
 
       {scanState === 'NONE_FOUND' && (
         <>
-          <p className="state-message">No cameras were found on the local network.</p>
+          <p className="state-message">{t('camera.noneFound')}</p>
           <div className="actions-bar">
             <Button variant="secondary" onClick={onScan}>
-              Scan again
+              {t('camera.scanAgain')}
             </Button>
           </div>
         </>
@@ -65,7 +72,7 @@ export const CameraDiscovery: React.FC<CameraDiscoveryProps> = ({
 
       {scanState === 'FOUND' && (
         <>
-          <p className="card-header-row">Found devices</p>
+          <p className="card-header-row">{t('camera.foundDevices')}</p>
           <ul className="check-list">
             {candidates.map((c) => (
               <li key={c.candidate_key} className="check-item">
@@ -76,24 +83,25 @@ export const CameraDiscovery: React.FC<CameraDiscoveryProps> = ({
                     <span className="badge badge-neutral">{candidateChannelLabel(c)}</span>
                   )}
                   {c.multi_source && !candidateChannelLabel(c) && (
-                    <span className="badge badge-warning">Channel identity unresolved</span>
+                    <span className="badge badge-warning">{t('camera.channelUnresolved')}</span>
                   )}
-                  {!c.onvif_available && <span className="badge badge-warning">No ONVIF</span>}
+                  {!c.onvif_available && <span className="badge badge-warning">{t('camera.noOnvif')}</span>}
                 </div>
                 <Button
                   variant="secondary"
                   onClick={() => onSelect(c)}
                   disabled={!candidateSelectable(c)}
                 >
-                  Select
+                  {t('camera.select')}
                 </Button>
               </li>
             ))}
           </ul>
           <div className="actions-bar">
             <Button variant="secondary" onClick={onScan}>
-              Scan again
+              {t('camera.scanAgain')}
             </Button>
+            <HelpLink href={docsLinks.dvrNvr}>{t('camera.dvrNvrHelp')}</HelpLink>
           </div>
         </>
       )}

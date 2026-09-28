@@ -15,12 +15,16 @@ import { CameraOnboardingResultView } from './components/CameraOnboardingResult'
 import { useCameraOnboarding } from './hooks/useCameraOnboarding';
 import { candidateKeyForRequest, candidateDisplayName } from './utils/cameraOnboardingDisplay';
 import { ProcessingMode, OnboardingCandidate } from './types/installer';
+import { useI18n } from './i18n/I18nContext';
+import { HelpLink } from './components/HelpLink';
+import { docsLinks } from './config/docsLinks';
 import './App.css';
 
 type ModeWizardStep = 'dashboard' | 'select' | 'review';
 type CameraWizardStep = 'dashboard' | 'discover' | 'credentials' | 'result';
 
 export const App: React.FC = () => {
+  const { t } = useI18n();
   const { report, state, loading, error, refresh } = useInstaller();
   const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
   const [modeStep, setModeStep] = useState<ModeWizardStep>('dashboard');
@@ -134,7 +138,7 @@ export const App: React.FC = () => {
     return (
       <main className="app-container loading-container" role="main">
         <div className="spinner-large" aria-hidden="true" />
-        <h2 className="loading-text">Inspecting Edge System Environment...</h2>
+        <h2 className="loading-text">{t('app.loading')}</h2>
       </main>
     );
   }
@@ -146,7 +150,7 @@ export const App: React.FC = () => {
       {error && (
         <ErrorAlert
           message={error}
-          code="BACKEND_UNAVAILABLE"
+          code={t('app.errorCode')}
           onRetry={refresh}
         />
       )}
@@ -214,16 +218,17 @@ export const App: React.FC = () => {
               onClick={handleContinue}
               disabled={state?.state === 'BLOCKED'}
             >
-              {isEnrolled ? 'Configure Processing Mode' : 'Continue'}
+              {isEnrolled ? t('app.configureProcessingMode') : t('app.continue')}
             </Button>
             {isEnrolled && (
               <Button variant="secondary" onClick={handleAddCamera}>
-                Add camera
+                {t('app.addCamera')}
               </Button>
             )}
             <Button variant="secondary" onClick={refresh}>
-              Refresh Diagnostics
+              {t('app.refreshDiagnostics')}
             </Button>
+            <HelpLink href={docsLinks.commissioning}>{t('help.commissioningHelp')}</HelpLink>
           </div>
         </>
       )}
@@ -236,43 +241,43 @@ export const App: React.FC = () => {
           aria-expanded={showAdvanced}
           aria-controls="advanced-info-panel"
         >
-          {showAdvanced ? 'Hide Advanced Details ▲' : 'Show Advanced Details ▼'}
+          {showAdvanced ? t('app.hideAdvanced') : t('app.showAdvanced')}
         </button>
       </div>
 
       {showAdvanced && report && (
         <section id="advanced-info-panel" className="card advanced-card" aria-label="Advanced Details">
-          <h3 className="advanced-title">Advanced Host & Daemon Details</h3>
+          <h3 className="advanced-title">{t('app.advancedTitle')}</h3>
           <dl className="advanced-grid">
-            <dt>Data Directory:</dt>
+            <dt>{t('app.dataDirectory')}</dt>
             <dd><code>{report.data_dir}</code></dd>
 
-            <dt>Privilege Level:</dt>
+            <dt>{t('app.privilegeLevel')}</dt>
             <dd><span className="badge badge-neutral">{report.privilege_level}</span></dd>
 
-            <dt>Instance Lock Safe:</dt>
+            <dt>{t('app.instanceLockSafe')}</dt>
             <dd>
               <strong className="text-success">
-                {report.owns_instance_lock ? 'Acquired (Warning)' : 'Safe (Unacquired)'}
+                {report.owns_instance_lock ? t('app.instanceLockAcquired') : t('app.instanceLockSafeValue')}
               </strong>
             </dd>
 
-            <dt>Edge Background Daemon:</dt>
+            <dt>{t('app.daemon')}</dt>
             <dd>
               <span className={`badge ${report.daemon_running ? 'badge-success' : 'badge-neutral'}`}>
-                {report.daemon_running ? 'Active (HTTP 8091)' : 'Stopped / Not Detected'}
+                {report.daemon_running ? t('app.daemonActive') : t('app.daemonStopped')}
               </span>
             </dd>
 
-            <dt>Service Registration:</dt>
+            <dt>{t('app.serviceRegistration')}</dt>
             <dd>
               <span className={`badge ${report.service_installed ? 'badge-success' : 'badge-neutral'}`}>
-                {report.service_installed ? 'Installed' : 'Not Installed'}
+                {report.service_installed ? t('app.serviceInstalled') : t('app.serviceNotInstalled')}
               </span>
             </dd>
 
-            <dt>GPU Accelerator:</dt>
-            <dd>{report.gpu_info || 'None / Not Configured'}</dd>
+            <dt>{t('app.gpuAccelerator')}</dt>
+            <dd>{report.gpu_info || t('app.gpuNone')}</dd>
           </dl>
         </section>
       )}

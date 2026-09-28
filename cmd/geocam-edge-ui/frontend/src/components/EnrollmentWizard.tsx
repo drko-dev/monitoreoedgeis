@@ -1,19 +1,24 @@
 import React from 'react';
 import { useEnrollment } from '../hooks/useEnrollment';
 import { Button } from './Button';
+import { HelpLink } from './HelpLink';
+import { useI18n } from '../i18n/I18nContext';
+import { TranslationKey } from '../i18n/translations';
+import { docsLinks } from '../config/docsLinks';
 
-const ERROR_LABELS: Record<string, string> = {
-  INVALID_CODE: 'Invalid Code',
-  EXPIRED_CODE: 'Expired Code',
-  ALREADY_USED: 'Code Already Used',
-  RATE_LIMITED: 'Too Many Attempts',
-  NETWORK_ERROR: 'Connection Error',
-  SERVER_ERROR: 'Server Error',
-  PERSISTENCE_ERROR: 'Save Failed',
-  EDGE_ID_CONFLICT: 'Device Conflict',
+const ERROR_LABEL_KEYS: Record<string, TranslationKey> = {
+  INVALID_CODE: 'enrollment.errorInvalidCode',
+  EXPIRED_CODE: 'enrollment.errorExpiredCode',
+  ALREADY_USED: 'enrollment.errorAlreadyUsed',
+  RATE_LIMITED: 'enrollment.errorRateLimited',
+  NETWORK_ERROR: 'enrollment.errorNetworkError',
+  SERVER_ERROR: 'enrollment.errorServerError',
+  PERSISTENCE_ERROR: 'enrollment.errorPersistenceError',
+  EDGE_ID_CONFLICT: 'enrollment.errorEdgeIdConflict',
 };
 
 export const EnrollmentWizard: React.FC<{ onComplete: () => void }> = ({ onComplete }) => {
+  const { t } = useI18n();
   const {
     code,
     deviceName,
@@ -36,20 +41,26 @@ export const EnrollmentWizard: React.FC<{ onComplete: () => void }> = ({ onCompl
       <section className="card enrollment-card" aria-label="Enrollment Complete">
         <div className="enrollment-success">
           <span className="success-icon" aria-hidden="true">✅</span>
-          <h3 className="enrollment-title">Enrollment Complete</h3>
-          <p className="enrollment-message">
-            This device has been registered with your GEO CAM organization.
-          </p>
+          <h3 className="enrollment-title">{t('enrollment.completeTitle')}</h3>
+          <p className="enrollment-message">{t('enrollment.completeMessage')}</p>
           <dl className="enrollment-result-grid">
-            <dt>Edge ID:</dt>
+            <dt>{t('enrollment.edgeId')}</dt>
             <dd><code>{result.edge_id}</code></dd>
-            <dt>Device ID:</dt>
+            <dt>{t('enrollment.deviceId')}</dt>
             <dd><code>{result.device_id}</code></dd>
-            <dt>Status:</dt>
+            <dt>{t('enrollment.status')}</dt>
             <dd><span className="badge badge-success">{result.status}</span></dd>
+            <dt>{t('enrollment.deviceRole')}</dt>
+            <dd>
+              <span className="badge badge-info">
+                {result.device_kind === 'gateway' ? t('enrollment.deviceRoleGateway') : t('enrollment.deviceRoleEdge')}
+              </span>
+              {' '}
+              <HelpLink href={docsLinks.deviceRole}>{t('enrollment.deviceRoleHelp')}</HelpLink>
+            </dd>
           </dl>
           <Button variant="primary" onClick={onComplete}>
-            Continue to Configuration
+            {t('enrollment.continueToConfiguration')}
           </Button>
         </div>
       </section>
@@ -58,16 +69,16 @@ export const EnrollmentWizard: React.FC<{ onComplete: () => void }> = ({ onCompl
 
   return (
     <section className="card enrollment-card" aria-label="Device Enrollment">
-      <h3 className="enrollment-title">Enroll This Device</h3>
+      <h3 className="enrollment-title">{t('enrollment.title')}</h3>
       <p className="enrollment-description">
-        Enter the one-time enrollment code provided by your GEO CAM administrator.
-        The code is in <strong>XXXX-XXXX</strong> format.
+        {t('enrollment.description')} <strong>XXXX-XXXX</strong>.{' '}
+        <HelpLink href={docsLinks.enrollment}>{t('enrollment.whereDoIGetCode')}</HelpLink>
       </p>
 
       <div className="enrollment-form">
         <div className="form-group">
           <label htmlFor="enrollment-code" className="form-label">
-            Enrollment Code <span className="required" aria-label="required">*</span>
+            {t('enrollment.codeLabel')} <span className="required" aria-label="required">*</span>
           </label>
           <input
             id="enrollment-code"
@@ -88,13 +99,13 @@ export const EnrollmentWizard: React.FC<{ onComplete: () => void }> = ({ onCompl
 
         <div className="form-group">
           <label htmlFor="device-name" className="form-label">
-            Device Name <span className="optional">(optional)</span>
+            {t('enrollment.deviceNameLabel')} <span className="optional">{t('enrollment.optional')}</span>
           </label>
           <input
             id="device-name"
             type="text"
             className="form-input"
-            placeholder="e.g. Office Entrance Edge"
+            placeholder={t('enrollment.deviceNamePlaceholder')}
             value={deviceName}
             onChange={(e) => setDeviceName(e.target.value)}
             disabled={isClaiming}
@@ -108,13 +119,13 @@ export const EnrollmentWizard: React.FC<{ onComplete: () => void }> = ({ onCompl
             <div className="alert-content">
               <span className="alert-icon" aria-hidden="true">⚠️</span>
               <div>
-                <h4 className="alert-title">{ERROR_LABELS[status] || 'Error'}</h4>
+                <h4 className="alert-title">{ERROR_LABEL_KEYS[status] ? t(ERROR_LABEL_KEYS[status]) : t('enrollment.errorGeneric')}</h4>
                 <p className="alert-message">{errorMessage}</p>
               </div>
             </div>
             {status !== 'EDGE_ID_CONFLICT' && (
               <button type="button" className="btn-alert-action" onClick={reset}>
-                Try Again
+                {t('enrollment.tryAgain')}
               </button>
             )}
           </div>
@@ -127,7 +138,7 @@ export const EnrollmentWizard: React.FC<{ onComplete: () => void }> = ({ onCompl
             disabled={!canSubmit}
             loading={isClaiming}
           >
-            {isClaiming ? 'Enrolling...' : 'Enroll Device'}
+            {isClaiming ? t('enrollment.enrolling') : t('enrollment.enrollDevice')}
           </Button>
         </div>
       </div>

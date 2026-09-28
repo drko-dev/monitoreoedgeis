@@ -2,6 +2,9 @@ import React, { useState } from 'react';
 import { OnboardingCandidate, CameraValidationResult, CameraOnboardingPlan } from '../types/installer';
 import { candidateDisplayName, candidateChannelLabel } from '../utils/cameraOnboardingDisplay';
 import { Button } from './Button';
+import { HelpLink } from './HelpLink';
+import { useI18n } from '../i18n/I18nContext';
+import { docsLinks } from '../config/docsLinks';
 
 interface CameraCredentialsFormProps {
   candidate: OnboardingCandidate;
@@ -13,10 +16,6 @@ interface CameraCredentialsFormProps {
   onContinue: () => void;
   onBack: () => void;
 }
-
-const CHECK_LABELS: Record<string, string> = {
-  ok: 'Passed',
-};
 
 function checkIcon(status: string): string {
   return status === 'ok' ? '✓' : '✗';
@@ -32,6 +31,7 @@ export const CameraCredentialsForm: React.FC<CameraCredentialsFormProps> = ({
   onContinue,
   onBack,
 }) => {
+  const { t } = useI18n();
   const [cameraName, setCameraName] = useState(candidateDisplayName({ ...candidate, model: candidate.model || candidate.manufacturer || 'Camera' }));
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -43,7 +43,10 @@ export const CameraCredentialsForm: React.FC<CameraCredentialsFormProps> = ({
 
   return (
     <div className="card mode-selector-card">
-      <h3 className="card-title">Camera credentials</h3>
+      <div className="card-header-row">
+        <h3 className="card-title">{t('camera.credentialsTitle')}</h3>
+        <HelpLink href={docsLinks.cameraCredentials}>{t('camera.credentialsHelp')}</HelpLink>
+      </div>
       <p className="state-message">
         {candidate.model || 'Camera'} · {candidate.host}
         {candidateChannelLabel(candidate) && <> · {candidateChannelLabel(candidate)}</>}
@@ -52,7 +55,7 @@ export const CameraCredentialsForm: React.FC<CameraCredentialsFormProps> = ({
       <form className="enrollment-form" onSubmit={handleTest}>
         <div className="form-group">
           <label className="form-label" htmlFor="camera-name">
-            Camera name
+            {t('camera.nameLabel')}
           </label>
           <input
             id="camera-name"
@@ -64,7 +67,7 @@ export const CameraCredentialsForm: React.FC<CameraCredentialsFormProps> = ({
         </div>
         <div className="form-group">
           <label className="form-label" htmlFor="camera-username">
-            Username
+            {t('camera.usernameLabel')}
           </label>
           <input
             id="camera-username"
@@ -76,7 +79,7 @@ export const CameraCredentialsForm: React.FC<CameraCredentialsFormProps> = ({
         </div>
         <div className="form-group">
           <label className="form-label" htmlFor="camera-password">
-            Password
+            {t('camera.passwordLabel')}
           </label>
           <input
             id="camera-password"
@@ -89,7 +92,7 @@ export const CameraCredentialsForm: React.FC<CameraCredentialsFormProps> = ({
         </div>
         <div className="enrollment-actions">
           <Button type="submit" variant="primary" loading={validating}>
-            Test connection
+            {t('camera.testConnection')}
           </Button>
         </div>
       </form>
@@ -100,20 +103,20 @@ export const CameraCredentialsForm: React.FC<CameraCredentialsFormProps> = ({
             <span className={`check-icon ${validation.onvif_status === 'ok' ? 'pass' : 'fail'}`}>
               {checkIcon(validation.onvif_status)}
             </span>
-            <span className="check-label">ONVIF authentication</span>
-            <span className="check-value">{validation.onvif_status === 'ok' ? CHECK_LABELS.ok : validation.onvif_reason}</span>
+            <span className="check-label">{t('camera.onvifAuth')}</span>
+            <span className="check-value">{validation.onvif_status === 'ok' ? t('camera.passed') : validation.onvif_reason}</span>
           </li>
           <li className="check-item">
             <span className={`check-icon ${validation.rtsp_status === 'ok' ? 'pass' : 'fail'}`}>
               {checkIcon(validation.rtsp_status)}
             </span>
-            <span className="check-label">RTSP connection</span>
-            <span className="check-value">{validation.rtsp_status === 'ok' ? CHECK_LABELS.ok : validation.rtsp_reason}</span>
+            <span className="check-label">{t('camera.rtspConnection')}</span>
+            <span className="check-value">{validation.rtsp_status === 'ok' ? t('camera.passed') : validation.rtsp_reason}</span>
           </li>
           {validation.profile && (
             <li className="check-item">
               <span className="check-icon pass">✓</span>
-              <span className="check-label">Video profile</span>
+              <span className="check-label">{t('camera.videoProfile')}</span>
               <span className="check-value">
                 {validation.profile.codec} · {validation.profile.width}x{validation.profile.height} ·{' '}
                 {validation.profile.fps}fps
@@ -125,25 +128,25 @@ export const CameraCredentialsForm: React.FC<CameraCredentialsFormProps> = ({
 
       {plan && plan.credentials_valid && (
         <>
-          <p className="card-header-row">Camera ready to add</p>
+          <p className="card-header-row">{t('camera.readyToAdd')}</p>
           <dl className="advanced-grid mode-result-grid">
-            <dt>Camera</dt>
+            <dt>{t('camera.camera')}</dt>
             <dd>{plan.camera_name}</dd>
-            <dt>Stream</dt>
+            <dt>{t('camera.stream')}</dt>
             <dd>
               {plan.profile ? `${plan.profile.width}×${plan.profile.height} ${plan.profile.codec} · ${plan.profile.fps} fps` : '—'}
             </dd>
-            <dt>Processing</dt>
+            <dt>{t('camera.processing')}</dt>
             <dd>{plan.processing_mode}</dd>
-            <dt>Credentials</dt>
-            <dd className="text-success">Verified</dd>
+            <dt>{t('camera.credentials')}</dt>
+            <dd className="text-success">{t('camera.verified')}</dd>
           </dl>
         </>
       )}
 
       <div className="actions-bar">
         <Button variant="secondary" onClick={onBack}>
-          Back
+          {t('camera.back')}
         </Button>
         <Button
           variant="primary"
@@ -151,7 +154,7 @@ export const CameraCredentialsForm: React.FC<CameraCredentialsFormProps> = ({
           disabled={!validation?.passed}
           loading={planning}
         >
-          {plan?.credentials_valid ? 'Add camera' : 'Continue'}
+          {plan?.credentials_valid ? t('camera.addCameraAction') : t('camera.continueAction')}
         </Button>
       </div>
     </div>

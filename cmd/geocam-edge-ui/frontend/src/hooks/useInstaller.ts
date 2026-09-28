@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
 import { SystemReport, InstallerState } from '../types/installer';
 import { fetchSystemReport, fetchInstallerState } from '../services/api';
+import { useI18n } from '../i18n/I18nContext';
 
 export function useInstaller() {
+  const { t } = useI18n();
   const [report, setReport] = useState<SystemReport | null>(null);
   const [state, setState] = useState<InstallerState | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -19,12 +21,12 @@ export function useInstaller() {
       setReport(sysReport);
       setState(instState);
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Failed to communicate with Go backend';
+      const message = err instanceof Error ? err.message : t('errors.backendUnavailable');
       setError(message);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     loadData();

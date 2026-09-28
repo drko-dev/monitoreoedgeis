@@ -13,8 +13,10 @@ import {
   planProcessingMode,
   applyProcessingMode,
 } from '../services/api';
+import { useI18n } from '../i18n/I18nContext';
 
 export function useProcessingMode() {
+  const { t } = useI18n();
   const [options, setOptions] = useState<ProcessingModeOption[]>([]);
   const [current, setCurrent] = useState<CurrentProcessingMode | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -35,11 +37,11 @@ export function useProcessingMode() {
       setOptions(opts);
       setCurrent(cur);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to load processing mode information');
+      setError(err instanceof Error ? err.message : t('errors.processingModeLoadFailed'));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     load();
@@ -72,13 +74,13 @@ export function useProcessingMode() {
       const safeErr =
         err && typeof err === 'object' && 'safe_message' in err
           ? (err as SafeError)
-          : { code: 'UNKNOWN_ERROR', safe_message: 'An unexpected error occurred while applying the change.', recoverable: true };
+          : { code: 'UNKNOWN_ERROR', safe_message: t('errors.unexpectedApplyError'), recoverable: true };
       setApplyError(safeErr);
       throw safeErr;
     } finally {
       setApplying(false);
     }
-  }, [load]);
+  }, [load, t]);
 
   const resetApply = useCallback(() => {
     setApplyResult(null);

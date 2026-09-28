@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import { ClaimRequest, ClaimResult, SafeError, EnrollmentStatus } from '../types/installer';
 import { claimDevice } from '../services/api';
+import { useI18n } from '../i18n/I18nContext';
 
 const CROCKFORD_CHARS = /^[0-9A-HJKMNP-TV-Z]+$/;
 const CODE_LENGTH = 8;
@@ -15,13 +16,13 @@ function normalizeCode(raw: string): string {
 }
 
 /** Validate a raw enrollment code string */
-function validateCode(raw: string): string | null {
+function validateCode(raw: string, t: ReturnType<typeof useI18n>['t']): string | null {
   const normalized = normalizeCode(raw);
   if (normalized.length !== CODE_LENGTH) {
-    return `Enrollment code must be ${CODE_LENGTH} characters (excluding hyphens).`;
+    return t('enrollment.validationLength', { length: CODE_LENGTH });
   }
   if (!CROCKFORD_CHARS.test(normalized)) {
-    return 'Code contains invalid characters.';
+    return t('enrollment.validationChars');
   }
   return null;
 }
@@ -34,6 +35,7 @@ export function formatCodeInput(value: string): string {
 }
 
 export function useEnrollment() {
+  const { t } = useI18n();
   const [code, setCode] = useState('');
   const [deviceName, setDeviceName] = useState('');
   const [status, setStatus] = useState<EnrollmentStatus>('IDLE');
@@ -54,7 +56,7 @@ export function useEnrollment() {
     setStatus('VALIDATING');
     setErrorMessage(null);
 
-    const validationError = validateCode(code);
+    const validationError = validateCode(code, t);
     if (validationError) {
       setStatus('INVALID_CODE');
       setErrorMessage(validationError);
@@ -76,9 +78,9 @@ export function useEnrollment() {
       const safe = err as SafeError;
       const errorCode = safe?.code || 'SERVER_ERROR';
       setStatus(errorCode as EnrollmentStatus);
-      setErrorMessage(safe?.safe_message || 'An unexpected error occurred. Please try again.');
+      setErrorMessage(safe?.safe_message || t('enrollment.unexpectedError'));
     }
-  }, [code, deviceName]);
+  }, [code, deviceName, t]);
 
   const reset = useCallback(() => {
     setCode('');
