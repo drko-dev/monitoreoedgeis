@@ -221,6 +221,13 @@ func parseProfilesStrict(body []byte) ([]MediaProfile, error) {
 	dec.Strict = false
 
 	var current *MediaProfile
+	// inVideoEncoderConfig gates encoding/width/height/frameratelimit to
+	// VideoEncoderConfiguration only. An ONVIF profile also carries an
+	// AudioEncoderConfiguration with its own <Encoding> (e.g. G711), which
+	// appears later in document order and would otherwise silently
+	// overwrite the video codec. Same bug as soap.go's GetProfiles parser,
+	// found against a physical TP-Link Tapo TC70 during UX5 commissioning.
+	inVideoEncoderConfig := false
 	for {
 		t, err := dec.Token()
 		if err != nil {
@@ -241,6 +248,8 @@ func parseProfilesStrict(body []byte) ([]MediaProfile, error) {
 					}
 				}
 				current = &MediaProfile{Token: token}
+			} else if local == "videoencoderconfiguration" {
+				inVideoEncoderConfig = true
 			} else if current != nil {
 				switch local {
 				case "name":
@@ -249,21 +258,33 @@ func parseProfilesStrict(body []byte) ([]MediaProfile, error) {
 						current.Name = sanitizeText(name, 64)
 					}
 				case "encoding":
+					if !inVideoEncoderConfig {
+						continue
+					}
 					var enc string
 					if dec.DecodeElement(&enc, &elem) == nil {
 						current.Codec = sanitizeText(enc, 32)
 					}
 				case "width":
+					if !inVideoEncoderConfig {
+						continue
+					}
 					var w int
 					if dec.DecodeElement(&w, &elem) == nil {
 						current.Width = w
 					}
 				case "height":
+					if !inVideoEncoderConfig {
+						continue
+					}
 					var h int
 					if dec.DecodeElement(&h, &elem) == nil {
 						current.Height = h
 					}
 				case "frameratelimit":
+					if !inVideoEncoderConfig {
+						continue
+					}
 					var fps float64
 					if dec.DecodeElement(&fps, &elem) == nil {
 						current.FPS = fps
@@ -271,6 +292,9 @@ func parseProfilesStrict(body []byte) ([]MediaProfile, error) {
 				}
 			}
 		case xml.EndElement:
+			if strings.EqualFold(elem.Name.Local, "videoencoderconfiguration") {
+				inVideoEncoderConfig = false
+			}
 			if strings.EqualFold(elem.Name.Local, "profiles") && current != nil {
 				if current.Token != "" {
 					nameLower := strings.ToLower(current.Name)

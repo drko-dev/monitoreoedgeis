@@ -225,3 +225,51 @@ func extractXMLText(t *testing.T, xmlFragment, localTag string) string {
 		}
 	}
 }
+
+// TestGetProfilesAuth_VideoCodecNotOverwrittenByAudioEncoding is the
+// GetProfilesAuth counterpart to soap_test.go's regression test: same real
+// bug (AudioEncoderConfiguration's <Encoding> clobbering the video codec),
+// found against a physical TP-Link Tapo TC70 during UX5 commissioning,
+// reproduced here on the authenticated (WS-Security) media profile parser
+// that the installer's credential-based ONVIF flow actually uses.
+func TestGetProfilesAuth_VideoCodecNotOverwrittenByAudioEncoding(t *testing.T) {
+	client, ts := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/soap+xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+  <SOAP-ENV:Body>
+    <trt:GetProfilesResponse>
+      <trt:Profiles token="profile_1">
+        <tt:Name>MainStream</tt:Name>
+        <tt:VideoEncoderConfiguration>
+          <tt:Encoding>H264</tt:Encoding>
+          <tt:Resolution><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:Resolution>
+          <tt:RateControl><tt:FrameRateLimit>15</tt:FrameRateLimit></tt:RateControl>
+        </tt:VideoEncoderConfiguration>
+        <tt:AudioEncoderConfiguration>
+          <tt:Encoding>G711</tt:Encoding>
+          <tt:Bitrate>64</tt:Bitrate>
+        </tt:AudioEncoderConfiguration>
+      </trt:Profiles>
+    </trt:GetProfilesResponse>
+  </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>`))
+	})
+	defer ts.Close()
+
+	profiles, err := client.GetProfilesAuth(context.Background(), ts.URL, "admin", "secret")
+	if err != nil {
+		t.Fatalf("GetProfilesAuth: %v", err)
+	}
+	if len(profiles) != 1 {
+		t.Fatalf("expected 1 profile, got %d", len(profiles))
+	}
+	p := profiles[0]
+	if p.Codec != "H264" {
+		t.Fatalf("expected video Codec H264, got %q (audio encoding leaked into video codec)", p.Codec)
+	}
+	if p.Width != 1920 || p.Height != 1080 || p.FPS != 15 {
+		t.Fatalf("expected 1920x1080@15, got %dx%d@%v", p.Width, p.Height, p.FPS)
+	}
+}
