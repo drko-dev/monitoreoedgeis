@@ -46,7 +46,7 @@ func newHeartbeatModule(
 		return nil, nil
 	}
 
-	client, err := transport.New(cfg.SaaSURL, cfg.AllowInsecureHTTP, cfg.SaaSTimeout, Version)
+	client, err := newAgentTransport(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("heartbeat transport: %w", err)
 	}
@@ -127,8 +127,15 @@ func newHeartbeatModule(
 		Sender:     client,
 		DeviceID:   creds.DeviceID,
 		Credential: creds.Credential,
-		Build:      build,
-		Interval:   cfg.HeartbeatInterval,
+		CurrentCredential: func() string {
+			current, err := credentials.Load(cfg.DataDir)
+			if err != nil {
+				return ""
+			}
+			return current.Credential
+		},
+		Build:    build,
+		Interval: cfg.HeartbeatInterval,
 		// Zero keeps the module's own five-minute default; a non-zero value
 		// comes from GEOCAM_HEARTBEAT_AUTH_FAILURE_INTERVAL.
 		AuthFailureInterval: cfg.HeartbeatAuthFailureInterval,

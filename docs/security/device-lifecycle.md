@@ -1,4 +1,4 @@
-# Device identity lifecycle audit (Hito S5–S8)
+# Device identity lifecycle audit (Hito S5–S8; S11A current-state reconciliation)
 
 This is an audit of the existing Edge/SaaS lifecycle. It records effective
 behavior and boundaries; it does not claim push revocation, hardware-backed
@@ -20,6 +20,17 @@ identity or bearer-token theft prevention.
 - Security-sensitive status changes, enrollment claims, reenrollment grants,
   and rotations call the existing `log_audit` system without secret fields.
 
+## Current snapshot
+
+- **main:** `2c0cd4adc7cbbd1e9e622bbd5ff7d7db097ca650`; **S11A / PR #111:** MERGED.
+- **Local durable hash-chained audit:** IMPLEMENTED. **Local tamper evidence:** IMPLEMENTED.
+  **Remote immutable retention:** NOT IMPLEMENTED. **External cryptographic anchor:** NOT IMPLEMENTED.
+  **Root compromise protection:** NOT CLAIMED.
+- **S6A automatic rotation scheduler:** IMPLEMENTED in this branch. It is disabled by default and
+  requires explicit technical configuration; full regression/CI validation remains pending.
+- **Production rotation policy:** NOT DEFINED / CONFIGURATION REQUIRED. No SaaS or Mobile contract,
+  deployment, OTA, identity change, or automatic reenrollment is implied by this status.
+
 ## S6 — Rotation
 
 - Edge self-rotation authenticates with the current credential and submits only
@@ -34,8 +45,40 @@ identity or bearer-token theft prevention.
   change either stored hash.
 - Admin rotation continues to expose the new raw key only in its designed
   one-time response. Raw keys/hashes are not written to audit details.
-- **Mechanism:** IMPLEMENTED / TESTED. **Automatic rotation schedule:** NOT
-  DEFINED; no schedule is invented here.
+- **Mechanism:** IMPLEMENTED. The S6A scheduler reuses the same core as the manual CLI;
+  it does not implement a second rotation protocol. **Automatic rotation scheduler:** IMPLEMENTED,
+  DISABLED BY DEFAULT, and requires explicit validated configuration to enable. Full regression/CI
+  validation is pending. **Production rotation policy:** NOT DEFINED / CONFIGURATION REQUIRED; no
+  calendar cadence is invented here.
+
+### S6A technical configuration contract
+
+No secret is accepted in this configuration. The scheduler is off unless
+`GEOCAM_CREDENTIAL_ROTATION_ENABLED=true` and
+`GEOCAM_CREDENTIAL_ROTATION_INTERVAL` is explicitly set. The technical bounds are:
+
+| Variable | Requirement |
+|---|---|
+| `GEOCAM_CREDENTIAL_ROTATION_ENABLED` | Boolean; default `false` |
+| `GEOCAM_CREDENTIAL_ROTATION_INTERVAL` | Required when enabled; `24h` through `8760h` (365 days), using Go duration syntax |
+| `GEOCAM_CREDENTIAL_ROTATION_MINIMUM_AGE` | 24h through the configured interval; default 24h |
+| `GEOCAM_CREDENTIAL_ROTATION_JITTER_WINDOW` | 0 through 10% of the interval; if omitted while enabled, bounded default no greater than 10% (and 24h) |
+| `GEOCAM_CREDENTIAL_ROTATION_RETRY_BASE` | 1s through 1m; default 1s |
+| `GEOCAM_CREDENTIAL_ROTATION_RETRY_MAX` | At least retry base and at most 1h; default 5m |
+
+Jitter is additive: `next_due = anchor + interval + U(0, jitter_window)`. It
+never advances a due time. Retries use bounded exponential backoff plus bounded
+jitter. Scheduling state (`last_successful_rotation_at`, `next_rotation_due_at`)
+and a pending logical attempt (`pending_rotation_id` plus its locally persisted
+credential material) are atomically stored in the existing `credentials.json`;
+they are not exposed via logs, audit records, `/status`, errors, or snapshots.
+This preserves the same `rotation_id` across retry/restart and creates a new one
+only after a successful logical rotation.
+
+The `/status` credential-rotation section exposes only `enabled`,
+`last_success_at`, `next_due_at`, `last_attempt_at`, `consecutive_failures`, and
+state (`disabled`, `waiting`, `rotating`, `backoff`, `unauthorized`, or
+`degraded`).
 
 ## S7 — Secure enrollment
 

@@ -9,7 +9,6 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/remoteconfig"
-	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
 
 // newRemoteConfigModule wires internal/remoteconfig's poll+apply engine
@@ -19,7 +18,7 @@ func newRemoteConfigModule(cfg *config.Config, creds credentials.Credentials, re
 	if cfg.SaaSURL == "" || !creds.IsEnrolled() || creds.DeviceID == "" || creds.Credential == "" || cfg.DataDir == "" {
 		return nil, nil
 	}
-	client, err := transport.New(cfg.SaaSURL, cfg.AllowInsecureHTTP, cfg.SaaSTimeout, Version)
+	client, err := newAgentTransport(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("remote config transport: %w", err)
 	}

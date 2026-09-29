@@ -37,7 +37,14 @@ type Credentials struct {
 	TenantID          string
 	SiteID            string
 	EnrolledAt        time.Time
-	Status            Status
+	// LastSuccessfulRotationAt is the durable scheduling anchor. Zero means
+	// older credentials predate rotation scheduling and use EnrolledAt.
+	LastSuccessfulRotationAt time.Time
+	NextRotationDueAt        time.Time
+	// Pending rotation fields keep one logical attempt stable across restarts.
+	PendingRotationID         string
+	PendingRotationCredential string
+	Status                    Status
 }
 
 // IsEnrolled reports whether a credential is stored locally.

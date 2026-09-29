@@ -65,9 +65,10 @@ type Snapshot struct {
 	// the module is not running (unenrolled Edge, or no SaaS URL set). It
 	// carries timings, counters and an error class only — never the
 	// credential, never an Authorization header, never a hash.
-	Heartbeat *heartbeat.Status         `json:"heartbeat,omitempty"`
-	Discovery *discovery.ModuleStatus   `json:"discovery,omitempty"`
-	Cameras   []rtsp.CameraStreamStatus `json:"cameras,omitempty"`
+	Heartbeat          *heartbeat.Status         `json:"heartbeat,omitempty"`
+	CredentialRotation *CredentialRotationStatus `json:"credential_rotation,omitempty"`
+	Discovery          *discovery.ModuleStatus   `json:"discovery,omitempty"`
+	Cameras            []rtsp.CameraStreamStatus `json:"cameras,omitempty"`
 	// VideoPipeline is the Hito H video pipeline's small per-camera summary
 	// (camera_count + one PipelineStatus per camera). Omitted when the
 	// video pipeline is disabled. Never carries frame bytes.
@@ -106,6 +107,16 @@ type Snapshot struct {
 	// Omitted (false) in the normal, secure case so the field only ever
 	// shows up on /status when this dev-only escape hatch is actually live.
 	InsecureHTTPAllowed bool `json:"insecure_http_allowed,omitempty"`
+}
+
+// CredentialRotationStatus contains safe timing and state only.
+type CredentialRotationStatus struct {
+	Enabled             bool      `json:"enabled"`
+	LastSuccessAt       time.Time `json:"last_success_at,omitzero"`
+	NextDueAt           time.Time `json:"next_due_at,omitzero"`
+	LastAttemptAt       time.Time `json:"last_attempt_at,omitzero"`
+	ConsecutiveFailures int       `json:"consecutive_failures"`
+	State               string    `json:"state"`
 }
 
 // CameraTargetsStatus describes the last discovery/credential reconciliation
@@ -192,26 +203,27 @@ type QueueComponentStatus struct {
 // lifecycle state. It is the single safe accessor for runtime state — it is
 // safe for concurrent use and nothing about it is a package-level global.
 type Reporter struct {
-	mu                sync.RWMutex
-	state             State
-	startedAt         time.Time
-	modules           map[string]string
-	credentialStatus  string
-	heartbeat         *heartbeat.Status
-	discovery         *discovery.ModuleStatus
-	cameras           []rtsp.CameraStreamStatus
-	videoPipeline     *processing.VideoPipelineSummary
-	cameraTargets     *CameraTargetsStatus
-	cameraCredentials *CameraCredentialsStatus
-	cloud             *cloudsink.Status
-	vision            *vision.Status
-	fullEdge          *fulledge.Status
-	localEventBacklog *edgebacklog.Status
-	remoteConfig      *remoteconfig.Status
-	resources         *ResourcesStatus
-	queues            *QueuesStatus
-	cpuSampler        *platform.CPUSampler
-	sample            *platform.Sample
+	mu                 sync.RWMutex
+	state              State
+	startedAt          time.Time
+	modules            map[string]string
+	credentialStatus   string
+	heartbeat          *heartbeat.Status
+	credentialRotation *CredentialRotationStatus
+	discovery          *discovery.ModuleStatus
+	cameras            []rtsp.CameraStreamStatus
+	videoPipeline      *processing.VideoPipelineSummary
+	cameraTargets      *CameraTargetsStatus
+	cameraCredentials  *CameraCredentialsStatus
+	cloud              *cloudsink.Status
+	vision             *vision.Status
+	fullEdge           *fulledge.Status
+	localEventBacklog  *edgebacklog.Status
+	remoteConfig       *remoteconfig.Status
+	resources          *ResourcesStatus
+	queues             *QueuesStatus
+	cpuSampler         *platform.CPUSampler
+	sample             *platform.Sample
 
 	processingMode string
 	version        string
@@ -269,6 +281,13 @@ func (r *Reporter) SetHeartbeatStatus(s heartbeat.Status) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.heartbeat = &s
+}
+
+func (r *Reporter) SetCredentialRotationStatus(s CredentialRotationStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	copied := s
+	r.credentialRotation = &copied
 }
 
 // SetDiscoveryStatus records the current status of the discovery module.
@@ -348,6 +367,11 @@ func (r *Reporter) Snapshot() Snapshot {
 	if r.heartbeat != nil {
 		copied := *r.heartbeat
 		hb = &copied
+	}
+	var rotation *CredentialRotationStatus
+	if r.credentialRotation != nil {
+		copied := *r.credentialRotation
+		rotation = &copied
 	}
 	var disc *discovery.ModuleStatus
 	if r.discovery != nil {
@@ -473,6 +497,7 @@ func (r *Reporter) Snapshot() Snapshot {
 		Uptime:              uptime.Round(time.Second).String(),
 		Modules:             modules,
 		Heartbeat:           hb,
+		CredentialRotation:  rotation,
 		Discovery:           disc,
 		Cameras:             cams,
 		VideoPipeline:       vp,

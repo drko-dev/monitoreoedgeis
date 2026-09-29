@@ -8,7 +8,6 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
-	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
 
 // newDiscoveryModule constructs the discovery agent module according to configuration.
@@ -45,7 +44,7 @@ func newDiscoveryModule(
 
 	var client discovery.TransportClient
 	if cfg.SaaSURL != "" && creds.IsEnrolled() && creds.Credential != "" && creds.DeviceID != "" {
-		c, err := transport.New(cfg.SaaSURL, cfg.AllowInsecureHTTP, cfg.SaaSTimeout, Version)
+		c, err := newAgentTransport(cfg)
 		if err != nil {
 			return nil, fmt.Errorf("discovery transport: %w", err)
 		}

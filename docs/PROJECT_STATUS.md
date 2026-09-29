@@ -3,26 +3,24 @@
 > Answers one question: **"¿Dónde estamos parados ahora?"**
 > Git + the final Hito Z integration are the source of truth. Historical sections below are retained as implementation history and may describe the state that existed at those earlier hitos.
 
-## Current: Hito S11A — Durable Local Security Audit Journal + Integrity Chain
+## Current security snapshot — S11A merged; S6A automatic rotation candidate
+
+> **Current state source:** `main @ 2c0cd4adc7cbbd1e9e622bbd5ff7d7db097ca650`. Historical sections below retain the state recorded at their respective milestones and do not override this snapshot.
 
 | Field | Value |
 | --- | --- |
-| **PR #110 merged** | YES — `docs(edge): record physical validation evidence and release readiness`, merge commit `25812ac761b64cee02c1794879f03090170d8fba` |
-| **BASE** | `origin/main @ 25812ac761b64cee02c1794879f03090170d8fba` |
-| **BRANCH** | `feature/edge-s11a-audit-integrity` |
-| **NEW PACKAGE** | `internal/auditjournal` — durable, local, hash-chained, append-only security audit journal |
+| **S11A / PR #111** | MERGED into `main` at `2c0cd4adc7cbbd1e9e622bbd5ff7d7db097ca650` |
 | **LOCAL DURABLE HASH-CHAINED AUDIT** | IMPLEMENTED |
-| **LOCAL TAMPER EVIDENCE** | IMPLEMENTED — `geocam-edge audit verify` detects modified/deleted/reordered records, bad hashes, bad sequences |
-| **REMOTE IMMUTABLE RETENTION / EXTERNAL CRYPTOGRAPHIC ANCHOR** | NOT IMPLEMENTED — explicitly out of scope for S11A |
-| **EVENTS WIRED** | Enrollment success/failure, credential rotation success/failure, factory reset requested/completed/failed |
-| **EVENTS NOT YET WIRED** | Control command received/executed/failed, remote config apply/rollback/failure, auth-rejected/device-revoked (types defined, no call site emits them yet) |
-| **CLI** | `geocam-edge audit verify` / `geocam-edge audit status` (read-only; no edit/delete/reset) |
-| **TESTED** | YES — `go test/vet/gofmt -race`: 38/38 packages green; `internal/auditjournal` alone: 21 tests covering genesis, append, restart recovery, deterministic serialization, concurrent writers, corruption detection (modified/deleted/reordered/bad-hash/bad-sequence/malformed-JSON), truncated-tail-vs-corrupt distinction, permissions, write/fsync failure seams, secret redaction |
-| **BUILD** | linux/amd64, linux/arm64 — both green |
-| **MERGED** | NOT YET — PR pending |
-| **DEPLOYED** | NO |
+| **LOCAL TAMPER EVIDENCE** | IMPLEMENTED — `geocam-edge audit verify` detects chain corruption |
+| **REMOTE IMMUTABLE RETENTION** | NOT IMPLEMENTED |
+| **EXTERNAL CRYPTOGRAPHIC ANCHOR** | NOT IMPLEMENTED |
+| **ROOT COMPROMISE PROTECTION** | NOT CLAIMED |
+| **S6 ROTATION MECHANISM** | IMPLEMENTED — existing manual self-rotation preserves the established protocol |
+| **S6A AUTO ROTATION SCHEDULER** | IMPLEMENTED in this branch; disabled by default, and requires an explicit valid interval when enabled. Full regression/CI validation remains pending. |
+| **PRODUCTION ROTATION POLICY** | NOT DEFINED / CONFIGURATION REQUIRED — technical configuration is not product policy |
+| **SaaS / Mobile / deploy / OTA** | No contract change, deployment, or OTA; device identity and reenrollment behavior are unchanged |
 
-See `docs/security/audit.md` (S11A section) and `docs/security/threat-model.md` for the full honest scope/limitations statement.
+See `docs/security/audit.md` and `docs/security/device-lifecycle.md` for the contract and its explicit limitations.
 
 ## Current FIELD-1 physical validation snapshot
 

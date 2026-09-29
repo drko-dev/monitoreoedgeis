@@ -7,7 +7,6 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/ota"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
-	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
 
 // newOTAModule builds the Hito T OTA module, or returns (nil, nil) when
@@ -29,7 +28,7 @@ func newOTAModule(cfg *config.Config, creds credentials.Credentials, log *slog.L
 		return nil
 	}
 
-	client, err := transport.New(cfg.SaaSURL, cfg.AllowInsecureHTTP, cfg.SaaSTimeout, Version)
+	client, err := newAgentTransport(cfg)
 	if err != nil {
 		log.Warn("ota disabled: could not build SaaS transport", slog.Any("error", err))
 		return nil

@@ -17,14 +17,18 @@ const fileName = "credentials.json"
 
 // fileRecord is the on-disk schema of credentials.json.
 type fileRecord struct {
-	SchemaVersion     int    `json:"schema_version"`
-	EdgeID            string `json:"edge_id"`
-	DeviceID          string `json:"device_id"`
-	Credential        string `json:"credential"`
-	CredentialVersion int    `json:"credential_version"`
-	TenantID          string `json:"tenant_id"`
-	SiteID            string `json:"site_id"`
-	EnrolledAt        string `json:"enrolled_at"`
+	SchemaVersion             int    `json:"schema_version"`
+	EdgeID                    string `json:"edge_id"`
+	DeviceID                  string `json:"device_id"`
+	Credential                string `json:"credential"`
+	CredentialVersion         int    `json:"credential_version"`
+	TenantID                  string `json:"tenant_id"`
+	SiteID                    string `json:"site_id"`
+	EnrolledAt                string `json:"enrolled_at"`
+	LastSuccessfulRotationAt  string `json:"last_successful_rotation_at,omitempty"`
+	NextRotationDueAt         string `json:"next_rotation_due_at,omitempty"`
+	PendingRotationID         string `json:"pending_rotation_id,omitempty"`
+	PendingRotationCredential string `json:"pending_rotation_credential,omitempty"`
 }
 
 // ErrCorrupt wraps any credentials.json content the agent refuses to trust.
@@ -71,16 +75,37 @@ func Load(dataDir string) (Credentials, error) {
 	if timeErr != nil {
 		return Credentials{}, fmt.Errorf("%w: %s: invalid enrolled_at %q: %v", ErrCorrupt, path, rec.EnrolledAt, timeErr)
 	}
+	var rotatedAt time.Time
+	if rec.LastSuccessfulRotationAt != "" {
+		rotatedAt, timeErr = time.Parse(time.RFC3339Nano, rec.LastSuccessfulRotationAt)
+		if timeErr != nil {
+			return Credentials{}, fmt.Errorf("%w: invalid last_successful_rotation_at", ErrCorrupt)
+		}
+	}
+	var nextDueAt time.Time
+	if rec.NextRotationDueAt != "" {
+		nextDueAt, timeErr = time.Parse(time.RFC3339Nano, rec.NextRotationDueAt)
+		if timeErr != nil {
+			return Credentials{}, fmt.Errorf("%w: invalid next_rotation_due_at", ErrCorrupt)
+		}
+	}
+	if (rec.PendingRotationID == "") != (rec.PendingRotationCredential == "") {
+		return Credentials{}, fmt.Errorf("%w: incomplete pending rotation", ErrCorrupt)
+	}
 
 	return Credentials{
-		EdgeID:            rec.EdgeID,
-		DeviceID:          rec.DeviceID,
-		Credential:        rec.Credential,
-		CredentialVersion: rec.CredentialVersion,
-		TenantID:          rec.TenantID,
-		SiteID:            rec.SiteID,
-		EnrolledAt:        enrolledAt,
-		Status:            StatusEnrolled,
+		EdgeID:                    rec.EdgeID,
+		DeviceID:                  rec.DeviceID,
+		Credential:                rec.Credential,
+		CredentialVersion:         rec.CredentialVersion,
+		TenantID:                  rec.TenantID,
+		SiteID:                    rec.SiteID,
+		EnrolledAt:                enrolledAt,
+		LastSuccessfulRotationAt:  rotatedAt,
+		NextRotationDueAt:         nextDueAt,
+		PendingRotationID:         rec.PendingRotationID,
+		PendingRotationCredential: rec.PendingRotationCredential,
+		Status:                    StatusEnrolled,
 	}, nil
 }
 
@@ -95,14 +120,22 @@ func Save(dataDir string, creds Credentials) error {
 	}
 
 	rec := fileRecord{
-		SchemaVersion:     schemaVersion,
-		EdgeID:            creds.EdgeID,
-		DeviceID:          creds.DeviceID,
-		Credential:        creds.Credential,
-		CredentialVersion: creds.CredentialVersion,
-		TenantID:          creds.TenantID,
-		SiteID:            creds.SiteID,
-		EnrolledAt:        creds.EnrolledAt.Format(time.RFC3339),
+		SchemaVersion:             schemaVersion,
+		EdgeID:                    creds.EdgeID,
+		DeviceID:                  creds.DeviceID,
+		Credential:                creds.Credential,
+		CredentialVersion:         creds.CredentialVersion,
+		TenantID:                  creds.TenantID,
+		SiteID:                    creds.SiteID,
+		EnrolledAt:                creds.EnrolledAt.Format(time.RFC3339),
+		PendingRotationID:         creds.PendingRotationID,
+		PendingRotationCredential: creds.PendingRotationCredential,
+	}
+	if !creds.LastSuccessfulRotationAt.IsZero() {
+		rec.LastSuccessfulRotationAt = creds.LastSuccessfulRotationAt.UTC().Format(time.RFC3339Nano)
+	}
+	if !creds.NextRotationDueAt.IsZero() {
+		rec.NextRotationDueAt = creds.NextRotationDueAt.UTC().Format(time.RFC3339Nano)
 	}
 
 	data, err := json.MarshalIndent(rec, "", "  ")

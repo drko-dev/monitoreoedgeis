@@ -61,7 +61,9 @@ credential passed to the control module.
 
 ## Operational logging vs. durable audit — the real distinction
 
-**What exists today is operational logging**: `slog` output flows to
+> **Historical S11 snapshot:** this section describes the limits of `slog` alone. It does not supersede S11A: on current `main @ 2c0cd4adc7cbbd1e9e622bbd5ff7d7db097ca650` (PR #111 merged), local durable hash-chained audit and local tamper evidence are implemented.
+
+**`slog` operational logging by itself is not a durable audit trail**: `slog` output flows to
 stdout/stderr, which systemd/journald captures. This is useful for
 debugging, alerting, and forensic review of *what the process did*, but
 it has none of the properties a durable security audit trail needs:
@@ -79,10 +81,7 @@ it has none of the properties a durable security audit trail needs:
   line in the process; there is no separate, higher-integrity channel or
   format that marks them as security-relevant to a downstream collector.
 
-None of that is being built in this hito. A `DURABLE / TAMPER-EVIDENT
-AUDIT` implementation (append-only storage, integrity hashing/chaining,
-retention independent of the local host, and a channel a compromised host
-cannot silently disable) is real, future work — not claimed as done here.
+S11A implements the local append-only hash-chain and integrity-detection portion described above. Remote retention independent of the host and a channel a fully compromised host cannot silently rewrite remain future work; they are not claimed as done here.
 
 ### The control-plane command ledger is not an audit log either
 
@@ -223,6 +222,16 @@ means exactly that.
 
 A failure to open or write to the audit journal never blocks main runtime
 operations; failures are logged via `slog` and surfaced by `audit status`.
+
+### S6A automatic rotation audit integration
+
+S6A calls the same credential-rotation core as `geocam-edge credential rotate`; it
+does not create a second rotation protocol or a second audit event shape. Each
+logical attempt records the existing `CREDENTIAL_ROTATION_SUCCESS` or
+`CREDENTIAL_ROTATION_FAILURE` event with safe identifiers only. The automatic
+origin is not added as an arbitrary payload map. Credentials, credential hashes,
+rotation tokens, enrollment tokens, and `Authorization` values are never written
+to `slog`, this journal, status, or propagated error text.
 
 ### Factory reset
 

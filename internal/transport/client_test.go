@@ -184,6 +184,27 @@ func TestMeSendsDeviceIDAndBearer(t *testing.T) {
 	}
 }
 
+func TestCurrentCredentialSourceReplacesStartupCredential(t *testing.T) {
+	var credential string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer new-credential" {
+			t.Errorf("Authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"device_id":"device-1"}`))
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL, true, time.Second, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential = "new-credential"
+	c.SetCurrentCredentialSource(func() string { return credential })
+	if _, err := c.Me(context.Background(), "device-1", "startup-credential"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMeSuccess(t *testing.T) {
 	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

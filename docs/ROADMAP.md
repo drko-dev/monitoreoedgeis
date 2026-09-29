@@ -20,7 +20,7 @@
 | P     | CODE DONE / INTEGRATED TESTED / MERGED |
 | Q1–Q10| CODE DONE / INTEGRATED TESTED / MERGED / SAAS PROD DEPLOYED (Edge prod: N/A) |
 | R1–R9 | CODE/ARCHITECTURE DONE / INTEGRATED TESTED / MERGED (Edge prod: N/A / no real target) |
-| S1–S11| CODE / SECURITY BASELINE DONE / INTEGRATED TESTED / MERGED / SAAS PROD DEPLOYED (Edge prod: N/A; gaps: at-rest device credential encryption, artifact signature, automatic rotation, tamper-evident audit) |
+| S1–S11| CODE / SECURITY BASELINE DONE / INTEGRATED TESTED / MERGED / SAAS PROD DEPLOYED (Edge prod: N/A; gaps: at-rest device credential encryption, artifact signature, production rotation policy; local tamper-evident audit and the disabled-by-default S6A scheduler are implemented) |
 | I–Z   | PLANNED               |
 
 Hito A partially advanced some primitives that belong to B (process lifecycle,
@@ -539,8 +539,9 @@ existe target Edge/appliance/VM productivo real documentado distinto
 del VPS SaaS; no se desplegó nada. Gaps reales preservados (no
 resueltos por este cierre): device credential at-rest encryption, sin
 firma de artifacts (checksum únicamente), sin política de rotación
-automática, sin audit trail tamper-evident, sin key management
-hardware-backed. Ver `docs/security/threat-model.md`,
+productiva y sin key management hardware-backed. **Historical note:** this
+pre-S11A snapshot predates the now-implemented local durable hash-chained audit
+journal. Ver `docs/security/threat-model.md`,
 `docs/security/edge-security-baseline.md`,
 `docs/security/device-lifecycle.md`, `docs/security/update-trust.md`,
 `docs/security/least-privilege.md`, `docs/security/audit.md`.
@@ -568,7 +569,7 @@ hardware-backed. Ver `docs/security/threat-model.md`,
 - S3 TLS. **IMPLEMENTED** — all Edge→SaaS clients reuse `internal/transport.Client`; HTTPS is required by default, insecure HTTP requires explicit development configuration, and normal hostname/certificate verification remains active. ONVIF/RTSP is a separate CCTV-LAN boundary.
 - S4 Local data protection. **PARTIAL** — camera credentials are AES-256-GCM encrypted and local state uses restrictive permissions/atomic writes. Device credential at-rest encryption is **NOT ESTABLISHED / REQUIRES KEY-MANAGEMENT DECISION** because no TPM/HSM/KMS/Vault/OS-keychain trust root exists. Full classification: `docs/security/edge-security-baseline.md`.
 - **S5 Revocation:** Edge uses the shared authenticated transport path for heartbeat, control, events, frames, remote config and camera-credential sync. A revoked/suspended device is rejected on the next request; no push revocation is claimed. Re-enrollment is explicit and token-bound.
-- **S6 Rotation:** Edge self-rotation generates the new credential locally, submits only its hash, saves credentials atomically, and uses the existing `rotation_id` plus bounded grace window. Reuse of a `rotation_id` with another hash is rejected. **Automatic rotation schedule: NOT DEFINED.**
+- **S6 Rotation / S6A automatic scheduler:** Edge self-rotation generates the new credential locally, submits only its hash, saves credentials atomically, and uses the existing `rotation_id` plus bounded grace window. Reuse of a `rotation_id` with another hash is rejected. **S6A is IMPLEMENTED in this branch through the same rotation core as the CLI; it is DISABLED BY DEFAULT and enabling it requires an explicit validated interval. Production rotation policy remains NOT DEFINED / CONFIGURATION REQUIRED.** The scheduler adds no SaaS/Mobile contract, deployment, OTA, identity change, or automatic reenrollment.
 - **S7 Secure enrollment:** device credential is generated locally; SaaS receives only the hash. Enrollment is bounded, strict, one-time/concurrency-safe and does not expose the raw token in logs or argv. Bootstrap uses the existing flow; no new QR/protocol added.
 - **S8 Replay protection:** enrollment claim, credential rotation, control commands, event UUID/idempotency and remote-config version handling use their existing stateful mechanisms. These prevent duplicate state-changing effects where covered; they are not bearer-secret anti-theft protection. Detailed lifecycle audit: `docs/security/device-lifecycle.md`.
 - S9. Signed updates. **SECURITY REQUIREMENT DEFINED / CURRENT
@@ -605,17 +606,15 @@ hardware-backed. Ver `docs/security/threat-model.md`,
   confirmado allowlisted (`internal/control`, switch fijo de 4 tipos, sin
   `os/exec`, sin shell). Detalle completo en
   `docs/security/least-privilege.md`.
-- S11. Security audit. **EDGE SECURITY EVENT LOGGING: PARTIAL /
-  DURABLE-TAMPER-EVIDENT AUDIT: NOT IMPLEMENTED** — se reutilizó `slog`
-  existente (Hito N/D), sin stack de logging nuevo. Agregado logging
-  estructurado para enrollment success/failure, credential rotation,
-  factory reset y control command execution (antes sin `slog`, sólo
-  texto CLI); config apply/rollback y revocation/auth-failure ya estaban
-  logueados desde Hito N/D. Nunca se loguea token/credential/password de
-  cámara/`Authorization`. El ledger de comandos de control
-  (`internal/control.Ledger`) es idempotencia/retry-safety, explícitamente
-  NO un audit log (sin tamper-evidence, sin retención garantizada). SaaS
-  ya posee `log_audit` propio, no duplicado desde aquí. Detalle en
+- S11. Security audit. **Historical S11 snapshot:** operational `slog`
+  coverage was partial and was not a durable/tamper-evident audit trail.
+  **Current state after S11A / PR #111 merged in `main @
+  2c0cd4adc7cbbd1e9e622bbd5ff7d7db097ca650`: LOCAL DURABLE HASH-CHAINED
+  AUDIT = IMPLEMENTED; LOCAL TAMPER EVIDENCE = IMPLEMENTED.** Remote immutable
+  retention and an external cryptographic anchor remain NOT IMPLEMENTED; root
+  compromise protection is NOT CLAIMED. `slog` continues to avoid
+  token/credential/camera-password/`Authorization` disclosure. The control
+  ledger remains idempotency/retry-safety, not an audit log. Detail in
   `docs/security/audit.md`.
 
 ## T — OTA

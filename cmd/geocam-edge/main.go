@@ -22,6 +22,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/agent"
 	"github.com/drko-dev/monitoreoedgeis/internal/auditjournal"
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
+	"github.com/drko-dev/monitoreoedgeis/internal/credentialrotation"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
 	"github.com/drko-dev/monitoreoedgeis/internal/factoryreset"
@@ -904,127 +905,41 @@ func runCredentialRotateCmd(args []string) {
 		os.Exit(1)
 	}
 
-	// New credential B is generated locally, same as enroll — the SaaS only
-	// ever sees its hash. Generated once, before any network call, and
-	// reused verbatim across every retry: a retry must submit the exact
-	// same device_key_hash the first attempt did.
-	newCred, err := credentials.GenerateCredential()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "geocam-edge credential rotate: %v\n", err)
-		os.Exit(1)
+	delays := []time.Duration{cfg.AutoRotationRetryBase, min(2*cfg.AutoRotationRetryBase, cfg.AutoRotationRetryMax)}
+	rotationInterval := time.Duration(0)
+	if cfg.AutoRotationEnabled {
+		rotationInterval = max(cfg.AutoRotationInterval, cfg.AutoRotationMinimumAge)
 	}
-	rotationID, err := identity.NewUUIDv4()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "geocam-edge credential rotate: %v\n", err)
-		os.Exit(1)
-	}
-
-	// No single per-attempt deadline here: rotateWithRetry spans up to
-	// rotateMaxAttempts requests with backoff sleeps between them, each
-	// individual request already bounded by the http.Client's own
-	// cfg.SaaSTimeout.
-	ctx := context.Background()
-
-	resp, err := rotateWithRetry(ctx, client, creds.DeviceID, creds.Credential,
-		transport.RotateKeyRequest{DeviceKeyHash: credentials.HashCredential(newCred), RotationID: rotationID},
-		rotateBackoffs)
-	if err != nil {
-		// A queda intacta en disco: nunca se llamó a Save.
-		// S11 security event log: edge_id/rotation_id are non-secret
-		// identifiers; neither credential (old or new) is ever logged.
-		slog.Default().Error("credential rotation failed", "edge_id", creds.EdgeID, "rotation_id", rotationID, "error", saasErrorMessage(err))
-		auditAppend(auditJournal, auditjournal.Record{
-			EventType: auditjournal.EventCredentialRotationFailure, Result: auditjournal.ResultFailure,
-			EdgeID: creds.EdgeID, RotationID: rotationID, SafeReason: saasErrorMessage(err),
-		})
-		if errors.Is(err, transport.ErrUnauthorized) {
-			fmt.Fprintln(os.Stderr, "geocam-edge credential rotate: credential rejected by SaaS (revoked) — re-enrollment required")
-		} else {
-			fmt.Fprintf(os.Stderr, "geocam-edge credential rotate: %s\n", saasErrorMessage(err))
-		}
-		os.Exit(1)
-	}
-
-	newVersion := creds.CredentialVersion + 1
-
-	// ponytail: if Save fails here, the SaaS has already ACKed the rotation
-	// server-side but persisting B locally failed. The OLD credential A on
-	// disk is safe (Save only replaces it via atomic rename after a fully
-	// successful write), so the device is not bricked, but A no longer
-	// authenticates against the SaaS — rotation must be retried. Upgrade
-	// path: a local write-ahead log of pending rotations, if this proves to
-	// matter in practice.
-	if err := credentials.Save(cfg.DataDir, credentials.Credentials{
-		EdgeID:            creds.EdgeID,
-		DeviceID:          creds.DeviceID,
-		Credential:        newCred,
-		CredentialVersion: newVersion,
-		TenantID:          creds.TenantID,
-		SiteID:            creds.SiteID,
-		EnrolledAt:        creds.EnrolledAt,
-	}); err != nil {
-		auditAppend(auditJournal, auditjournal.Record{
-			EventType: auditjournal.EventCredentialRotationFailure, Result: auditjournal.ResultFailure,
-			EdgeID: creds.EdgeID, RotationID: rotationID,
-			SafeReason: "SaaS acknowledged the rotation but local credential persistence failed",
-		})
-		fmt.Fprintf(os.Stderr,
-			"geocam-edge credential rotate: SaaS acknowledged the rotation but persisting the new credential locally failed: %v\n"+
-				"retry `geocam-edge credential rotate`\n", err)
-		os.Exit(1)
-	}
-
-	if _, err := client.Me(ctx, resp.DeviceID, newCred); err != nil {
-		slog.Default().Error("credential rotated and persisted but post-rotation verification failed", "edge_id", creds.EdgeID, "rotation_id", rotationID, "error", err)
-		auditAppend(auditJournal, auditjournal.Record{
-			EventType: auditjournal.EventCredentialRotationFailure, Result: auditjournal.ResultFailure,
-			EdgeID: creds.EdgeID, RotationID: rotationID,
-			SafeReason: "rotated and persisted, but post-rotation verification failed",
-		})
-		fmt.Fprintf(os.Stderr, "geocam-edge credential rotate: rotated and persisted, but verification against %s failed: %v\n",
-			transport.MePath, err)
-		os.Exit(1)
-	}
-
-	slog.Default().Info("credential rotation succeeded", "edge_id", creds.EdgeID, "rotation_id", rotationID, "new_credential_version", newVersion)
-	auditAppend(auditJournal, auditjournal.Record{
-		EventType: auditjournal.EventCredentialRotationSuccess, Result: auditjournal.ResultSuccess,
-		EdgeID: creds.EdgeID, RotationID: rotationID,
+	service, err := credentialrotation.New(credentialrotation.Options{
+		DataDir: cfg.DataDir, EdgeID: creds.EdgeID, Client: client,
+		Store: credentialrotation.DiskStore{}, Audit: auditJournal,
+		Interval: rotationInterval, JitterWindow: cfg.AutoRotationJitterWindow,
+		RetryDelays: delays,
 	})
-	fmt.Print(rotateSummary(creds.EdgeID, newVersion))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "geocam-edge credential rotate: %v\n", err)
+		os.Exit(1)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(rotateMaxAttempts)*cfg.SaaSTimeout+cfg.AutoRotationRetryMax*2)
+	defer cancel()
+	if err := service.Rotate(ctx); err != nil {
+		slog.Default().Error("credential rotation failed", "edge_id", creds.EdgeID, "error", err.Error())
+		fmt.Fprintf(os.Stderr, "geocam-edge credential rotate: %s\n", err)
+		os.Exit(1)
+	}
+	updated, err := credentials.Load(cfg.DataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "geocam-edge credential rotate: rotation succeeded but local state could not be reloaded")
+		os.Exit(1)
+	}
+	slog.Default().Info("credential rotation succeeded", "edge_id", creds.EdgeID, "credential_version", updated.CredentialVersion)
+	fmt.Print(rotateSummary(creds.EdgeID, updated.CredentialVersion))
 }
 
 // rotateMaxAttempts bounds credential-rotation retries: the same rotation_id
 // and device_key_hash are resubmitted on every attempt, which is what makes
 // this safe to retry (the SaaS treats rotation_id as an idempotency key).
 const rotateMaxAttempts = 3
-
-// rotateBackoffs holds the sleep between attempt N and N+1 — len must be
-// rotateMaxAttempts-1.
-var rotateBackoffs = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
-
-// rotateWithRetry calls client.RotateKey up to rotateMaxAttempts times with
-// the identical req on every attempt. It stops immediately (no further
-// retry) on ErrUnauthorized: a revoked current credential will not start
-// working on a later attempt, and A must stay untouched on disk in that
-// case.
-func rotateWithRetry(ctx context.Context, client *transport.Client, deviceID, currentCredential string, req transport.RotateKeyRequest, backoffs []time.Duration) (transport.RotateResponse, error) {
-	var lastErr error
-	for attempt := 0; attempt < rotateMaxAttempts; attempt++ {
-		resp, err := client.RotateKey(ctx, deviceID, currentCredential, req)
-		if err == nil {
-			return resp, nil
-		}
-		lastErr = err
-		if errors.Is(err, transport.ErrUnauthorized) {
-			return transport.RotateResponse{}, err
-		}
-		if attempt < len(backoffs) {
-			time.Sleep(backoffs[attempt])
-		}
-	}
-	return transport.RotateResponse{}, lastErr
-}
 
 func rotateSummary(edgeID string, version int) string {
 	return fmt.Sprintf(
