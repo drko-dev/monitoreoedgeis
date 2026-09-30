@@ -23,6 +23,10 @@ const (
 	// StreamURI, or none matches the desired role and more than one
 	// candidate remains without an unambiguous fallback.
 	SkipNoUsableProfile TargetSkipReason = "no_usable_profile"
+	// SkipChannelDisabled means a recorder explicitly reports the channel as
+	// disabled. Unknown availability remains eligible because ONVIF does not
+	// define a universal enabled-state signal.
+	SkipChannelDisabled TargetSkipReason = "channel_disabled"
 	// SkipInvalidStreamURI means the selected profile's StreamURI failed
 	// rtsp.ParseTarget (unsupported scheme, missing host, ...).
 	SkipInvalidStreamURI TargetSkipReason = "invalid_stream_uri"
@@ -119,6 +123,10 @@ func buildCameraTargets(
 					continue
 				}
 				candidateKey = discovery.ChannelCandidateKey(deviceKey, vs.SourceToken)
+			}
+			if vs.Availability == discovery.ChannelAvailabilityDisabled {
+				skips = append(skips, TargetSkip{CandidateKey: candidateKey, Reason: SkipChannelDisabled})
+				continue
 			}
 
 			profile, ok := selectProfile(vs.Profiles, desiredRole)

@@ -192,6 +192,27 @@ func TestBuildCameraTargets_MultichannelOneChannelFailureDoesNotCollapseOthers(t
 	}
 }
 
+func TestBuildCameraTargets_DisabledChannelSkipped(t *testing.T) {
+	dev := discovery.DiscoveredDevice{
+		StableIdentity: "epr:nvr-disabled",
+		VideoSources: []discovery.VideoSource{
+			{SourceToken: "ch1", Availability: discovery.ChannelAvailabilityEnabled, Profiles: []discovery.MediaProfile{{Token: "p1", StreamURI: "rtsp://10.0.0.5:554/1"}}},
+			{SourceToken: "ch4", Availability: discovery.ChannelAvailabilityDisabled, Profiles: []discovery.MediaProfile{{Token: "p4", StreamURI: "rtsp://10.0.0.5:554/4"}}},
+		},
+	}
+
+	targets, skips := buildCameraTargets([]discovery.DiscoveredDevice{dev}, nil, "sub")
+	if len(targets) != 1 || targets[0].CandidateKey != discovery.ChannelCandidateKey("epr:nvr-disabled", "ch1") {
+		t.Fatalf("expected only enabled channel target, got %+v", targets)
+	}
+	if len(skips) != 1 || skips[0] != (TargetSkip{
+		CandidateKey: discovery.ChannelCandidateKey("epr:nvr-disabled", "ch4"),
+		Reason:       SkipChannelDisabled,
+	}) {
+		t.Fatalf("expected disabled channel skip, got %+v", skips)
+	}
+}
+
 func TestBuildCameraTargets_ZeroVideoSourcesSkipped(t *testing.T) {
 	zero := discovery.DiscoveredDevice{StableIdentity: "epr:zero-1"}
 	_, skips := buildCameraTargets([]discovery.DiscoveredDevice{zero}, nil, "sub")

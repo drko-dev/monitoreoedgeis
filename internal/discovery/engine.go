@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -330,8 +331,9 @@ func (e *Engine) enrichSingleDevice(ctx context.Context, dev DiscoveredDevice) D
 		var mappedSources []VideoSource
 		for _, s := range sources {
 			mappedSources = append(mappedSources, VideoSource{
-				SourceToken: s.SourceToken,
-				Label:       s.Label,
+				SourceToken:  s.SourceToken,
+				Label:        s.Label,
+				Availability: ChannelAvailabilityUnknown,
 			})
 		}
 		dev.VideoSources = mappedSources
@@ -353,28 +355,19 @@ func (e *Engine) enrichSingleDevice(ctx context.Context, dev DiscoveredDevice) D
 			uri, _ := e.onvifClient.GetStreamUri(ctx, mediaXAddr, p.Token)
 
 			mappedProfiles = append(mappedProfiles, MediaProfile{
-				Token:     p.Token,
-				Name:      p.Name,
-				Codec:     p.Codec,
-				Width:     p.Width,
-				Height:    p.Height,
-				FPS:       p.FPS,
-				StreamURI: uri,
-				Role:      role,
+				Token:            p.Token,
+				Name:             p.Name,
+				Codec:            p.Codec,
+				Width:            p.Width,
+				Height:           p.Height,
+				FPS:              p.FPS,
+				StreamURI:        uri,
+				Role:             role,
+				VideoSourceToken: p.VideoSourceToken,
 			})
 		}
 
-		if len(dev.VideoSources) > 0 {
-			dev.VideoSources[0].Profiles = mappedProfiles
-		} else {
-			dev.VideoSources = []VideoSource{
-				{
-					SourceToken: "source_0",
-					Label:       "Channel 1",
-					Profiles:    mappedProfiles,
-				},
-			}
-		}
+		dev.VideoSources = associateProfiles(dev.VideoSources, mappedProfiles)
 	}
 
 	return dev
@@ -430,8 +423,9 @@ func (e *Engine) tryAuthenticatedEnrich(ctx context.Context, dev DiscoveredDevic
 		var mappedSources []VideoSource
 		for _, s := range sources {
 			mappedSources = append(mappedSources, VideoSource{
-				SourceToken: s.SourceToken,
-				Label:       s.Label,
+				SourceToken:  s.SourceToken,
+				Label:        s.Label,
+				Availability: ChannelAvailabilityUnknown,
 			})
 		}
 		dev.VideoSources = mappedSources
@@ -453,34 +447,79 @@ func (e *Engine) tryAuthenticatedEnrich(ctx context.Context, dev DiscoveredDevic
 			uri, _ := e.onvifClient.GetStreamUriAuth(ctx, mediaXAddr, p.Token, username, password)
 
 			mappedProfiles = append(mappedProfiles, MediaProfile{
-				Token:     p.Token,
-				Name:      p.Name,
-				Codec:     p.Codec,
-				Width:     p.Width,
-				Height:    p.Height,
-				FPS:       p.FPS,
-				StreamURI: uri,
-				Role:      role,
+				Token:            p.Token,
+				Name:             p.Name,
+				Codec:            p.Codec,
+				Width:            p.Width,
+				Height:           p.Height,
+				FPS:              p.FPS,
+				StreamURI:        uri,
+				Role:             role,
+				VideoSourceToken: p.VideoSourceToken,
 			})
 		}
 
-		if len(dev.VideoSources) > 0 {
-			dev.VideoSources[0].Profiles = mappedProfiles
-		} else {
-			dev.VideoSources = []VideoSource{
-				{
-					SourceToken: "source_0",
-					Label:       "Channel 1",
-					Profiles:    mappedProfiles,
-				},
-			}
-		}
+		dev.VideoSources = associateProfiles(dev.VideoSources, mappedProfiles)
 	}
 
 	// dev.AuthRequired stays true: it is informational ("this device does
 	// require credentials"), not a gate the target builder uses — the
 	// builder only cares whether a credential actually resolved.
 	return dev, true
+}
+
+// associateProfiles attaches each ONVIF media profile to the VideoSource
+// named by its VideoSourceConfiguration/SourceToken. A recorder's profile
+// list is device-wide; assigning it to the first source would mix channels.
+// A tokenless profile is only safe to keep for the sole source of a
+// single-source device, which preserves older ONVIF camera behavior.
+func associateProfiles(sources []VideoSource, profiles []MediaProfile) []VideoSource {
+	if len(sources) == 0 {
+		byToken := make(map[string][]MediaProfile)
+		for _, profile := range profiles {
+			if profile.VideoSourceToken != "" {
+				byToken[profile.VideoSourceToken] = append(byToken[profile.VideoSourceToken], profile)
+			}
+		}
+		if len(byToken) == 1 {
+			for token, grouped := range byToken {
+				return []VideoSource{{SourceToken: token, Availability: ChannelAvailabilityUnknown, Profiles: grouped}}
+			}
+		}
+		if len(byToken) > 1 {
+			out := make([]VideoSource, 0, len(byToken))
+			for token, grouped := range byToken {
+				out = append(out, VideoSource{SourceToken: token, Availability: ChannelAvailabilityUnknown, Profiles: grouped})
+			}
+			sort.Slice(out, func(i, j int) bool { return out[i].SourceToken < out[j].SourceToken })
+			return out
+		}
+		// No source token was reported. Keep the legacy single-channel fallback
+		// only when every profile is untagged; tagged profiles must not be folded
+		// into a fabricated channel.
+		for _, profile := range profiles {
+			if profile.VideoSourceToken != "" {
+				return nil
+			}
+		}
+		return []VideoSource{{SourceToken: "source_0", Label: "Channel 1", Availability: ChannelAvailabilityUnknown, Profiles: profiles}}
+	}
+
+	byToken := make(map[string]int, len(sources))
+	for i := range sources {
+		sources[i].Profiles = nil
+		byToken[sources[i].SourceToken] = i
+	}
+	for _, profile := range profiles {
+		if idx, ok := byToken[profile.VideoSourceToken]; ok && profile.VideoSourceToken != "" {
+			sources[idx].Profiles = append(sources[idx].Profiles, profile)
+			continue
+		}
+		if len(sources) == 1 && profile.VideoSourceToken == "" {
+			sources[0].Profiles = append(sources[0].Profiles, profile)
+		}
+	}
+	return sources
 }
 
 func classifyDeviceType(scopes, types string, videoSourceCount int) DeviceType {
