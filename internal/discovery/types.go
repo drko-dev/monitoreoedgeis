@@ -55,25 +55,30 @@ type CredentialResolver func(candidateKey string) (username, password string, ok
 
 // MediaProfile represents an ONVIF Media Profile exposed by a video source.
 type MediaProfile struct {
-	Token            string     `json:"token"`
-	Name             string     `json:"name,omitempty"`
-	Codec            string     `json:"codec,omitempty"` // H264, H265, JPEG, etc.
-	Width            int        `json:"width,omitempty"`
-	Height           int        `json:"height,omitempty"`
-	FPS              float64    `json:"fps,omitempty"`
-	StreamURI        string     `json:"stream_uri,omitempty"` // Sanitized RTSP URI (never contains userinfo/passwords)
-	Role             StreamRole `json:"role,omitempty"`
-	VideoSourceToken string     `json:"video_source_token,omitempty"`
+	Token            string              `json:"token"`
+	Name             string              `json:"name,omitempty"`
+	Codec            string              `json:"codec,omitempty"` // H264, H265, JPEG, etc.
+	Width            int                 `json:"width,omitempty"`
+	Height           int                 `json:"height,omitempty"`
+	FPS              float64             `json:"fps,omitempty"`
+	StreamURI        string              `json:"stream_uri,omitempty"` // Sanitized RTSP URI (never contains userinfo/passwords)
+	StreamURIOrigin  string              `json:"stream_uri_origin,omitempty"`
+	Availability     ChannelAvailability `json:"availability,omitempty"`
+	Role             StreamRole          `json:"role,omitempty"`
+	VideoSourceToken string              `json:"video_source_token,omitempty"`
+	ChannelNumber    int                 `json:"channel_number,omitempty"`
+	StreamID         int                 `json:"stream_id,omitempty"`
 }
 
 // VideoSource represents a physical or logical sensor / channel on a device.
 // Multichannel devices (DVRs, NVRs, dual-sensor cameras) expose multiple video sources.
 type VideoSource struct {
-	SourceToken  string              `json:"source_token"`
-	Label        string              `json:"label,omitempty"`
-	Availability ChannelAvailability `json:"availability,omitempty"`
-	Profiles     []MediaProfile      `json:"profiles,omitempty"`
-	Capabilities []string            `json:"capabilities,omitempty"`
+	SourceToken   string              `json:"source_token"`
+	ChannelNumber int                 `json:"channel_number,omitempty"`
+	Label         string              `json:"label,omitempty"`
+	Availability  ChannelAvailability `json:"availability,omitempty"`
+	Profiles      []MediaProfile      `json:"profiles,omitempty"`
+	Capabilities  []string            `json:"capabilities,omitempty"`
 }
 
 // DiscoveredDevice represents a distinct network video device found on the LAN.

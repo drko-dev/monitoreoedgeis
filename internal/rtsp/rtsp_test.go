@@ -3,7 +3,9 @@ package rtsp
 import (
 	"bufio"
 	"context"
+	"crypto/md5"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,6 +16,11 @@ import (
 	"testing"
 	"time"
 )
+
+func md5Hex(value string) string {
+	sum := md5.Sum([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
 
 // mockRTSPServer simulates an RTSP server supporting Digest auth and interleaved TCP streaming.
 type mockRTSPServer struct {
