@@ -8,6 +8,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
+	"github.com/drko-dev/monitoreoedgeis/internal/hikvision"
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
 )
 
@@ -42,6 +43,8 @@ func newDiscoveryModule(
 		log,
 	)
 	engine.SetCredentialResolver(resolve)
+	engine.SetRecorderAdapter(hikvision.NewAdapter(cfg.DiscoveryTimeout))
+	engine.SetManualHikvisionEndpoints(cfg.HikvisionEndpoints)
 
 	var client discovery.TransportClient
 	if cfg.SaaSURL != "" && creds.IsEnrolled() && creds.Credential != "" && creds.DeviceID != "" {

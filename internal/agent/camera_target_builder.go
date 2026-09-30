@@ -177,7 +177,7 @@ func buildCameraTargets(
 func selectProfile(profiles []discovery.MediaProfile, desiredRole string) (discovery.MediaProfile, bool) {
 	usable := make([]discovery.MediaProfile, 0, len(profiles))
 	for _, p := range profiles {
-		if p.StreamURI != "" {
+		if p.StreamURI != "" && p.Availability != discovery.ChannelAvailabilityDisabled {
 			usable = append(usable, p)
 		}
 	}

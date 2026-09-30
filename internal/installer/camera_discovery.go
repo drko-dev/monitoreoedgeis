@@ -4,8 +4,10 @@ import (
 	"context"
 	"time"
 
+	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
 	"github.com/drko-dev/monitoreoedgeis/internal/discovery/onvif"
+	"github.com/drko-dev/monitoreoedgeis/internal/hikvision"
 	"github.com/drko-dev/monitoreoedgeis/internal/rtsptest"
 )
 
@@ -41,8 +43,10 @@ type OnboardingCandidate struct {
 	// ChannelIndex is this channel's 1-based position for display only
 	// ("Channel 3 of 8") -- CandidateKey, never this index, is the stable
 	// identity used for onboarding/credentials/targets.
-	ChannelIndex int `json:"channel_index,omitempty"`
-	ChannelCount int `json:"channel_count,omitempty"`
+	ChannelIndex        int                           `json:"channel_index,omitempty"`
+	ChannelCount        int                           `json:"channel_count,omitempty"`
+	ChannelNumber       int                           `json:"channel_number,omitempty"`
+	ChannelAvailability discovery.ChannelAvailability `json:"channel_availability,omitempty"`
 }
 
 // newOnboardingCandidate builds a single-source candidate: CandidateKey is
@@ -72,16 +76,18 @@ func newChannelOnboardingCandidates(d discovery.DiscoveredDevice) []OnboardingCa
 			continue
 		}
 		out = append(out, OnboardingCandidate{
-			CandidateKey:   discovery.ChannelCandidateKey(d.StableIdentity, vs.SourceToken),
-			Host:           d.IP,
-			Manufacturer:   d.Manufacturer,
-			Model:          d.Model,
-			ONVIFAvailable: d.XAddr != "",
-			AuthRequired:   d.AuthRequired,
-			MultiSource:    true,
-			ChannelLabel:   vs.Label,
-			ChannelIndex:   i + 1,
-			ChannelCount:   len(d.VideoSources),
+			CandidateKey:        discovery.ChannelCandidateKey(d.StableIdentity, vs.SourceToken),
+			Host:                d.IP,
+			Manufacturer:        d.Manufacturer,
+			Model:               d.Model,
+			ONVIFAvailable:      d.XAddr != "",
+			AuthRequired:        d.AuthRequired,
+			MultiSource:         true,
+			ChannelLabel:        vs.Label,
+			ChannelIndex:        i + 1,
+			ChannelCount:        len(d.VideoSources),
+			ChannelNumber:       vs.ChannelNumber,
+			ChannelAvailability: vs.Availability,
 		})
 	}
 	return out
@@ -101,6 +107,10 @@ type DiscoverCamerasResult struct {
 // is its own independent instance, never the daemon's.
 func (s *Service) DiscoverCameras(ctx context.Context) (*DiscoverCamerasResult, error) {
 	engine := discovery.NewEngine(nil, nil, nil, nil, 0, nil)
+	engine.SetRecorderAdapter(hikvision.NewAdapter(5 * time.Second))
+	if cfg, err := config.Load(); err == nil {
+		engine.SetManualHikvisionEndpoints(cfg.HikvisionEndpoints)
+	}
 	scan, err := engine.RunScan(ctx)
 	if err != nil {
 		return nil, &SafeError{

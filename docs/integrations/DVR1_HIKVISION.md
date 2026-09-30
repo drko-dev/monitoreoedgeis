@@ -1,8 +1,8 @@
 # DVR-1 — Hikvision DVR/NVR Multichannel Integration
 
-Status: **PHASE_A_DESIGN_COMPLETE**. Implementation and local verification are
-pending the implementation and test phases. Physical compatibility with the
-customer recorder remains **PENDING_PHYSICAL_VALIDATION**.
+Status: **PHASE_B_IMPLEMENTED; GO_TEST_AND_VET_PASS; RACE_TESTS_PASS; PUSH_PENDING**.
+Physical compatibility with the customer recorder remains
+**PENDING_PHYSICAL_VALIDATION**.
 
 - Repository: `drko-dev/monitoreoedgeis`
 - Branch: `feature/dvr-1-hikvision`
@@ -23,9 +23,11 @@ at `6e9cf5b8d8575d7ad99c693a3038fab94fd22dea`; relative to the current main it
 was 20 commits behind and one commit ahead. DVR-1 does not depend on or copy
 that change.
 
-The GitHub CI run for the verified DVR-1 base completed successfully. Local Go
-tests, vet, and race tests are intentionally deferred to the dedicated test
-phase so their results are fresh for the implementation being accepted.
+The GitHub CI run for the verified DVR-1 base completed successfully. Phase B
+has since added implementation changes on this branch; see the implementation
+record below for fresh verification. The branch still needs implementation
+commits pushed and verified before it meets the `CODE_PASS` synchronized-state
+condition.
 
 ## 2. Existing architecture that must be reused
 
@@ -386,3 +388,69 @@ Even with `CODE_PASS`, the target recorder remains:
 
 until the physical procedure above is completed against the reported model and
 firmware with authorized credentials.
+
+## 11. Phase B implementation record
+
+### Implemented
+
+- Fixed ONVIF profile association by preserving
+  `VideoSourceConfiguration.SourceToken`. Untagged fallback is retained only
+  when one source makes the association unambiguous.
+- Added tri-state channel and stream availability. Disabled channels remain
+  discoverable but do not produce runtime camera targets; the installer
+  projection now includes device-reported channel number and availability.
+- Added `GEOCAM_HIKVISION_ENDPOINTS`, a comma-separated list of at most 16
+  credential-free HTTP(S) base URLs. The existing fail-closed private endpoint
+  validator still gates outbound discovery; credentials never belong in this
+  setting.
+- Added `internal/hikvision` as an optional GET-only ISAPI adapter for
+  `/ISAPI/Streaming/channels`. It groups the device-reported stream IDs by
+  `id / 100`, preserves non-consecutive channel identifiers, stream IDs,
+  names, codec/resolution, and enabled status, and rejects duplicate IDs,
+  malformed XML, and responses over 1 MiB.
+- Added a deterministic Hikvision RTSP URI resolver for an ISAPI-discovered
+  stream ID. These URIs are explicitly marked `hikvision_constructed`; URI
+  construction is not evidence of RTSP reachability.
+- Extracted the existing MD5 Digest challenge helper into
+  `internal/digestauth` for shared RTSP/HTTP use. Digest supports the existing
+  MD5 subset; HTTP Basic challenge retry is allowed only over HTTPS. TLS
+  certificate verification remains at Go's default.
+- Wired the optional adapter into agent and installer discovery. Enrichment
+  reuses the existing physical-device credential resolver and inventory. An
+  authentication rejection is surfaced as `AuthRequired` without logging
+  credentials. Channel/profile metadata is merged only by exact identifiers
+  or a matching discovered Hikvision stream ID in an ONVIF URI.
+
+### Contract and explicit limitations
+
+The implementation uses the documented channel-list GET and RTSP URL
+convention referenced above. It does **not** call a separate ISAPI identity or
+capability endpoint: automatic adapter selection requires ONVIF to identify
+the manufacturer as Hikvision; a manual endpoint is explicitly treated as
+Hikvision. ONVIF remains the identification path, not a new undocumented
+ISAPI probe.
+
+The adapter returns the configured channel snapshot; stream negotiation,
+authentication, codec confirmation, and frame reception remain the job of the
+existing RTSP validation/runtime path. Existing RTSP client/simulator coverage
+is not equivalent to probing an adapter-generated URL against a real recorder.
+Physical support for the exact iDS model/firmware, enabled HTTP/ISAPI state,
+and actual stream IDs remains pending authorized customer access.
+
+### Verification recorded during Phase B
+
+The focused package command passed after the relevant implementation changes,
+followed by the complete repository suite:
+
+```text
+go test ./internal/config ./internal/digestauth ./internal/hikvision ./internal/rtsp ./internal/discovery ./internal/discovery/onvif ./internal/agent ./internal/installer
+go test ./...
+go vet ./...
+go test -race ./internal/digestauth ./internal/hikvision ./internal/discovery ./internal/agent ./internal/installer ./internal/rtsp
+```
+
+All three commands passed locally. Hikvision HTTP checks use synthetic
+`httptest` responses, and existing RTSP simulator tests also pass; no customer
+recorder was contacted. These results do not prove that the target DVR accepts
+the generated RTSP URI or delivers frames. Clean Git state and push verification
+remain required before `CODE_PASS`.

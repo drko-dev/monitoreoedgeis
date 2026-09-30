@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,15 @@ type Engine struct {
 	// unauthenticated SOAP inspection is left with AuthRequired=true and no
 	// profiles/StreamURI, and the scan continues normally.
 	credentialResolver CredentialResolver
+	recorderAdapter    RecorderAdapter
+	manualRecorders    []string
+}
+
+// RecorderAdapter is an optional vendor-specific read-only enrichment seam.
+// Implementations return channels, never mutate inventory or credentials.
+type RecorderAdapter interface {
+	Vendor() string
+	Discover(ctx context.Context, endpoint, username, password string) ([]VideoSource, error)
 }
 
 // NewEngine creates a new discovery engine.
@@ -88,6 +98,16 @@ func (e *Engine) SetCredentialResolver(resolve CredentialResolver) {
 	e.credentialResolver = resolve
 }
 
+// SetRecorderAdapter wires the one optional vendor-specific recorder adapter.
+func (e *Engine) SetRecorderAdapter(adapter RecorderAdapter) { e.recorderAdapter = adapter }
+
+// SetManualHikvisionEndpoints adds operator-configured private recorder base
+// URLs. These URLs contain no credentials; the normal camera credential
+// resolver remains the only source of authentication material.
+func (e *Engine) SetManualHikvisionEndpoints(endpoints []string) {
+	e.manualRecorders = append([]string(nil), endpoints...)
+}
+
 // ScanResult holds the outcome of a single discovery scan cycle.
 type ScanResult struct {
 	DevicesFound []DiscoveredDevice
@@ -102,7 +122,7 @@ func (e *Engine) RunScan(ctx context.Context) (*ScanResult, error) {
 		return nil, fmt.Errorf("discovery engine: interface selection: %w", err)
 	}
 
-	if len(scopes) == 0 {
+	if len(scopes) == 0 && len(e.manualRecorders) == 0 {
 		e.log.Info("discovery: no active private network interfaces found for scanning")
 		return &ScanResult{Duration: time.Since(start)}, nil
 	}
@@ -139,6 +159,29 @@ func (e *Engine) RunScan(ctx context.Context) (*ScanResult, error) {
 	//   1. EPR UUID (normalized)
 	//   2. Fallback: Host:Port/Path
 	deduped := deduplicateRawCandidates(rawCandidates)
+	for _, endpoint := range e.manualRecorders {
+		u, port, err := ValidateXAddr(endpoint)
+		if err != nil {
+			e.log.Warn("discovery: rejected manual Hikvision endpoint", slog.Any("error", err))
+			continue
+		}
+		if e.recorderAdapter == nil {
+			e.log.Warn("discovery: manual Hikvision endpoint ignored without a recorder adapter")
+			continue
+		}
+		stable := fmt.Sprintf("manual:hikvision:%s:%d", strings.ToLower(u.Hostname()), port)
+		deduped = append(deduped, DiscoveredDevice{
+			StableIdentity: stable,
+			IP:             u.Hostname(),
+			Port:           port,
+			Path:           u.Path,
+			XAddr:          u.String(),
+			AllXAddrs:      []string{u.String()},
+			Manufacturer:   e.recorderAdapter.Vendor(),
+			DeviceType:     DeviceTypeUnknown,
+		})
+	}
+	deduped = deduplicateDevices(deduped)
 
 	e.log.Info("discovery: raw scan completed",
 		slog.Int("raw_matches", len(rawCandidates)),
@@ -234,6 +277,28 @@ func deduplicateRawCandidates(raw []wsdiscovery.DiscoveredRawCandidate) []Discov
 	return result
 }
 
+func deduplicateDevices(devices []DiscoveredDevice) []DiscoveredDevice {
+	byIdentity := make(map[string]DiscoveredDevice, len(devices))
+	for _, device := range devices {
+		if previous, ok := byIdentity[device.StableIdentity]; ok {
+			if len(device.AllXAddrs) > len(previous.AllXAddrs) {
+				previous.AllXAddrs = device.AllXAddrs
+			}
+			if previous.Manufacturer == "" {
+				previous.Manufacturer = device.Manufacturer
+			}
+			byIdentity[device.StableIdentity] = previous
+			continue
+		}
+		byIdentity[device.StableIdentity] = device
+	}
+	out := make([]DiscoveredDevice, 0, len(byIdentity))
+	for _, device := range byIdentity {
+		out = append(out, device)
+	}
+	return out
+}
+
 // enrichCandidates runs SOAP enrichment concurrently over a worker pool of at most 4 goroutines.
 func (e *Engine) enrichCandidates(ctx context.Context, devices []DiscoveredDevice) []DiscoveredDevice {
 	if len(devices) == 0 {
@@ -259,7 +324,11 @@ func (e *Engine) enrichCandidates(ctx context.Context, devices []DiscoveredDevic
 					return
 				default:
 				}
-				enrichedDev := e.enrichSingleDevice(ctx, devices[idx])
+				enrichedDev := devices[idx]
+				if !strings.HasPrefix(enrichedDev.StableIdentity, "manual:hikvision:") {
+					enrichedDev = e.enrichSingleDevice(ctx, enrichedDev)
+				}
+				enrichedDev = e.enrichWithRecorderAdapter(ctx, enrichedDev)
 				resultCh <- enrichedDev
 			}
 		}()
@@ -278,6 +347,104 @@ func (e *Engine) enrichCandidates(ctx context.Context, devices []DiscoveredDevic
 		out = append(out, d)
 	}
 	return out
+}
+
+func (e *Engine) enrichWithRecorderAdapter(ctx context.Context, dev DiscoveredDevice) DiscoveredDevice {
+	adapter := e.recorderAdapter
+	if adapter == nil || !strings.EqualFold(strings.TrimSpace(dev.Manufacturer), adapter.Vendor()) {
+		return dev
+	}
+	var username, password string
+	if e.credentialResolver != nil {
+		username, password, _ = e.credentialResolver(dev.StableIdentity)
+	}
+	channels, err := adapter.Discover(ctx, dev.XAddr, username, password)
+	if err != nil {
+		if errors.Is(err, ErrRecorderAuthRequired) {
+			dev.AuthRequired = true
+		}
+		e.log.Debug("discovery: recorder adapter did not enrich candidate", slog.String("vendor", adapter.Vendor()), slog.Any("error", err))
+		return dev
+	}
+	dev.VideoSources = mergeRecorderChannels(dev.VideoSources, channels)
+	if len(dev.VideoSources) > 1 {
+		dev.DeviceType = classifyDeviceType(strings.Join(dev.Scopes, " "), dev.Types, len(dev.VideoSources))
+	}
+	return dev
+}
+
+// ErrRecorderAuthRequired lets an optional vendor adapter report an
+// authentication failure without exposing protocol response details.
+var ErrRecorderAuthRequired = errors.New("discovery: recorder authentication required")
+
+func mergeRecorderChannels(existing, additional []VideoSource) []VideoSource {
+	byToken := make(map[string]int, len(existing)+len(additional))
+	merged := append([]VideoSource(nil), existing...)
+	for i := range merged {
+		byToken[merged[i].SourceToken] = i
+	}
+	for _, candidate := range additional {
+		index := -1
+		if candidate.SourceToken != "" {
+			if exactIndex, found := byToken[candidate.SourceToken]; found {
+				index = exactIndex
+			} else {
+				// A numeric source/channel ID is an exact join; otherwise
+				// the ONVIF stream URI must identify the same stream number.
+				for i := range merged {
+					if candidate.ChannelNumber > 0 && merged[i].SourceToken == strconv.Itoa(candidate.ChannelNumber) {
+						index = i
+						break
+					}
+					for _, profile := range merged[i].Profiles {
+						if candidateProfilesContainURI(candidate, profile.StreamURI) {
+							index = i
+							break
+						}
+					}
+					if index >= 0 {
+						break
+					}
+				}
+			}
+		}
+		if index < 0 {
+			byToken[candidate.SourceToken] = len(merged)
+			merged = append(merged, candidate)
+			continue
+		}
+		if merged[index].Availability == "" || merged[index].Availability == ChannelAvailabilityUnknown {
+			merged[index].Availability = candidate.Availability
+		}
+		if merged[index].ChannelNumber == 0 {
+			merged[index].ChannelNumber = candidate.ChannelNumber
+		}
+		if merged[index].Label == "" {
+			merged[index].Label = candidate.Label
+		}
+		known := make(map[string]struct{}, len(merged[index].Profiles))
+		for _, profile := range merged[index].Profiles {
+			known[profile.Token] = struct{}{}
+		}
+		for _, profile := range candidate.Profiles {
+			if _, exists := known[profile.Token]; !exists {
+				merged[index].Profiles = append(merged[index].Profiles, profile)
+			}
+		}
+	}
+	return merged
+}
+
+func candidateProfilesContainURI(source VideoSource, uri string) bool {
+	if uri == "" {
+		return false
+	}
+	for _, profile := range source.Profiles {
+		if profile.StreamID > 0 && strings.Contains(uri, "/channels/"+strconv.Itoa(profile.StreamID)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) enrichSingleDevice(ctx context.Context, dev DiscoveredDevice) DiscoveredDevice {
@@ -362,6 +529,7 @@ func (e *Engine) enrichSingleDevice(ctx context.Context, dev DiscoveredDevice) D
 				Height:           p.Height,
 				FPS:              p.FPS,
 				StreamURI:        uri,
+				StreamURIOrigin:  "onvif",
 				Role:             role,
 				VideoSourceToken: p.VideoSourceToken,
 			})
@@ -454,6 +622,7 @@ func (e *Engine) tryAuthenticatedEnrich(ctx context.Context, dev DiscoveredDevic
 				Height:           p.Height,
 				FPS:              p.FPS,
 				StreamURI:        uri,
+				StreamURIOrigin:  "onvif",
 				Role:             role,
 				VideoSourceToken: p.VideoSourceToken,
 			})

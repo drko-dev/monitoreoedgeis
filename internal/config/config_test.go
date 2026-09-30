@@ -12,7 +12,7 @@ func TestLoadDefaults(t *testing.T) {
 		"GEOCAM_SAAS_URL", "GEOCAM_HEARTBEAT_INTERVAL", "GEOCAM_DATA_DIR",
 		"GEOCAM_HEALTH_ADDR", "GEOCAM_ALLOW_INSECURE_HTTP", "GEOCAM_SAAS_TIMEOUT",
 		"GEOCAM_DISCOVERY_ENABLED", "GEOCAM_DISCOVERY_INTERVAL", "GEOCAM_DISCOVERY_TIMEOUT",
-		"GEOCAM_DISCOVERY_INTERFACES",
+		"GEOCAM_DISCOVERY_INTERFACES", "GEOCAM_HIKVISION_ENDPOINTS",
 		"GEOCAM_CLOUD_JPEG_QUALITY", "GEOCAM_CLOUD_MAX_BYTES_PER_SEC",
 		"GEOCAM_CLOUD_BURST_BYTES", "GEOCAM_CLOUD_MAX_FPS",
 	} {
@@ -58,6 +58,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if len(cfg.DiscoveryInterfaces) != 0 {
 		t.Errorf("DiscoveryInterfaces = %v, want empty", cfg.DiscoveryInterfaces)
+	}
+	if len(cfg.HikvisionEndpoints) != 0 {
+		t.Errorf("HikvisionEndpoints = %v, want empty", cfg.HikvisionEndpoints)
 	}
 	if cfg.CloudJPEGQuality != DefaultCloudJPEGQuality {
 		t.Errorf("CloudJPEGQuality = %d, want %d", cfg.CloudJPEGQuality, DefaultCloudJPEGQuality)
@@ -150,6 +153,24 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 				t.Fatalf("Load() succeeded with %s=%q, want error", tt.key, tt.value)
 			}
 		})
+	}
+}
+
+func TestLoadHikvisionEndpoints(t *testing.T) {
+	t.Setenv("GEOCAM_HIKVISION_ENDPOINTS", "http://192.168.1.20:80, https://10.0.0.5")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.HikvisionEndpoints) != 2 || cfg.HikvisionEndpoints[0] != "http://192.168.1.20:80" || cfg.HikvisionEndpoints[1] != "https://10.0.0.5" {
+		t.Fatalf("HikvisionEndpoints = %#v", cfg.HikvisionEndpoints)
+	}
+}
+
+func TestLoadRejectsCredentialBearingHikvisionEndpoint(t *testing.T) {
+	t.Setenv("GEOCAM_HIKVISION_ENDPOINTS", "http://operator:secret@192.168.1.20")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected credential-bearing endpoint to be rejected")
 	}
 }
 

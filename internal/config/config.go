@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -51,6 +52,9 @@ type Config struct {
 	DiscoveryInterval   time.Duration
 	DiscoveryTimeout    time.Duration
 	DiscoveryInterfaces []string
+	// HikvisionEndpoints are non-secret, operator-specified private recorder
+	// base URLs used when WS-Discovery cannot reach the recorder.
+	HikvisionEndpoints []string
 	// Camera connectivity settings (Milestone G).
 	ConnectivityEnabled bool
 	StreamRole          string
@@ -226,6 +230,7 @@ const (
 	DefaultDiscoveryTimeout  = 4 * time.Second
 	MinDiscoveryTimeout      = 1 * time.Second
 	MaxDiscoveryTimeout      = 30 * time.Second
+	MaxHikvisionEndpoints    = 16
 	// Connectivity defaults and bounds (Milestone G).
 	DefaultConnectivityEnabled = true
 	DefaultStreamRole          = "sub"
@@ -535,6 +540,24 @@ func loadFromEnvironment() (*Config, error) {
 			}
 		}
 		cfg.DiscoveryInterfaces = ifaces
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_HIKVISION_ENDPOINTS")); raw != "" {
+		parts := strings.Split(raw, ",")
+		if len(parts) > MaxHikvisionEndpoints {
+			return nil, fmt.Errorf("invalid GEOCAM_HIKVISION_ENDPOINTS: maximum is %d", MaxHikvisionEndpoints)
+		}
+		for _, part := range parts {
+			endpoint := strings.TrimSpace(part)
+			if endpoint == "" {
+				return nil, fmt.Errorf("invalid GEOCAM_HIKVISION_ENDPOINTS: empty endpoint")
+			}
+			u, err := url.Parse(endpoint)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+				return nil, fmt.Errorf("invalid GEOCAM_HIKVISION_ENDPOINTS: expected credential-free http(s) base URL")
+			}
+			cfg.HikvisionEndpoints = append(cfg.HikvisionEndpoints, endpoint)
+		}
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_CONNECTIVITY_ENABLED")); raw != "" {
