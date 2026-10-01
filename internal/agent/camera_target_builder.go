@@ -54,10 +54,11 @@ type TargetSkip struct {
 // with more than one VideoSource, each channel gets its own CandidateKey
 // via discovery.ChannelCandidateKey(StableIdentity, SourceToken) and its own
 // independent rtsp.CameraTarget -- never an IP address, never collapsed
-// into the device's identity alone. Credentials resolve by the same
-// CandidateKey used for onboarding: the physical key for a single source,
-// and an independent composite key for each multichannel source. This keeps
-// channel-level SaaS assignments and revocations isolated.
+// into the device's identity alone. Credentials resolve with specific-over-
+// inherited precedence: an exact match for the channel's composite
+// CandidateKey wins, followed by inheritance from the physical device's
+// StableIdentity if no channel-specific credential was issued. Single-source
+// cameras resolve directly by their physical key.
 // Output is sorted by CandidateKey so callers (and tests) see deterministic
 // ordering regardless of the Inventory's internal map iteration order.
 //

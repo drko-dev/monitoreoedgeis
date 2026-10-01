@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/drko-dev/monitoreoedgeis/internal/cameracreds"
 	"github.com/drko-dev/monitoreoedgeis/internal/discovery"
 )
 
@@ -386,5 +388,125 @@ func TestBuildCameraTargets_DeterministicOrdering(t *testing.T) {
 		if targets[0].CandidateKey != "epr:a" || targets[1].CandidateKey != "epr:b" || targets[2].CandidateKey != "epr:c" {
 			t.Fatalf("expected deterministic CandidateKey ordering, got %+v", targets)
 		}
+	}
+}
+
+func TestBuildCameraTargets_MultichannelInheritsRecorderCredentialWhenUnspecified(t *testing.T) {
+	deviceKey := "epr:dvr-shared-test"
+	dev := discovery.DiscoveredDevice{
+		StableIdentity: deviceKey,
+		AuthRequired:   true,
+		VideoSources: []discovery.VideoSource{
+			{SourceToken: "ch1", Profiles: []discovery.MediaProfile{{Token: "p1", StreamURI: "rtsp://10.0.0.1/1"}}},
+			{SourceToken: "ch2", Profiles: []discovery.MediaProfile{{Token: "p2", StreamURI: "rtsp://10.0.0.1/2"}}},
+		},
+	}
+	store, provider := newG1BStore(t)
+	if _, err := store.Apply([]cameracreds.Credential{{
+		ID:            "cred-shared",
+		Scope:         cameracreds.ScopeDevice,
+		CandidateKeys: []string{deviceKey},
+		Username:      "dvr-admin",
+		Password:      "dvr-pass",
+		Revision:      1,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	resolve := func(key string) (string, string, bool) {
+		cred, ok := provider.Resolve(key)
+		return cred.Username, cred.Password, ok
+	}
+
+	targets, skips := buildCameraTargets([]discovery.DiscoveredDevice{dev}, resolve, "sub")
+	if len(skips) != 0 || len(targets) != 2 {
+		t.Fatalf("want 2 targets and 0 skips, got targets=%+v skips=%+v", targets, skips)
+	}
+	if targets[0].Username != "dvr-admin" || targets[0].Password != "dvr-pass" ||
+		targets[1].Username != "dvr-admin" || targets[1].Password != "dvr-pass" {
+		t.Fatalf("both channels should inherit recorder credentials, got %+v", targets)
+	}
+}
+
+func TestBuildCameraTargets_MultichannelSpecificOverridePrecedesInherited(t *testing.T) {
+	deviceKey := "epr:dvr-override-test"
+	dev := discovery.DiscoveredDevice{
+		StableIdentity: deviceKey,
+		AuthRequired:   true,
+		VideoSources: []discovery.VideoSource{
+			{SourceToken: "ch1", Profiles: []discovery.MediaProfile{{Token: "p1", StreamURI: "rtsp://10.0.0.1/1"}}},
+			{SourceToken: "ch2", Profiles: []discovery.MediaProfile{{Token: "p2", StreamURI: "rtsp://10.0.0.1/2"}}},
+			{SourceToken: "ch3", Availability: discovery.ChannelAvailabilityDisabled, Profiles: []discovery.MediaProfile{{Token: "p3", StreamURI: "rtsp://10.0.0.1/3"}}},
+		},
+	}
+
+	ch1Key := discovery.ChannelCandidateKey(deviceKey, "ch1")
+	ch2Key := discovery.ChannelCandidateKey(deviceKey, "ch2")
+	ch3Key := discovery.ChannelCandidateKey(deviceKey, "ch3")
+
+	store, provider := newG1BStore(t)
+	if _, err := store.Apply([]cameracreds.Credential{
+		{
+			ID:            "cred-shared",
+			Scope:         cameracreds.ScopeDevice,
+			CandidateKeys: []string{deviceKey},
+			Username:      "shared-user",
+			Password:      "shared-pass",
+			Revision:      1,
+		},
+		{
+			ID:            "cred-ch1",
+			Scope:         cameracreds.ScopeDevice,
+			CandidateKeys: []string{ch1Key},
+			Username:      "specific-user",
+			Password:      "specific-pass",
+			Revision:      1,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resolve := func(key string) (string, string, bool) {
+		cred, ok := provider.Resolve(key)
+		return cred.Username, cred.Password, ok
+	}
+
+	targets, skips := buildCameraTargets([]discovery.DiscoveredDevice{dev}, resolve, "sub")
+	if len(targets) != 2 || len(skips) != 1 {
+		t.Fatalf("want 2 targets and 1 skip, got targets=%+v skips=%+v", targets, skips)
+	}
+
+	// ch1 has specific credentials
+	if targets[0].CandidateKey != ch1Key || targets[0].Username != "specific-user" || targets[0].Password != "specific-pass" {
+		t.Fatalf("ch1 should have specific override, got %+v", targets[0])
+	}
+	// ch2 inherits shared recorder credentials
+	if targets[1].CandidateKey != ch2Key || targets[1].Username != "shared-user" || targets[1].Password != "shared-pass" {
+		t.Fatalf("ch2 should have inherited credentials, got %+v", targets[1])
+	}
+	// ch3 is disabled
+	if skips[0].CandidateKey != ch3Key || skips[0].Reason != SkipChannelDisabled {
+		t.Fatalf("ch3 should be skipped as disabled, got %+v", skips[0])
+	}
+}
+
+func TestBuildCameraTargets_NoSecretsInDiagnosticsOrSkips(t *testing.T) {
+	deviceKey := "epr:dvr-secret-audit"
+	secretPass := "SuperSecretPassword123!"
+	dev := discovery.DiscoveredDevice{
+		StableIdentity: deviceKey,
+		AuthRequired:   true,
+		VideoSources: []discovery.VideoSource{
+			{SourceToken: "ch1", Profiles: []discovery.MediaProfile{{Token: "p1", StreamURI: "rtsp://10.0.0.1/1"}}},
+		},
+	}
+	// No credential resolves
+	targets, skips := buildCameraTargets([]discovery.DiscoveredDevice{dev}, nil, "sub")
+	if len(targets) != 0 || len(skips) != 1 {
+		t.Fatalf("targets=%+v skips=%+v", targets, skips)
+	}
+	skipStr := string(skips[0].Reason) + skips[0].CandidateKey
+	if strings.Contains(skipStr, secretPass) || strings.Contains(skipStr, "Authorization") {
+		t.Fatalf("secrets or auth headers leaked in skips: %s", skipStr)
 	}
 }

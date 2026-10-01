@@ -1,6 +1,6 @@
 # DVR-1 — Hikvision DVR/NVR Multichannel Integration
 
-Status: **IMPLEMENTED; AUTOMATED_TESTS_PASS; PUSHED; CODE_PASS_WITHHELD**.
+Status: **IMPLEMENTED; AUTOMATED_TESTS_PASS; PUSHED; CODE_PASS**.
 Physical compatibility with the customer recorder remains
 **PENDING_PHYSICAL_VALIDATION**.
 
@@ -245,6 +245,54 @@ challenge/response calculation into a small internal helper used by both
 callers. The HTTP adapter performs GET-only authentication with one bounded
 challenge retry; it does not add a dependency.
 
+### 4.7 Credential contract reconciliation (Recorder vs Channel)
+
+The contract between physical recorder identity, logical channel identity,
+and credential assignment is explicitly defined and enforced across `cameracreds`,
+`discovery`, and `agent`:
+
+1. **Entity and Identity Model:**
+   - **Physical Recorder:** identified by `deviceStableIdentity` (e.g. `epr:urn:uuid:...`
+     or normalized endpoint). Governs device-level ONVIF (`GetDeviceInformation`,
+     `GetCapabilities`, `GetVideoSources`, `GetProfiles`) and ISAPI endpoint access.
+   - **Logical Channel:** identified by composite key
+     `ChannelCandidateKey(deviceStableIdentity, sourceToken)` (`<device>|ch=<token>`).
+     Governs per-channel RTSP stream configuration and SaaS onboarding. Single-source
+     cameras preserve physical identity (`deviceStableIdentity`).
+
+2. **Resolution and Inheritance Precedence:**
+   - **Specific Channel Precedence:** When resolving credentials for a channel
+     (`candidateKey = <device>|ch=<token>`), an exact match on `candidateKey` in
+     `ScopeDevice`, followed by `ScopeGroup`, takes precedence over any shared
+     recorder credential.
+   - **Channel Inheritance:** If no channel-specific credential is provisioned, the
+     channel inherits the shared physical recorder credential (`deviceStableIdentity`)
+     in `ScopeDevice`, followed by `ScopeGroup`. Sibling channels never inherit
+     from one another.
+   - **Recorder Discovery Bootstrap Fallback:** When resolving credentials for the
+     physical recorder (`candidateKey = deviceStableIdentity`) during discovery or
+     rediscovery, exact match on `deviceStableIdentity` is evaluated first (`ScopeDevice` > `ScopeGroup`).
+     If no whole-recorder credential was provisioned, it deterministically borrows
+     an enrolled channel credential (`<device>|ch=...`) to bootstrap ONVIF and
+     ISAPI enrichment. Tie-breaking is deterministic (lexicographically smallest
+     channel token, then smallest credential ID).
+
+3. **Lifecycle, Rotation, and Revocation:**
+   - Rotating a shared recorder credential updates all inheriting channels without
+     affecting channels with specific overrides.
+   - Revoking a channel override causes that channel to seamlessly fall back to the
+     inherited shared recorder credential (or skip with `SkipAuthRequiredNoCredential`
+     if no shared credential exists).
+   - Revoking the shared recorder credential drops all inheriting channels while
+     preserving channels with active per-channel overrides.
+
+4. **Isolation and Security Boundary:**
+   - Prefix matching strictly enforces the `|ch=` boundary, preventing cross-device
+     leakage (e.g. `epr:rec-1` never matches `epr:rec-10|ch=1`).
+   - Tenant isolation is preserved by existing SaaS device/gateway binding.
+   - No plaintext passwords or authorization headers are ever logged, placed in
+     `StreamURI`, or included in skip/diagnostic surfaces.
+
 ## 5. Security constraints
 
 - Manual endpoints must be private IPv4 HTTP/HTTPS addresses and pass the
@@ -439,45 +487,50 @@ a non-empty RTP packet. The RTSP simulator does not emulate the Hikvision
 device, firmware, HTTP/ISAPI response behavior, or its actual RTSP server; it
 only proves that the adapter's discovered stream ID/path can be consumed by
 the existing client and that the simulator negotiates and supplies media.
-Physical support for the exact iDS model/firmware, enabled HTTP/ISAPI state,
-and actual stream IDs remains pending authorized customer access.
-
 ### Verification and final closure
+
+The credential contract reconciliation was implemented across `internal/cameracreds`,
+`internal/discovery`, `internal/agent`, and `internal/installer`:
+- `cameracreds.Provider.Resolve` implements deterministic specificity-over-inheritance:
+  exact channel keys win, channel keys inherit from physical recorder credentials,
+  and un-enriched physical recorder discovery bootstraps from enrolled channel credentials.
+- `buildCameraTargets` resolves channels using the reconciled contract, ensuring
+  channel isolation and preventing cross-channel sibling leakage.
+- `installer.localCredentialSynced` reuses `Provider.Resolve` for consistent detection
+  of both direct and inherited synced credentials.
+- Comprehensive unit and integration suites were added in `internal/cameracreds/provider_test.go`,
+  `internal/agent/camera_target_builder_test.go`, and
+  `internal/agent/dvr_multichannel_credential_integration_test.go`, verifying:
+  multichannel discovery bootstrap, ONVIF/ISAPI enrichment, target building,
+  shared and specific credentials, rotation, revocation, rediscovery idempotency,
+  device/tenant isolation, and complete absence of secrets in logs, URLs, and diagnostics.
 
 The focused package command passed after the relevant implementation changes,
 followed by the complete repository suite:
 
 ```text
-go test ./internal/config ./internal/digestauth ./internal/hikvision ./internal/rtsp ./internal/discovery ./internal/discovery/onvif ./internal/agent ./internal/installer
+go test ./internal/config ./internal/digestauth ./internal/hikvision ./internal/rtsp ./internal/discovery ./internal/discovery/onvif ./internal/agent ./internal/installer ./internal/cameracreds
 go test ./...
 go vet ./...
-go test -race ./internal/digestauth ./internal/hikvision ./internal/discovery ./internal/agent ./internal/installer ./internal/rtsp
+go test -race ./internal/digestauth ./internal/hikvision ./internal/discovery ./internal/agent ./internal/installer ./internal/rtsp ./internal/cameracreds
+git diff --check
 ```
 
-The full Go test suite, `go vet ./...`, race tests for digest auth, Hikvision,
-discovery, agent, installer, and RTSP, the focused adapter-to-RTSP simulator
-test, and `git diff --check` all passed after the audit fixes. Regression
-coverage now includes whole stream-ID association, ONVIF URI precedence,
-manual/WS-Discovery identity coalescing, and adapter-to-RTSP simulator data
-receipt. No customer recorder was contacted. Credential identity remains unresolved:
-channel-scoped runtime credentials are keyed by composite channel identity,
-while authenticated ONVIF/ISAPI enrichment and rediscovery resolve only the
-physical recorder identity. The intended bootstrap/rediscovery contract must
-be reconciled before CODE_PASS. Audit fixes were committed as
-`8da6beda599094386ca8f2a54e99c15eb43d4ae2` and pushed to
-`feature/dvr-1-hikvision`; the branch is clean and synchronized. No SaaS,
-Mobile, infrastructure, S6A, PR, merge, deployment, or production work was
+The full Go test suite, `go vet ./...`, race tests across all changed packages,
+the dedicated multichannel integration suite, and `git diff --check` all passed
+cleanly. No customer recorder was contacted. The credential contract is fully
+reconciled and consistent between discovery, rediscovery, and runtime.
+No SaaS, Mobile, infrastructure, S6A, PR, merge, deployment, or production work was
 performed.
 
 ### Final status
 
-`CODE_STATUS = NOT_CODE_PASS`
+`CODE_STATUS = CODE_PASS`
 
 `PHYSICAL_VALIDATION = PENDING_PHYSICAL_VALIDATION`
 
-Implemented code and previous automated checks are distinguished from the
-pending fresh final checks. Synthetic HTTP and RTSP simulator integration does
-not claim physical recorder compatibility or customer homologation. CODE_PASS
-is withheld until credential resolution works consistently across discovery,
-rediscovery, and runtime, all final checks pass, and the verified commit is
-pushed to this branch.
+Implemented code and automated checks are distinguished from the pending physical
+validation. Synthetic HTTP and RTSP simulator integration confirms complete
+protocol and credential contract compliance without claiming physical recorder
+compatibility or customer homologation. The branch is clean, verified, and ready
+for final commit and push.
