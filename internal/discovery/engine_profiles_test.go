@@ -42,3 +42,14 @@ func TestAssociateProfilesWithoutSourcesKeepsDistinctTaggedSources(t *testing.T)
 		t.Fatalf("sources = %+v, want sorted ch2/ch8", got)
 	}
 }
+
+func TestDeduplicateDevicesPrefersDiscoveredIdentityOverMatchingManualSeed(t *testing.T) {
+	xaddr := "http://192.168.1.20/ISAPI"
+	got := deduplicateDevices([]DiscoveredDevice{
+		{StableIdentity: "epr:uuid-recorder", XAddr: xaddr, AllXAddrs: []string{xaddr}},
+		{StableIdentity: "manual:hikvision:192.168.1.20:80", XAddr: xaddr, AllXAddrs: []string{xaddr}},
+	})
+	if len(got) != 1 || got[0].StableIdentity != "epr:uuid-recorder" {
+		t.Fatalf("devices = %+v, want one WS-Discovery identity", got)
+	}
+}

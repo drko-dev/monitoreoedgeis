@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -280,6 +281,9 @@ func deduplicateRawCandidates(raw []wsdiscovery.DiscoveredRawCandidate) []Discov
 func deduplicateDevices(devices []DiscoveredDevice) []DiscoveredDevice {
 	byIdentity := make(map[string]DiscoveredDevice, len(devices))
 	for _, device := range devices {
+		if strings.HasPrefix(device.StableIdentity, "manual:hikvision:") && hasMatchingDiscoveredEndpoint(byIdentity, device.XAddr) {
+			continue
+		}
 		if previous, ok := byIdentity[device.StableIdentity]; ok {
 			if len(device.AllXAddrs) > len(previous.AllXAddrs) {
 				previous.AllXAddrs = device.AllXAddrs
@@ -297,6 +301,23 @@ func deduplicateDevices(devices []DiscoveredDevice) []DiscoveredDevice {
 		out = append(out, device)
 	}
 	return out
+}
+
+func hasMatchingDiscoveredEndpoint(devices map[string]DiscoveredDevice, endpoint string) bool {
+	for _, device := range devices {
+		if strings.HasPrefix(device.StableIdentity, "manual:hikvision:") {
+			continue
+		}
+		if device.XAddr == endpoint {
+			return true
+		}
+		for _, xaddr := range device.AllXAddrs {
+			if xaddr == endpoint {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // enrichCandidates runs SOAP enrichment concurrently over a worker pool of at most 4 goroutines.
@@ -439,8 +460,13 @@ func candidateProfilesContainURI(source VideoSource, uri string) bool {
 	if uri == "" {
 		return false
 	}
+	u, err := url.Parse(uri)
+	if err != nil {
+		return false
+	}
+	streamPath := strings.TrimSuffix(u.Path, "/")
 	for _, profile := range source.Profiles {
-		if profile.StreamID > 0 && strings.Contains(uri, "/channels/"+strconv.Itoa(profile.StreamID)) {
+		if profile.StreamID > 0 && strings.HasSuffix(streamPath, "/channels/"+strconv.Itoa(profile.StreamID)) {
 			return true
 		}
 	}

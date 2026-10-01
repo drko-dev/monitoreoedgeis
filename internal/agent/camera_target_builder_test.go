@@ -69,6 +69,17 @@ func TestBuildCameraTargets_MainSubSelection(t *testing.T) {
 	}
 }
 
+func TestSelectProfilePrefersONVIFURIOverConstructedFallback(t *testing.T) {
+	profiles := []discovery.MediaProfile{
+		{Token: "hikvision:stream:102", StreamURI: "rtsp://10.0.0.5/ISAPI/Streaming/channels/102", StreamURIOrigin: "hikvision_constructed", Role: discovery.StreamRoleSubStream},
+		{Token: "zz-onvif", StreamURI: "rtsp://10.0.0.5/custom/onvif", StreamURIOrigin: "onvif", Role: discovery.StreamRoleSubStream},
+	}
+	got, ok := selectProfile(profiles, "sub")
+	if !ok || got.Token != "zz-onvif" {
+		t.Fatalf("selected profile = %+v, ok=%v; want ONVIF profile", got, ok)
+	}
+}
+
 func TestBuildCameraTargets_SingleProfileFallback(t *testing.T) {
 	// Only one usable profile and its Role does not match desiredRole:
 	// fall back to it explicitly rather than skipping.
@@ -168,6 +179,34 @@ func TestBuildCameraTargets_MultichannelProducesOneTargetPerChannel(t *testing.T
 	}
 	if targets[0].RTSPPath == targets[1].RTSPPath {
 		t.Fatalf("expected each channel to resolve its own stream, got identical paths: %+v", targets)
+	}
+}
+
+func TestBuildCameraTargets_MultichannelUsesChannelCredentials(t *testing.T) {
+	deviceKey := "epr:nvr-channel-credentials"
+	dev := discovery.DiscoveredDevice{
+		StableIdentity: deviceKey, AuthRequired: true,
+		VideoSources: []discovery.VideoSource{
+			{SourceToken: "ch1", Profiles: []discovery.MediaProfile{{Token: "p1", StreamURI: "rtsp://10.0.0.5/1"}}},
+			{SourceToken: "ch2", Profiles: []discovery.MediaProfile{{Token: "p2", StreamURI: "rtsp://10.0.0.5/2"}}},
+		},
+	}
+	resolve := func(key string) (string, string, bool) {
+		switch key {
+		case discovery.ChannelCandidateKey(deviceKey, "ch1"):
+			return "operator-1", "secret-1", true
+		case discovery.ChannelCandidateKey(deviceKey, "ch2"):
+			return "operator-2", "secret-2", true
+		default:
+			return "", "", false
+		}
+	}
+	targets, skips := buildCameraTargets([]discovery.DiscoveredDevice{dev}, resolve, "sub")
+	if len(skips) != 0 || len(targets) != 2 {
+		t.Fatalf("targets=%+v skips=%+v, want two independently authorized channels", targets, skips)
+	}
+	if targets[0].Username != "operator-1" || targets[0].Password != "secret-1" || targets[1].Username != "operator-2" || targets[1].Password != "secret-2" {
+		t.Fatalf("channel credentials were not kept separate: %+v", targets)
 	}
 }
 

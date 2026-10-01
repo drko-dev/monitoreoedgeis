@@ -1,6 +1,6 @@
 # DVR-1 — Hikvision DVR/NVR Multichannel Integration
 
-Status: **PHASE_B_IMPLEMENTED; GO_TEST_AND_VET_PASS; RACE_TESTS_PASS; PUSH_PENDING**.
+Status: **IMPLEMENTED; AUTOMATED_TESTS_PASS; CODE_PASS_WITHHELD**.
 Physical compatibility with the customer recorder remains
 **PENDING_PHYSICAL_VALIDATION**.
 
@@ -430,14 +430,19 @@ the manufacturer as Hikvision; a manual endpoint is explicitly treated as
 Hikvision. ONVIF remains the identification path, not a new undocumented
 ISAPI probe.
 
-The adapter returns the configured channel snapshot; stream negotiation,
-authentication, codec confirmation, and frame reception remain the job of the
-existing RTSP validation/runtime path. Existing RTSP client/simulator coverage
-is not equivalent to probing an adapter-generated URL against a real recorder.
+The adapter returns the configured channel snapshot. Automated simulator
+integration now carries an ISAPI-discovered stream ID through the Hikvision
+URI resolver, substitutes only the simulator's ephemeral local host/port,
+parses that URI through the existing RTSP target parser, completes RTSP
+DESCRIBE/SETUP/PLAY negotiation, checks the negotiated H.264 codec, and reads
+a non-empty RTP packet. The RTSP simulator does not emulate the Hikvision
+device, firmware, HTTP/ISAPI response behavior, or its actual RTSP server; it
+only proves that the adapter's discovered stream ID/path can be consumed by
+the existing client and that the simulator negotiates and supplies media.
 Physical support for the exact iDS model/firmware, enabled HTTP/ISAPI state,
 and actual stream IDs remains pending authorized customer access.
 
-### Verification recorded during Phase B
+### Verification and final closure
 
 The focused package command passed after the relevant implementation changes,
 followed by the complete repository suite:
@@ -449,8 +454,28 @@ go vet ./...
 go test -race ./internal/digestauth ./internal/hikvision ./internal/discovery ./internal/agent ./internal/installer ./internal/rtsp
 ```
 
-All three commands passed locally. Hikvision HTTP checks use synthetic
-`httptest` responses, and existing RTSP simulator tests also pass; no customer
-recorder was contacted. These results do not prove that the target DVR accepts
-the generated RTSP URI or delivers frames. Clean Git state and push verification
-remain required before `CODE_PASS`.
+The full Go test suite, `go vet ./...`, race tests for digest auth, Hikvision,
+discovery, agent, installer, and RTSP, the focused adapter-to-RTSP simulator
+test, and `git diff --check` all passed after the audit fixes. Regression
+coverage now includes whole stream-ID association, ONVIF URI precedence,
+manual/WS-Discovery identity coalescing, and adapter-to-RTSP simulator data
+receipt. No customer recorder was contacted. Credential identity remains unresolved:
+channel-scoped runtime credentials are keyed by composite channel identity,
+while authenticated ONVIF/ISAPI enrichment and rediscovery resolve only the
+physical recorder identity. The intended bootstrap/rediscovery contract must
+be reconciled before CODE_PASS. The current local changes are not yet committed
+or pushed. No SaaS, Mobile, infrastructure, S6A, PR, merge, deployment, or
+production work was performed.
+
+### Final status
+
+`CODE_STATUS = NOT_CODE_PASS`
+
+`PHYSICAL_VALIDATION = PENDING_PHYSICAL_VALIDATION`
+
+Implemented code and previous automated checks are distinguished from the
+pending fresh final checks. Synthetic HTTP and RTSP simulator integration does
+not claim physical recorder compatibility or customer homologation. CODE_PASS
+is withheld until credential resolution works consistently across discovery,
+rediscovery, and runtime, all final checks pass, and the verified commit is
+pushed to this branch.
