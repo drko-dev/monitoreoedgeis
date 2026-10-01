@@ -1,6 +1,6 @@
 # DVR-1 — Hikvision DVR/NVR Multichannel Integration
 
-Status: **IMPLEMENTED; AUTOMATED_TESTS_PASS; CODE_PASS_WITHHELD**.
+Status: **IMPLEMENTED; AUTOMATED_TESTS_PASS; PUSHED; CODE_PASS_WITHHELD**.
 Physical compatibility with the customer recorder remains
 **PENDING_PHYSICAL_VALIDATION**.
 
@@ -463,9 +463,11 @@ receipt. No customer recorder was contacted. Credential identity remains unresol
 channel-scoped runtime credentials are keyed by composite channel identity,
 while authenticated ONVIF/ISAPI enrichment and rediscovery resolve only the
 physical recorder identity. The intended bootstrap/rediscovery contract must
-be reconciled before CODE_PASS. The current local changes are not yet committed
-or pushed. No SaaS, Mobile, infrastructure, S6A, PR, merge, deployment, or
-production work was performed.
+be reconciled before CODE_PASS. Audit fixes were committed as
+`8da6beda599094386ca8f2a54e99c15eb43d4ae2` and pushed to
+`feature/dvr-1-hikvision`; the branch is clean and synchronized. No SaaS,
+Mobile, infrastructure, S6A, PR, merge, deployment, or production work was
+performed.
 
 ### Final status
 
