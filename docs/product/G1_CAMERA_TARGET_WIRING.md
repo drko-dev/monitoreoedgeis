@@ -489,3 +489,27 @@ go test -race ./internal/agent ./internal/rtsp ./internal/processing -count=10
 - **SOFTWARE 1.0: STILL BLOCKED** by the remaining non-G1 blockers (B2–B12).
 
 No merge, no deploy, no tag, no SaaS change.
+
+## 12. Multi-camera supervision test (added on `feature/dvr-1-hikvision`)
+
+The feed into `rtsp.Manager.SetTargets` is `cameraTargetReconciler`
+(`internal/agent/camera_target_reconciler.go`, constructed in
+`internal/agent/agent.go`), driven by discovery inventory and synced camera
+credentials. `TestG1_MultiCameraSupervisionIsolationAndLifecycle`
+(`internal/agent/camera_target_multicam_integration_test.go`) adds the coverage
+that the single-camera test could not give, using three real `rtsptest`
+simulators with Digest auth through the real `rtsp.Manager` and
+`processing.Manager`:
+
+- three cameras online at once, each with its own processing pipeline;
+- one camera cut mid-stream: the others keep receiving packets and the cut
+  one reconnects by itself;
+- a credential change restarts only that camera (auth failure is isolated and
+  recovers with the right credential);
+- removing a target stops only that supervisor;
+- neither the RTSP snapshot nor the video-pipeline health summary contains the
+  username or password.
+
+Status: UNIT_TESTED and INTEGRATION_TESTED against simulators (also under
+`-race`). REAL_CAMERA_VERIFIED remains NO; decoding real H.264 and any physical
+NVR stay NOT_VALIDATED.
