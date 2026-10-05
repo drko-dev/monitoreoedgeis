@@ -44,7 +44,7 @@ func SplitChannelCandidateKey(candidateKey string) (deviceKey, sourceToken strin
 //     If candidateKey is a physical device key (no "|ch="), and no direct device
 //     credential matched in step 1:
 //     - a DEVICE-scoped credential whose CandidateKeys contains ANY channel of
-//       this device ("<candidateKey>|ch=...");
+//     this device ("<candidateKey>|ch=...");
 //     - otherwise a GROUP-scoped credential containing any channel of this device.
 //     When multiple channel credentials exist, the tie-break is deterministic:
 //     lexicographically smallest channel key first, then lexicographically smallest ID.
