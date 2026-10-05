@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -16,6 +17,15 @@ type FFmpegDecoderConfig struct {
 	// BinaryPath is the ffmpeg executable, resolved via exec.LookPath.
 	// Empty defaults to "ffmpeg" (PATH lookup).
 	BinaryPath string
+	// Codec is H264 (default) or H265/HEVC and selects ffmpeg's elementary
+	// stream demuxer for pipe:0.
+	Codec string
+	// OutputWidth/OutputHeight are used only when the source dimensions are
+	// unknown. In that case ffmpeg probes the dimensions from the elementary
+	// stream and scales to this fixed output so the rawvideo reader still has
+	// a deterministic frame size.
+	OutputWidth  int
+	OutputHeight int
 	// QueueDepth bounds the raw decoded-frame output channel
 	// (GEOCAM_VIDEO_DECODE_QUEUE_DEPTH) — deliberately small, since each
 	// yuv420p frame is large. <=0 defaults to 4.
@@ -76,7 +86,7 @@ func decodeQueueDepth(configured int) int {
 	return configured
 }
 
-// FFmpegDecoder decodes one camera's H.264 access units by running ffmpeg as
+// FFmpegDecoder decodes one camera's H.264 or H.265 access units by running ffmpeg as
 // an OS subprocess (os/exec, no cgo): Annex-B access units are written to
 // its stdin, raw yuv420p frames are read back from its stdout.
 //
@@ -115,7 +125,7 @@ type FFmpegDecoder struct {
 	droppedCount atomic.Int64
 }
 
-// NewFFmpegDecoder starts an ffmpeg subprocess decoding H.264 at the given
+// NewFFmpegDecoder starts an ffmpeg subprocess decoding H.264 or H.265 at the given
 // (even) width/height, injecting spropParameterSets (if any) before any real
 // access unit so the decoder has SPS/PPS even if the camera doesn't repeat
 // them in-band.
@@ -123,11 +133,16 @@ func NewFFmpegDecoder(cfg FFmpegDecoderConfig, width, height int, spropParameter
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if width <= 0 || height <= 0 {
-		return nil, fmt.Errorf("processing: ffmpeg decoder requires known width/height, got %dx%d", width, height)
+	decodeWidth, decodeHeight := width, height
+	needsScaleProbe := width <= 0 || height <= 0
+	if needsScaleProbe {
+		decodeWidth, decodeHeight = cfg.OutputWidth, cfg.OutputHeight
+		if decodeWidth <= 0 || decodeHeight <= 0 {
+			return nil, fmt.Errorf("processing: ffmpeg decoder source dimensions unknown (%dx%d) and no fixed output dimensions configured", width, height)
+		}
 	}
-	if width%2 != 0 || height%2 != 0 {
-		return nil, fmt.Errorf("processing: ffmpeg decoder requires even width/height for yuv420p, got %dx%d", width, height)
+	if decodeWidth%2 != 0 || decodeHeight%2 != 0 {
+		return nil, fmt.Errorf("processing: ffmpeg decoder requires even output width/height for yuv420p, got %dx%d", decodeWidth, decodeHeight)
 	}
 
 	bin := cfg.BinaryPath
@@ -139,12 +154,22 @@ func NewFFmpegDecoder(cfg FFmpegDecoderConfig, width, height int, spropParameter
 		return nil, fmt.Errorf("processing: ffmpeg binary %q not found: %w", bin, err)
 	}
 
-	cmd := exec.Command(resolved,
-		"-hide_banner", "-loglevel", "error",
-		"-f", "h264", "-i", "pipe:0",
-		"-f", "rawvideo", "-pix_fmt", "yuv420p",
-		"-an", "-sn", "pipe:1",
-	)
+	inputFormat := "h264"
+	switch {
+	case cfg.Codec == "" || strings.EqualFold(cfg.Codec, "H264"):
+		inputFormat = "h264"
+	case strings.EqualFold(cfg.Codec, "H265"), strings.EqualFold(cfg.Codec, "HEVC"):
+		inputFormat = "hevc"
+	default:
+		return nil, fmt.Errorf("processing: ffmpeg decoder unsupported codec %q", cfg.Codec)
+	}
+
+	args := []string{"-hide_banner", "-loglevel", "error", "-f", inputFormat, "-i", "pipe:0"}
+	if needsScaleProbe {
+		args = append(args, "-vf", fmt.Sprintf("scale=%d:%d", decodeWidth, decodeHeight))
+	}
+	args = append(args, "-f", "rawvideo", "-pix_fmt", "yuv420p", "-an", "-sn", "pipe:1")
+	cmd := exec.Command(resolved, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("processing: ffmpeg stdin pipe: %w", err)
@@ -166,11 +191,11 @@ func NewFFmpegDecoder(cfg FFmpegDecoderConfig, width, height int, spropParameter
 		frames: make(chan DecodedFrame, decodeQueueDepth(cfg.QueueDepth)), // deliberately small — see doc comment
 		done:   make(chan struct{}),
 		logger: logger,
-		width:  width,
-		height: height,
+		width:  decodeWidth,
+		height: decodeHeight,
 		// yuv420p: full-resolution Y plane + two quarter-resolution
 		// chroma planes.
-		frameSize: width*height + 2*((width/2)*(height/2)),
+		frameSize: decodeWidth*decodeHeight + 2*((decodeWidth/2)*(decodeHeight/2)),
 	}
 
 	for _, nalu := range spropParameterSets {

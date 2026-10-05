@@ -39,6 +39,18 @@ var (
 	errSTAPAEmpty  = errors.New("processing: stap-a with no aggregated NALUs")
 )
 
+type DepacketizerStats struct {
+	IncompleteAUsDropped int64
+	ReassemblyErrors     int64
+	UnsupportedNALTypes  int64
+	OversizedAUsDropped  int64
+}
+
+type RTPDepacketizer interface {
+	Push(hdr RTPHeader, payload []byte, recvAt time.Time) (*AccessUnit, error)
+	Stats() DepacketizerStats
+}
+
 // H264Depacketizer reconstructs H.264 access units from RTP packets (RFC
 // 6184): single NALU, FU-A fragmentation, and STAP-A aggregation. STAP-B,
 // MTAP16/24, FU-B and reserved types are explicitly unsupported — counted
@@ -101,6 +113,15 @@ type H264Depacketizer struct {
 // NewH264Depacketizer creates a depacketizer with fresh reassembly state.
 func NewH264Depacketizer() *H264Depacketizer {
 	return &H264Depacketizer{}
+}
+
+func (d *H264Depacketizer) Stats() DepacketizerStats {
+	return DepacketizerStats{
+		IncompleteAUsDropped: d.IncompleteAUsDropped,
+		ReassemblyErrors:     d.ReassemblyErrors,
+		UnsupportedNALTypes:  d.UnsupportedNALTypes,
+		OversizedAUsDropped:  d.OversizedAUsDropped,
+	}
 }
 
 // Push feeds one already-parsed RTP header and its payload (video channel

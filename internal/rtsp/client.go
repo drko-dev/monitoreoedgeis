@@ -105,11 +105,15 @@ func (s *Session) handshake(timeout time.Duration) error {
 		return fmt.Errorf("rtsp: describe: %w", err)
 	}
 
-	// 2. Extract video control track, codec, and H.264 SPS/PPS (if
-	// published) from SDP
+	// 2. Extract video control track, codec, and codec parameter sets (if
+	// published) from SDP. H.264 uses SPS/PPS; H.265 uses VPS/SPS/PPS.
 	setupURI := s.extractVideoSetupURI(sdpBody)
-	s.spropParameterSets = extractH264SpropParameterSets(sdpBody)
 	s.sdpCodec = extractVideoRTPMapCodec(sdpBody)
+	if strings.EqualFold(s.sdpCodec, "H265") || strings.EqualFold(s.sdpCodec, "HEVC") {
+		s.spropParameterSets = extractH265SpropParameterSets(sdpBody)
+	} else {
+		s.spropParameterSets = extractH264SpropParameterSets(sdpBody)
+	}
 
 	// 3. SETUP
 	if err := s.setup(setupURI, timeout); err != nil {
@@ -281,6 +285,56 @@ func extractH264SpropParameterSets(sdp string) [][]byte {
 			nalus = append(nalus, raw)
 		}
 		return nalus
+	}
+	return nil
+}
+
+// extractH265SpropParameterSets parses RFC 7798 fmtp parameters for the
+// selected video payload type. Cameras commonly expose VPS/SPS/PPS as
+// sprop-vps, sprop-sps and sprop-pps. Values are returned as raw NAL units
+// without Annex-B start codes, in VPS/SPS/PPS order when present.
+func extractH265SpropParameterSets(sdp string) [][]byte {
+	lines := strings.Split(sdp, "\n")
+	inVideo := false
+	videoPT := ""
+	for _, rawLine := range lines {
+		line := strings.TrimRight(rawLine, "\r\n")
+		switch {
+		case strings.HasPrefix(line, "m=video"):
+			inVideo = true
+			if fields := strings.Fields(line); len(fields) >= 4 {
+				videoPT = fields[3]
+			}
+			continue
+		case strings.HasPrefix(line, "m="):
+			inVideo = false
+			continue
+		}
+		if !inVideo || videoPT == "" || !strings.HasPrefix(line, "a=fmtp:"+videoPT) {
+			continue
+		}
+		var out [][]byte
+		for _, key := range []string{"sprop-vps=", "sprop-sps=", "sprop-pps="} {
+			idx := strings.Index(line, key)
+			if idx < 0 {
+				continue
+			}
+			val := line[idx+len(key):]
+			if semi := strings.Index(val, ";"); semi >= 0 {
+				val = val[:semi]
+			}
+			for _, b64 := range strings.Split(val, ",") {
+				b64 = strings.TrimSpace(b64)
+				if b64 == "" {
+					continue
+				}
+				raw, err := base64.StdEncoding.DecodeString(b64)
+				if err == nil && len(raw) > 0 {
+					out = append(out, raw)
+				}
+			}
+		}
+		return out
 	}
 	return nil
 }

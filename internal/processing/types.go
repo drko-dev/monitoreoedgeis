@@ -3,10 +3,8 @@
 // buffer, and frame routing with backpressure — all downstream of the
 // existing internal/rtsp transport (Hito G), never a second RTSP client.
 //
-// Supported codec: H.264 only. H.265 is not depacketized/decoded this
-// milestone; constructing a pipeline for a StreamDescriptor with
-// Codec=="H265" returns ErrUnsupportedCodec explicitly, never a silent
-// no-op.
+// Supported codecs: H.264 (RFC 6184) and H.265/HEVC (RFC 7798). Unknown
+// negotiated codecs remain fail-closed and never become silent no-op pipelines.
 package processing
 
 import (
@@ -15,10 +13,10 @@ import (
 )
 
 // ErrUnsupportedCodec is returned when a camera's negotiated codec has no
-// depacketizer/decoder implementation in this milestone (e.g. H.265).
+// depacketizer/decoder implementation.
 var ErrUnsupportedCodec = errors.New("processing: unsupported codec")
 
-// AccessUnit is one or more NAL units that together form a decodable H.264
+// AccessUnit is one or more NAL units that together form a decodable H.264/H.265
 // frame boundary (RFC 6184 §5.1 marker-bit boundary, with a documented
 // fallback — see depacketizer.go). NALUs are raw (no Annex-B start code);
 // the decoder prefixes them.

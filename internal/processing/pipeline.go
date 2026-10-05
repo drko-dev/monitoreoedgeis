@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,10 +29,10 @@ type cameraPipeline struct {
 	router       *Router
 	logger       *slog.Logger
 
-	packetCh chan packetItem   // OnPacket -> depacketizeLoop, drop-new when full
-	auCh     chan AccessUnit   // depacketizeLoop -> feedLoop, drop-new when full
-	depack   *H264Depacketizer // owned solely by depacketizeLoop
-	sampler  *Sampler          // owned solely by readLoop
+	packetCh chan packetItem // OnPacket -> depacketizeLoop, drop-new when full
+	auCh     chan AccessUnit // depacketizeLoop -> feedLoop, drop-new when full
+	depack   RTPDepacketizer // owned solely by depacketizeLoop
+	sampler  *Sampler        // owned solely by readLoop
 	ring     *RingBuffer
 
 	// motion is nil unless cfg.Hybrid.Enabled; owned solely by readLoop,
@@ -100,6 +101,10 @@ func newCameraPipeline(candidateKey string, desc rtsp.StreamDescriptor, cfg Conf
 	if logger == nil {
 		logger = slog.Default()
 	}
+	var depack RTPDepacketizer = NewH264Depacketizer()
+	if strings.EqualFold(desc.Codec, "H265") || strings.EqualFold(desc.Codec, "HEVC") {
+		depack = NewH265Depacketizer()
+	}
 	p := &cameraPipeline{
 		candidateKey: candidateKey,
 		descriptor:   desc,
@@ -108,7 +113,7 @@ func newCameraPipeline(candidateKey string, desc rtsp.StreamDescriptor, cfg Conf
 		logger:       logger,
 		packetCh:     make(chan packetItem, cfg.QueueDepth),
 		auCh:         make(chan AccessUnit, cfg.QueueDepth),
-		depack:       NewH264Depacketizer(),
+		depack:       depack,
 		sampler:      newPipelineSampler(cfg),
 		ring:         NewRingBuffer(cfg.RingBufferSize),
 		doneCh:       make(chan struct{}),
@@ -120,7 +125,7 @@ func newCameraPipeline(candidateKey string, desc rtsp.StreamDescriptor, cfg Conf
 	}
 	p.decoderFactory = func() (VideoDecoder, error) {
 		return NewFFmpegDecoder(
-			FFmpegDecoderConfig{BinaryPath: cfg.FFmpegPath, QueueDepth: cfg.DecodeQueueDepth},
+			FFmpegDecoderConfig{BinaryPath: cfg.FFmpegPath, QueueDepth: cfg.DecodeQueueDepth, Codec: desc.Codec, OutputWidth: cfg.OutputWidth, OutputHeight: cfg.OutputHeight},
 			desc.Width, desc.Height,
 			desc.SpropParameterSets,
 			logger,
@@ -389,16 +394,13 @@ func (p *cameraPipeline) depacketizeLoop(ctx context.Context) {
 				continue
 			}
 			au, _ := p.depack.Push(hdr, hdr.Payload(item.payload), item.recvAt)
-			// depack is owned solely by this goroutine; publishing its
-			// counters here (rather than reading them from Status(), a
-			// different goroutine) keeps it race-free without atomics.
-			p.depackIncomplete.Store(p.depack.IncompleteAUsDropped)
-			p.depackErrors.Store(p.depack.ReassemblyErrors)
-			// UnsupportedNALTypes and OversizedAUsDropped were counted by the
-			// depacketizer but never republished, so wire data the Edge could
-			// not use was dropped with no operator-visible signal at all.
-			p.depackUnsupported.Store(p.depack.UnsupportedNALTypes)
-			p.depackOversized.Store(p.depack.OversizedAUsDropped)
+			// depack is owned solely by this goroutine; publish a snapshot of
+			// its counters rather than reading mutable state from Status().
+			stats := p.depack.Stats()
+			p.depackIncomplete.Store(stats.IncompleteAUsDropped)
+			p.depackErrors.Store(stats.ReassemblyErrors)
+			p.depackUnsupported.Store(stats.UnsupportedNALTypes)
+			p.depackOversized.Store(stats.OversizedAUsDropped)
 			if au == nil {
 				continue
 			}

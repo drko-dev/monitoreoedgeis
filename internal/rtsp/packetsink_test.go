@@ -389,3 +389,19 @@ func TestRTSP_ParseInterleavedChannels(t *testing.T) {
 		})
 	}
 }
+
+func TestRTSP_ExtractH265SpropParameterSets(t *testing.T) {
+	sdp := "v=0\r\n" +
+		"m=video 0 RTP/AVP 98\r\n" +
+		"a=rtpmap:98 H265/90000\r\n" +
+		"a=fmtp:98 sprop-vps=QAEMAf//AWAAAAMAkAAAAwAAAwBdoAKAgC0WNrkk;sprop-sps=QgEBAWAAAAMAkAAAAwAAAwBdoAKAgC0WWVmkkyuAQAAAAwBAAAAPIQg=;sprop-pps=RAHBcrRiQA==\r\n"
+	got := extractH265SpropParameterSets(sdp)
+	if len(got) != 3 {
+		t.Fatalf("expected VPS/SPS/PPS, got %d", len(got))
+	}
+	for i, n := range got {
+		if len(n) == 0 {
+			t.Fatalf("parameter set %d empty", i)
+		}
+	}
+}

@@ -189,7 +189,7 @@ func (m *Manager) OnPacket(candidateKey string, payload []byte, recvAt time.Time
 			m.mu.Unlock()
 			return
 		}
-		if desc.Codec != "" && !strings.EqualFold(desc.Codec, "H264") {
+		if desc.Codec != "" && !strings.EqualFold(desc.Codec, "H264") && !strings.EqualFold(desc.Codec, "H265") && !strings.EqualFold(desc.Codec, "HEVC") {
 			m.unsupported[candidateKey] = true
 			m.mu.Unlock()
 			m.logger.Warn("unsupported codec for video pipeline, stream will not be decoded",
