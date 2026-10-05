@@ -184,7 +184,10 @@ class ServeSocketTests(unittest.TestCase):
             try:
                 s.connect(sock_path)
                 return s
-            except FileNotFoundError:
+            except (FileNotFoundError, ConnectionRefusedError):
+                # bind() creates the Unix socket path immediately before
+                # listen(); a fast client can observe that tiny window.
+                # Retry both "not created yet" and "created but not listening".
                 s.close()
                 time.sleep(0.02)
         raise TimeoutError("worker socket never appeared")

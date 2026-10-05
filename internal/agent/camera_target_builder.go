@@ -23,6 +23,10 @@ const (
 	// StreamURI, or none matches the desired role and more than one
 	// candidate remains without an unambiguous fallback.
 	SkipNoUsableProfile TargetSkipReason = "no_usable_profile"
+	// SkipChannelDisabled means a recorder explicitly reports the channel as
+	// disabled. Unknown availability remains eligible because ONVIF does not
+	// define a universal enabled-state signal.
+	SkipChannelDisabled TargetSkipReason = "channel_disabled"
 	// SkipInvalidStreamURI means the selected profile's StreamURI failed
 	// rtsp.ParseTarget (unsupported scheme, missing host, ...).
 	SkipInvalidStreamURI TargetSkipReason = "invalid_stream_uri"
@@ -50,12 +54,11 @@ type TargetSkip struct {
 // with more than one VideoSource, each channel gets its own CandidateKey
 // via discovery.ChannelCandidateKey(StableIdentity, SourceToken) and its own
 // independent rtsp.CameraTarget -- never an IP address, never collapsed
-// into the device's identity alone. The device's credential is resolved
-// once, by its StableIdentity, and shared across all its channels (DVR/NVR
-// devices authenticate once for the whole unit); each channel still gets
-// its own SaaS onboarding record with its own composite CandidateKey (see
-// UX6_DVR_NVR_MULTICHANNEL.md), so per-channel credential rotation and
-// isolation still work independently even though the plaintext is shared.
+// into the device's identity alone. Credentials resolve with specific-over-
+// inherited precedence: an exact match for the channel's composite
+// CandidateKey wins, followed by inheritance from the physical device's
+// StableIdentity if no channel-specific credential was issued. Single-source
+// cameras resolve directly by their physical key.
 // Output is sorted by CandidateKey so callers (and tests) see deterministic
 // ordering regardless of the Inventory's internal map iteration order.
 //
@@ -81,29 +84,19 @@ func buildCameraTargets(
 			continue
 		}
 
-		// The credential is resolved once per physical device and shared
-		// across all its channels -- a DVR/NVR authenticates once for the
-		// whole unit, not once per channel.
-		var username, password string
-		var credOk bool
-		if resolve != nil {
-			username, password, credOk = resolve(deviceKey)
-		}
-
-		if dev.AuthRequired && (!credOk || username == "") {
-			// The device rejected anonymous access and no credential
-			// resolved: never emit a target that is known in advance to
-			// fail authentication, and never guess a default
-			// username/password. This must be evaluated before VideoSources
-			// checks so an un-enriched auth-required device with 0 sources
-			// is correctly reported as auth_required_no_credential. Other
-			// cameras still reconcile.
-			skips = append(skips, TargetSkip{CandidateKey: deviceKey, Reason: SkipAuthRequiredNoCredential})
-			continue
-		}
-
 		if len(dev.VideoSources) == 0 {
-			skips = append(skips, TargetSkip{CandidateKey: deviceKey, Reason: SkipNoVideoSource})
+			reason := SkipNoVideoSource
+			if dev.AuthRequired {
+				var username string
+				var ok bool
+				if resolve != nil {
+					username, _, ok = resolve(deviceKey)
+				}
+				if !ok || username == "" {
+					reason = SkipAuthRequiredNoCredential
+				}
+			}
+			skips = append(skips, TargetSkip{CandidateKey: deviceKey, Reason: reason})
 			continue
 		}
 
@@ -119,6 +112,19 @@ func buildCameraTargets(
 					continue
 				}
 				candidateKey = discovery.ChannelCandidateKey(deviceKey, vs.SourceToken)
+			}
+			if vs.Availability == discovery.ChannelAvailabilityDisabled {
+				skips = append(skips, TargetSkip{CandidateKey: candidateKey, Reason: SkipChannelDisabled})
+				continue
+			}
+			var username, password string
+			var credOk bool
+			if resolve != nil {
+				username, password, credOk = resolve(candidateKey)
+			}
+			if dev.AuthRequired && (!credOk || username == "") {
+				skips = append(skips, TargetSkip{CandidateKey: candidateKey, Reason: SkipAuthRequiredNoCredential})
+				continue
 			}
 
 			profile, ok := selectProfile(vs.Profiles, desiredRole)
@@ -169,14 +175,21 @@ func buildCameraTargets(
 func selectProfile(profiles []discovery.MediaProfile, desiredRole string) (discovery.MediaProfile, bool) {
 	usable := make([]discovery.MediaProfile, 0, len(profiles))
 	for _, p := range profiles {
-		if p.StreamURI != "" {
+		if p.StreamURI != "" && p.Availability != discovery.ChannelAvailabilityDisabled {
 			usable = append(usable, p)
 		}
 	}
 	if len(usable) == 0 {
 		return discovery.MediaProfile{}, false
 	}
-	sort.Slice(usable, func(i, j int) bool { return usable[i].Token < usable[j].Token })
+	sort.Slice(usable, func(i, j int) bool {
+		iONVIF := usable[i].StreamURIOrigin == "onvif"
+		jONVIF := usable[j].StreamURIOrigin == "onvif"
+		if iONVIF != jONVIF {
+			return iONVIF
+		}
+		return usable[i].Token < usable[j].Token
+	})
 
 	for _, p := range usable {
 		if string(p.Role) == desiredRole {

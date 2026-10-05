@@ -224,10 +224,10 @@ func TestNewChannelOnboardingCandidates_OneCandidatePerChannel(t *testing.T) {
 		XAddr:          "http://192.168.1.60/onvif/device_service",
 		AuthRequired:   true,
 		VideoSources: []discovery.VideoSource{
-			{SourceToken: "ch1", Label: "Front door"},
-			{SourceToken: "ch2", Label: "Warehouse"},
-			{SourceToken: "ch3", Label: "Loading dock"},
-			{SourceToken: "ch4", Label: "Office"},
+			{SourceToken: "ch1", ChannelNumber: 1, Label: "Front door", Availability: discovery.ChannelAvailabilityEnabled},
+			{SourceToken: "ch2", ChannelNumber: 4, Label: "Warehouse", Availability: discovery.ChannelAvailabilityDisabled},
+			{SourceToken: "ch3", ChannelNumber: 7, Label: "Loading dock"},
+			{SourceToken: "ch4", ChannelNumber: 8, Label: "Office"},
 		},
 	}
 
@@ -254,6 +254,9 @@ func TestNewChannelOnboardingCandidates_OneCandidatePerChannel(t *testing.T) {
 		}
 		if c.ChannelCount != 4 {
 			t.Fatalf("candidate %d: expected ChannelCount 4, got %d", i, c.ChannelCount)
+		}
+		if c.ChannelNumber != d.VideoSources[i].ChannelNumber || c.ChannelAvailability != d.VideoSources[i].Availability {
+			t.Fatalf("candidate %d: channel number/status = %d/%q, want %d/%q", i, c.ChannelNumber, c.ChannelAvailability, d.VideoSources[i].ChannelNumber, d.VideoSources[i].Availability)
 		}
 	}
 }

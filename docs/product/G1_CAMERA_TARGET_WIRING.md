@@ -3,9 +3,11 @@
 > **STATUS: G1-A (preconditions) + G1-B (wiring) IMPLEMENTED / TESTED LOCAL.**
 > G1 is closed at the code level: the production Agent now actually calls
 > `rtsp.Manager.SetTargets` with real, discovered, credentialed cameras. See
-> §11 for exactly what that does and does not mean — **REAL CAMERA and
-> DVR/NVR stay NOT_VALIDATED**, no physical pilot has run, and Software 1.0
-> readiness still depends on the other B2–B12 blockers. Sections 1–10 below
+> §11 for exactly what that does and does not mean. A physical Hikvision
+> DVR/NVR gateway run was completed on 2026-10-05 (see §13), including seven
+> authenticated RTSP substreams and three simultaneous H.265 Cloud pipelines.
+> This closes the G1 real-recorder transport/decode gap only; broader hardware
+> certification and the 5–10 camera appliance pilot remain separate work. Sections 1–10 below
 > are G1-A's original audit and design; they are left as written because
 > every decision they made is still the one G1-B implemented.
 
@@ -15,6 +17,11 @@ Branch: `feature/hito-z-camera-target-wiring`, stacked on
 @ `4894316d4b63104e72b234801784672cafb56417`.
 
 ## 1. The gap, restated with evidence
+
+> **Historical (G1-A audit).** This describes the state *before* G1-B. It is no
+> longer true: `cameraTargetReconciler` now calls `rtsp.Manager.SetTargets`
+> (`internal/agent/camera_target_reconciler.go:115`, built at
+> `internal/agent/agent.go:439`). See §11 and §12.
 
 `rtsp.Manager.SetTargets` has **no production call site**. Its only non-test
 callers are `internal/perf/scale.go:178` and `internal/perf/decode.go:690`. The
@@ -307,6 +314,9 @@ the wiring, and G1 is still BLOCKED.**
 | Scan/sync success callbacks | **NOT IMPLEMENTED** — G1-B |
 | `internal/agent/failure_lifecycle_test.go` (asserts no credential files exist) | **UNCHANGED** — its update belongs to G1-B, when the agent lifecycle actually changes |
 
+*(G1-A snapshot. The rows marked NOT IMPLEMENTED were delivered by G1-B; see §11.
+The real-camera, pilot and hardware claims below are still not made.)*
+
 Not claimed: G1 closed, camera wiring complete, real camera validated, pilot
 complete, hardware certified, commercial-ready, Software 1.0 READY.
 
@@ -489,3 +499,58 @@ go test -race ./internal/agent ./internal/rtsp ./internal/processing -count=10
 - **SOFTWARE 1.0: STILL BLOCKED** by the remaining non-G1 blockers (B2–B12).
 
 No merge, no deploy, no tag, no SaaS change.
+
+## 12. Multi-camera supervision test (added on `feature/dvr-1-hikvision`)
+
+The feed into `rtsp.Manager.SetTargets` is `cameraTargetReconciler`
+(`internal/agent/camera_target_reconciler.go`, constructed in
+`internal/agent/agent.go`), driven by discovery inventory and synced camera
+credentials. `TestG1_MultiCameraSupervisionIsolationAndLifecycle`
+(`internal/agent/camera_target_multicam_integration_test.go`) adds the coverage
+that the single-camera test could not give, using three real `rtsptest`
+simulators with Digest auth through the real `rtsp.Manager` and
+`processing.Manager`:
+
+- three cameras online at once, each with its own processing pipeline;
+- one camera cut mid-stream: the others keep receiving packets and the cut
+  one reconnects by itself;
+- a credential change restarts only that camera (auth failure is isolated and
+  recovers with the right credential);
+- removing a target stops only that supervisor;
+- neither the RTSP snapshot nor the video-pipeline health summary contains the
+  username or password.
+
+Status: UNIT_TESTED and INTEGRATION_TESTED against simulators (also under
+`-race`). The physical follow-up is recorded in §13.
+
+## 13. Physical Hikvision NVR validation — 2026-10-05
+
+A real Windows Gateway was connected to a Hikvision `DS-7608NXI-K1/VPro`
+(`V4.90.320 build 260313`) with seven configured channels. The run used the
+normal SaaS camera-credential sync and the production target reconciler; no
+credential was embedded in an RTSP URL or written to logs.
+
+Observed results:
+
+- one device credential synchronized and resolved for the physical recorder;
+- discovery expanded the recorder to **7 logical channel targets**;
+- all seven substreams (`102` through `702`) authenticated and stayed `online`
+  concurrently with live RTP packet/byte counters and zero initial reconnects;
+- SDP reported **H.265** on the physical substreams, exposing the previous
+  H.264-only processing limitation; the branch now includes RFC 7798 H.265
+  depacketization plus FFmpeg HEVC decode;
+- the temporary low-power Windows gateway was intentionally capped at three
+  video pipelines. A candidate allowlist selected channels 1, 2 and 7
+  deterministically while RTSP supervision remained active for all seven;
+- those three pipelines decoded real H.265 continuously and sampled frames at
+  approximately the configured 5 fps target;
+- Cloud frame ingest returned HTTP 202 for SaaS cameras 10, 11 and 16, worker
+  health reported all three connected, and CloudVision persisted real person /
+  vehicle detection events from the physical feeds.
+
+Therefore `REAL_CAMERA_VERIFIED = YES` for the G1 gateway path
+(discovery -> credential inheritance -> 7 RTSP supervisors -> H.265 decode ->
+3 selected Cloud pipelines -> Cloud inference). It does **not** certify seven
+simultaneous decode pipelines on this Celeron-class temporary gateway, Full
+Edge local inference, GPU/CUDA, reboot/power-loss behavior, or the hardware
+certification matrix.

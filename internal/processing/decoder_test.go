@@ -219,3 +219,17 @@ func TestFFmpegDecoder_RejectsInvalidDimensions(t *testing.T) {
 		t.Fatal("expected error for odd width")
 	}
 }
+
+func TestFFmpegDecoder_UnknownSourceDimensionsCanUseFixedOutput(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	dec, err := NewFFmpegDecoder(FFmpegDecoderConfig{OutputWidth: 64, OutputHeight: 36}, 0, 0, nil, nil)
+	if err != nil {
+		t.Fatalf("NewFFmpegDecoder with fixed output fallback: %v", err)
+	}
+	defer dec.Close()
+	if dec.width != 64 || dec.height != 36 {
+		t.Fatalf("decoder dimensions = %dx%d, want 64x36", dec.width, dec.height)
+	}
+}

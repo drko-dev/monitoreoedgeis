@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -51,6 +52,9 @@ type Config struct {
 	DiscoveryInterval   time.Duration
 	DiscoveryTimeout    time.Duration
 	DiscoveryInterfaces []string
+	// HikvisionEndpoints are non-secret, operator-specified private recorder
+	// base URLs used when WS-Discovery cannot reach the recorder.
+	HikvisionEndpoints []string
 	// Camera connectivity settings (Milestone G).
 	ConnectivityEnabled bool
 	StreamRole          string
@@ -66,8 +70,13 @@ type Config struct {
 	VideoQueueDepth             int
 	VideoDecodeQueueDepth       int
 	VideoMaxConcurrentPipelines int
-	VideoFFmpegPath             string
-	VideoDecodeTimeout          time.Duration
+	// VideoCandidateAllowlist optionally restricts video decoding/upload to
+	// these exact candidate keys. Empty means all discovered targets are
+	// eligible. RTSP supervision remains independent and can still cover all
+	// targets; this only gates expensive video pipelines.
+	VideoCandidateAllowlist []string
+	VideoFFmpegPath         string
+	VideoDecodeTimeout      time.Duration
 	// Hybrid mode local-analysis settings (Milestone J). Meaningless
 	// unless ProcessingMode == ModeHybrid.
 	HybridMotionThreshold float64
@@ -226,6 +235,7 @@ const (
 	DefaultDiscoveryTimeout  = 4 * time.Second
 	MinDiscoveryTimeout      = 1 * time.Second
 	MaxDiscoveryTimeout      = 30 * time.Second
+	MaxHikvisionEndpoints    = 16
 	// Connectivity defaults and bounds (Milestone G).
 	DefaultConnectivityEnabled = true
 	DefaultStreamRole          = "sub"
@@ -253,6 +263,8 @@ const (
 	DefaultVideoMaxConcurrentPipelines = 4
 	MinVideoMaxConcurrentPipelines     = 1
 	MaxVideoMaxConcurrentPipelines     = 16
+	MaxVideoCandidateAllowlist         = 64
+	MaxVideoCandidateKeyLength         = 160
 	DefaultVideoFFmpegPath             = "ffmpeg"
 	DefaultVideoDecodeTimeout          = 10 * time.Second
 	MinVideoDecodeTimeout              = 1 * time.Second
@@ -537,6 +549,24 @@ func loadFromEnvironment() (*Config, error) {
 		cfg.DiscoveryInterfaces = ifaces
 	}
 
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_HIKVISION_ENDPOINTS")); raw != "" {
+		parts := strings.Split(raw, ",")
+		if len(parts) > MaxHikvisionEndpoints {
+			return nil, fmt.Errorf("invalid GEOCAM_HIKVISION_ENDPOINTS: maximum is %d", MaxHikvisionEndpoints)
+		}
+		for _, part := range parts {
+			endpoint := strings.TrimSpace(part)
+			if endpoint == "" {
+				return nil, fmt.Errorf("invalid GEOCAM_HIKVISION_ENDPOINTS: empty endpoint")
+			}
+			u, err := url.Parse(endpoint)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+				return nil, fmt.Errorf("invalid GEOCAM_HIKVISION_ENDPOINTS: expected credential-free http(s) base URL")
+			}
+			cfg.HikvisionEndpoints = append(cfg.HikvisionEndpoints, endpoint)
+		}
+	}
+
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_CONNECTIVITY_ENABLED")); raw != "" {
 		cfg.ConnectivityEnabled = strings.ToLower(raw) == "true" || raw == "1"
 	}
@@ -646,6 +676,27 @@ func loadFromEnvironment() (*Config, error) {
 				raw, MinVideoMaxConcurrentPipelines, MaxVideoMaxConcurrentPipelines)
 		}
 		cfg.VideoMaxConcurrentPipelines = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_CANDIDATE_ALLOWLIST")); raw != "" {
+		seen := make(map[string]struct{})
+		for _, part := range strings.Split(raw, ",") {
+			key := strings.TrimSpace(part)
+			if key == "" {
+				continue
+			}
+			if len(key) > MaxVideoCandidateKeyLength {
+				return nil, fmt.Errorf("invalid GEOCAM_VIDEO_CANDIDATE_ALLOWLIST: candidate key exceeds %d bytes", MaxVideoCandidateKeyLength)
+			}
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+			cfg.VideoCandidateAllowlist = append(cfg.VideoCandidateAllowlist, key)
+			if len(cfg.VideoCandidateAllowlist) > MaxVideoCandidateAllowlist {
+				return nil, fmt.Errorf("invalid GEOCAM_VIDEO_CANDIDATE_ALLOWLIST: maximum is %d candidate keys", MaxVideoCandidateAllowlist)
+			}
+		}
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_FFMPEG_PATH")); raw != "" {

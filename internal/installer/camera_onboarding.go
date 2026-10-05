@@ -283,14 +283,9 @@ func (s *Service) localCredentialSynced(candidateKey string) bool {
 	if err != nil {
 		return false
 	}
-	for _, c := range store.Snapshot() {
-		for _, key := range c.CandidateKeys {
-			if key == candidateKey {
-				return true
-			}
-		}
-	}
-	return false
+	provider := cameracreds.NewProvider(store)
+	_, ok := provider.Resolve(candidateKey)
+	return ok
 }
 
 // CancelCameraOnboarding reverses a SaaS onboarding operation this same

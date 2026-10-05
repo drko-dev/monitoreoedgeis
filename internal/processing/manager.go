@@ -51,10 +51,11 @@ type Manager struct {
 	limitSkippedMu sync.Mutex
 	limitSkipped   []string
 
-	pipelines   map[string]*cameraPipeline
-	unsupported map[string]bool
-	router      *Router
-	extraSinks  []Sink
+	pipelines         map[string]*cameraPipeline
+	unsupported       map[string]bool
+	router            *Router
+	extraSinks        []Sink
+	allowedCandidates map[string]struct{}
 }
 
 // NewManager creates a video pipeline manager. rtspMgr is Hito G's existing
@@ -68,15 +69,22 @@ func NewManager(cfg Config, rtspMgr *rtsp.Manager, health HealthSink, logger *sl
 	if logger == nil {
 		logger = slog.Default()
 	}
+	allowed := make(map[string]struct{}, len(cfg.CandidateAllowlist))
+	for _, key := range cfg.CandidateAllowlist {
+		if key = strings.TrimSpace(key); key != "" {
+			allowed[key] = struct{}{}
+		}
+	}
 	return &Manager{
-		cfg:         cfg,
-		rtsp:        rtspMgr,
-		health:      health,
-		logger:      logger,
-		pipelines:   make(map[string]*cameraPipeline),
-		unsupported: make(map[string]bool),
-		doneCh:      make(chan struct{}),
-		extraSinks:  extraSinks,
+		cfg:               cfg,
+		rtsp:              rtspMgr,
+		health:            health,
+		logger:            logger,
+		pipelines:         make(map[string]*cameraPipeline),
+		unsupported:       make(map[string]bool),
+		doneCh:            make(chan struct{}),
+		extraSinks:        extraSinks,
+		allowedCandidates: allowed,
 	}
 }
 
@@ -171,6 +179,11 @@ func (m *Manager) OnPacket(candidateKey string, payload []byte, recvAt time.Time
 	if m.stopped.Load() {
 		return
 	}
+	if len(m.allowedCandidates) > 0 {
+		if _, ok := m.allowedCandidates[candidateKey]; !ok {
+			return
+		}
+	}
 
 	m.mu.Lock()
 	p, ok := m.pipelines[candidateKey]
@@ -189,7 +202,7 @@ func (m *Manager) OnPacket(candidateKey string, payload []byte, recvAt time.Time
 			m.mu.Unlock()
 			return
 		}
-		if desc.Codec != "" && !strings.EqualFold(desc.Codec, "H264") {
+		if desc.Codec != "" && !strings.EqualFold(desc.Codec, "H264") && !strings.EqualFold(desc.Codec, "H265") && !strings.EqualFold(desc.Codec, "HEVC") {
 			m.unsupported[candidateKey] = true
 			m.mu.Unlock()
 			m.logger.Warn("unsupported codec for video pipeline, stream will not be decoded",
