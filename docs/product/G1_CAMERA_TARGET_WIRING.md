@@ -3,9 +3,11 @@
 > **STATUS: G1-A (preconditions) + G1-B (wiring) IMPLEMENTED / TESTED LOCAL.**
 > G1 is closed at the code level: the production Agent now actually calls
 > `rtsp.Manager.SetTargets` with real, discovered, credentialed cameras. See
-> §11 for exactly what that does and does not mean — **REAL CAMERA and
-> DVR/NVR stay NOT_VALIDATED**, no physical pilot has run, and Software 1.0
-> readiness still depends on the other B2–B12 blockers. Sections 1–10 below
+> §11 for exactly what that does and does not mean. A physical Hikvision
+> DVR/NVR gateway run was completed on 2026-10-05 (see §13), including seven
+> authenticated RTSP substreams and three simultaneous H.265 Cloud pipelines.
+> This closes the G1 real-recorder transport/decode gap only; broader hardware
+> certification and the 5–10 camera appliance pilot remain separate work. Sections 1–10 below
 > are G1-A's original audit and design; they are left as written because
 > every decision they made is still the one G1-B implemented.
 
@@ -519,5 +521,36 @@ simulators with Digest auth through the real `rtsp.Manager` and
   username or password.
 
 Status: UNIT_TESTED and INTEGRATION_TESTED against simulators (also under
-`-race`). REAL_CAMERA_VERIFIED remains NO; decoding real H.264 and any physical
-NVR stay NOT_VALIDATED.
+`-race`). The physical follow-up is recorded in §13.
+
+## 13. Physical Hikvision NVR validation — 2026-10-05
+
+A real Windows Gateway was connected to a Hikvision `DS-7608NXI-K1/VPro`
+(`V4.90.320 build 260313`) with seven configured channels. The run used the
+normal SaaS camera-credential sync and the production target reconciler; no
+credential was embedded in an RTSP URL or written to logs.
+
+Observed results:
+
+- one device credential synchronized and resolved for the physical recorder;
+- discovery expanded the recorder to **7 logical channel targets**;
+- all seven substreams (`102` through `702`) authenticated and stayed `online`
+  concurrently with live RTP packet/byte counters and zero initial reconnects;
+- SDP reported **H.265** on the physical substreams, exposing the previous
+  H.264-only processing limitation; the branch now includes RFC 7798 H.265
+  depacketization plus FFmpeg HEVC decode;
+- the temporary low-power Windows gateway was intentionally capped at three
+  video pipelines. A candidate allowlist selected channels 1, 2 and 7
+  deterministically while RTSP supervision remained active for all seven;
+- those three pipelines decoded real H.265 continuously and sampled frames at
+  approximately the configured 5 fps target;
+- Cloud frame ingest returned HTTP 202 for SaaS cameras 10, 11 and 16, worker
+  health reported all three connected, and CloudVision persisted real person /
+  vehicle detection events from the physical feeds.
+
+Therefore `REAL_CAMERA_VERIFIED = YES` for the G1 gateway path
+(discovery -> credential inheritance -> 7 RTSP supervisors -> H.265 decode ->
+3 selected Cloud pipelines -> Cloud inference). It does **not** certify seven
+simultaneous decode pipelines on this Celeron-class temporary gateway, Full
+Edge local inference, GPU/CUDA, reboot/power-loss behavior, or the hardware
+certification matrix.

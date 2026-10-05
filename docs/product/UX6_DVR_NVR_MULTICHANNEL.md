@@ -3,11 +3,12 @@
 **Status:** `UX6_SOFTWARE_STATUS = COMPLETE` (backend: discovery through
 runtime, end to end, with tests; onboarding wizard UI: channel discovery,
 selection, credential test, and onboarding, end to end, with tests).
-`UX6_PHYSICAL_DVR_NVR = NOT_VALIDATED` (no DVR/NVR hardware available to
-this session). `DVR_NVR_UI_PRODUCTION_ENABLED = NO` (a product/commercial
-statement, not a code gate: the wizard is real and fully exercisable in
-development/test, but no DVR/NVR has ever driven it physically — see
-"Physical status" below).
+`UX6_PHYSICAL_DVR_NVR = VALIDATED_GATEWAY_PATH` (physical Hikvision NVR
+validation completed 2026-10-05: seven RTSP channels online; three selected
+H.265 Cloud pipelines decoded and inferred end to end).
+`DVR_NVR_UI_PRODUCTION_ENABLED` remains a product/commercial decision rather
+than a code gate; this physical run validates the gateway runtime path, not
+full appliance/hardware certification. See `G1_CAMERA_TARGET_WIRING.md` §13.
 
 ## Channel identity model
 
