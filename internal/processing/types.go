@@ -208,6 +208,7 @@ type Config struct {
 	QueueDepth             int
 	DecodeQueueDepth       int
 	MaxConcurrentPipelines int
+	CandidateAllowlist     []string
 	FFmpegPath             string
 	DecodeTimeout          time.Duration
 	// Hybrid holds Milestone J's local-analysis tunables. Meaningless

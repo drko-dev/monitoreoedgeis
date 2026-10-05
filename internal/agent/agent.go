@@ -292,6 +292,7 @@ func New(cfg *config.Config) *Agent {
 				QueueDepth:             cfg.VideoQueueDepth,
 				DecodeQueueDepth:       cfg.VideoDecodeQueueDepth,
 				MaxConcurrentPipelines: cfg.VideoMaxConcurrentPipelines,
+				CandidateAllowlist:     append([]string(nil), cfg.VideoCandidateAllowlist...),
 				FFmpegPath:             cfg.VideoFFmpegPath,
 				DecodeTimeout:          cfg.VideoDecodeTimeout,
 				// Hybrid.Enabled ties to ProcessingMode, not a separate

@@ -260,7 +260,7 @@ func TestLoadVideoPipelineDefaults(t *testing.T) {
 		"GEOCAM_VIDEO_OUTPUT_WIDTH", "GEOCAM_VIDEO_OUTPUT_HEIGHT",
 		"GEOCAM_VIDEO_RINGBUFFER_SIZE", "GEOCAM_VIDEO_QUEUE_DEPTH",
 		"GEOCAM_VIDEO_DECODE_QUEUE_DEPTH", "GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES",
-		"GEOCAM_VIDEO_FFMPEG_PATH", "GEOCAM_VIDEO_DECODE_TIMEOUT",
+		"GEOCAM_VIDEO_CANDIDATE_ALLOWLIST", "GEOCAM_VIDEO_FFMPEG_PATH", "GEOCAM_VIDEO_DECODE_TIMEOUT",
 	} {
 		t.Setenv(k, "")
 	}
@@ -308,6 +308,7 @@ func TestLoadVideoPipelineOverrides(t *testing.T) {
 	t.Setenv("GEOCAM_VIDEO_QUEUE_DEPTH", "128")
 	t.Setenv("GEOCAM_VIDEO_DECODE_QUEUE_DEPTH", "2")
 	t.Setenv("GEOCAM_VIDEO_MAX_CONCURRENT_PIPELINES", "2")
+	t.Setenv("GEOCAM_VIDEO_CANDIDATE_ALLOWLIST", "cam-a, cam-b,cam-a")
 	t.Setenv("GEOCAM_VIDEO_FFMPEG_PATH", "/usr/local/bin/ffmpeg")
 	t.Setenv("GEOCAM_VIDEO_DECODE_TIMEOUT", "5s")
 
@@ -335,6 +336,9 @@ func TestLoadVideoPipelineOverrides(t *testing.T) {
 	}
 	if cfg.VideoMaxConcurrentPipelines != 2 {
 		t.Errorf("VideoMaxConcurrentPipelines = %d, want 2", cfg.VideoMaxConcurrentPipelines)
+	}
+	if len(cfg.VideoCandidateAllowlist) != 2 || cfg.VideoCandidateAllowlist[0] != "cam-a" || cfg.VideoCandidateAllowlist[1] != "cam-b" {
+		t.Errorf("VideoCandidateAllowlist = %v, want [cam-a cam-b]", cfg.VideoCandidateAllowlist)
 	}
 	if cfg.VideoFFmpegPath != "/usr/local/bin/ffmpeg" {
 		t.Errorf("VideoFFmpegPath = %q, want /usr/local/bin/ffmpeg", cfg.VideoFFmpegPath)

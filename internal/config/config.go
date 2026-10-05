@@ -70,8 +70,13 @@ type Config struct {
 	VideoQueueDepth             int
 	VideoDecodeQueueDepth       int
 	VideoMaxConcurrentPipelines int
-	VideoFFmpegPath             string
-	VideoDecodeTimeout          time.Duration
+	// VideoCandidateAllowlist optionally restricts video decoding/upload to
+	// these exact candidate keys. Empty means all discovered targets are
+	// eligible. RTSP supervision remains independent and can still cover all
+	// targets; this only gates expensive video pipelines.
+	VideoCandidateAllowlist []string
+	VideoFFmpegPath         string
+	VideoDecodeTimeout      time.Duration
 	// Hybrid mode local-analysis settings (Milestone J). Meaningless
 	// unless ProcessingMode == ModeHybrid.
 	HybridMotionThreshold float64
@@ -258,6 +263,8 @@ const (
 	DefaultVideoMaxConcurrentPipelines = 4
 	MinVideoMaxConcurrentPipelines     = 1
 	MaxVideoMaxConcurrentPipelines     = 16
+	MaxVideoCandidateAllowlist         = 64
+	MaxVideoCandidateKeyLength         = 160
 	DefaultVideoFFmpegPath             = "ffmpeg"
 	DefaultVideoDecodeTimeout          = 10 * time.Second
 	MinVideoDecodeTimeout              = 1 * time.Second
@@ -669,6 +676,27 @@ func loadFromEnvironment() (*Config, error) {
 				raw, MinVideoMaxConcurrentPipelines, MaxVideoMaxConcurrentPipelines)
 		}
 		cfg.VideoMaxConcurrentPipelines = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_CANDIDATE_ALLOWLIST")); raw != "" {
+		seen := make(map[string]struct{})
+		for _, part := range strings.Split(raw, ",") {
+			key := strings.TrimSpace(part)
+			if key == "" {
+				continue
+			}
+			if len(key) > MaxVideoCandidateKeyLength {
+				return nil, fmt.Errorf("invalid GEOCAM_VIDEO_CANDIDATE_ALLOWLIST: candidate key exceeds %d bytes", MaxVideoCandidateKeyLength)
+			}
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+			cfg.VideoCandidateAllowlist = append(cfg.VideoCandidateAllowlist, key)
+			if len(cfg.VideoCandidateAllowlist) > MaxVideoCandidateAllowlist {
+				return nil, fmt.Errorf("invalid GEOCAM_VIDEO_CANDIDATE_ALLOWLIST: maximum is %d candidate keys", MaxVideoCandidateAllowlist)
+			}
+		}
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_VIDEO_FFMPEG_PATH")); raw != "" {

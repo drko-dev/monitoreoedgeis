@@ -214,3 +214,25 @@ func TestManager_PublishStatus_CloudBufferNilWithoutReportingSink(t *testing.T) 
 func (r *recordingHealthSink) lastPipelineSummary() VideoPipelineSummary {
 	return r.get()
 }
+
+func TestManager_CandidateAllowlistBlocksUnselectedPipeline(t *testing.T) {
+	mgr, rtspMgr := newTestManager(Config{
+		QueueDepth: 8, RingBufferSize: 4, MaxConcurrentPipelines: 3,
+		CandidateAllowlist: []string{"cam-allowed"},
+	})
+	rtspMgr.SetTargets([]rtsp.CameraTarget{
+		{CandidateKey: "cam-allowed", Addr: "127.0.0.1:554", RTSPPath: "/a"},
+		{CandidateKey: "cam-blocked", Addr: "127.0.0.1:554", RTSPPath: "/b"},
+	})
+	rtspMgr.SetDescriptorFor("cam-allowed", rtsp.StreamDescriptor{CandidateKey: "cam-allowed", Codec: "H264", Width: 64, Height: 64})
+	rtspMgr.SetDescriptorFor("cam-blocked", rtsp.StreamDescriptor{CandidateKey: "cam-blocked", Codec: "H264", Width: 64, Height: 64})
+
+	mgr.OnPacket("cam-blocked", []byte{0x80, 0x60}, time.Now())
+	if _, ok := mgr.pipelines["cam-blocked"]; ok {
+		t.Fatal("blocked candidate unexpectedly created a pipeline")
+	}
+	mgr.OnPacket("cam-allowed", []byte{0x80, 0x60}, time.Now())
+	if _, ok := mgr.pipelines["cam-allowed"]; !ok {
+		t.Fatal("allowlisted candidate did not create a pipeline")
+	}
+}
