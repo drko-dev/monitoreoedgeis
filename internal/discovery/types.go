@@ -112,6 +112,11 @@ type DiscoveredDevice struct {
 	// If the device rejected unauthenticated SOAP inspection, AuthRequired is true.
 	AuthRequired bool `json:"auth_required"`
 
+	// ManualRecorder marks an operator-seeded recorder endpoint. It is local-only
+	// routing metadata: the SaaS contract derives identity from the reported
+	// endpoint fields and must never depend on this implementation detail.
+	ManualRecorder bool `json:"-"`
+
 	// Multichannel / video sources
 	VideoSources []VideoSource `json:"video_sources,omitempty"`
 

@@ -170,9 +170,13 @@ func (e *Engine) RunScan(ctx context.Context) (*ScanResult, error) {
 			e.log.Warn("discovery: manual Hikvision endpoint ignored without a recorder adapter")
 			continue
 		}
-		stable := fmt.Sprintf("manual:hikvision:%s:%d", strings.ToLower(u.Hostname()), port)
+		// Manual seeds use the same canonical endpoint identity as the SaaS
+		// credential projection. Manual-vs-discovered behavior is tracked
+		// separately so identity never depends on discovery source.
+		stable := fmt.Sprintf("endpoint:%s:%d%s", strings.ToLower(u.Hostname()), port, u.Path)
 		deduped = append(deduped, DiscoveredDevice{
 			StableIdentity: stable,
+			ManualRecorder: true,
 			IP:             u.Hostname(),
 			Port:           port,
 			Path:           u.Path,
@@ -281,7 +285,7 @@ func deduplicateRawCandidates(raw []wsdiscovery.DiscoveredRawCandidate) []Discov
 func deduplicateDevices(devices []DiscoveredDevice) []DiscoveredDevice {
 	byIdentity := make(map[string]DiscoveredDevice, len(devices))
 	for _, device := range devices {
-		if strings.HasPrefix(device.StableIdentity, "manual:hikvision:") && hasMatchingDiscoveredEndpoint(byIdentity, device.XAddr) {
+		if device.ManualRecorder && hasMatchingDiscoveredEndpoint(byIdentity, device.XAddr) {
 			continue
 		}
 		if previous, ok := byIdentity[device.StableIdentity]; ok {
@@ -305,7 +309,7 @@ func deduplicateDevices(devices []DiscoveredDevice) []DiscoveredDevice {
 
 func hasMatchingDiscoveredEndpoint(devices map[string]DiscoveredDevice, endpoint string) bool {
 	for _, device := range devices {
-		if strings.HasPrefix(device.StableIdentity, "manual:hikvision:") {
+		if device.ManualRecorder {
 			continue
 		}
 		if device.XAddr == endpoint {
@@ -346,7 +350,7 @@ func (e *Engine) enrichCandidates(ctx context.Context, devices []DiscoveredDevic
 				default:
 				}
 				enrichedDev := devices[idx]
-				if !strings.HasPrefix(enrichedDev.StableIdentity, "manual:hikvision:") {
+				if !enrichedDev.ManualRecorder {
 					enrichedDev = e.enrichSingleDevice(ctx, enrichedDev)
 				}
 				enrichedDev = e.enrichWithRecorderAdapter(ctx, enrichedDev)

@@ -47,7 +47,7 @@ func TestDeduplicateDevicesPrefersDiscoveredIdentityOverMatchingManualSeed(t *te
 	xaddr := "http://192.168.1.20/ISAPI"
 	got := deduplicateDevices([]DiscoveredDevice{
 		{StableIdentity: "epr:uuid-recorder", XAddr: xaddr, AllXAddrs: []string{xaddr}},
-		{StableIdentity: "manual:hikvision:192.168.1.20:80", XAddr: xaddr, AllXAddrs: []string{xaddr}},
+		{StableIdentity: "endpoint:192.168.1.20:80/ISAPI", XAddr: xaddr, AllXAddrs: []string{xaddr}, ManualRecorder: true},
 	})
 	if len(got) != 1 || got[0].StableIdentity != "epr:uuid-recorder" {
 		t.Fatalf("devices = %+v, want one WS-Discovery identity", got)
