@@ -16,6 +16,11 @@ Branch: `feature/hito-z-camera-target-wiring`, stacked on
 
 ## 1. The gap, restated with evidence
 
+> **Historical (G1-A audit).** This describes the state *before* G1-B. It is no
+> longer true: `cameraTargetReconciler` now calls `rtsp.Manager.SetTargets`
+> (`internal/agent/camera_target_reconciler.go:115`, built at
+> `internal/agent/agent.go:439`). See §11 and §12.
+
 `rtsp.Manager.SetTargets` has **no production call site**. Its only non-test
 callers are `internal/perf/scale.go:178` and `internal/perf/decode.go:690`. The
 agent constructs the manager (`internal/agent/agent.go:185`) and exposes it
@@ -306,6 +311,9 @@ the wiring, and G1 is still BLOCKED.**
 | Authenticated ONVIF enrichment | **NOT IMPLEMENTED** — G1-B |
 | Scan/sync success callbacks | **NOT IMPLEMENTED** — G1-B |
 | `internal/agent/failure_lifecycle_test.go` (asserts no credential files exist) | **UNCHANGED** — its update belongs to G1-B, when the agent lifecycle actually changes |
+
+*(G1-A snapshot. The rows marked NOT IMPLEMENTED were delivered by G1-B; see §11.
+The real-camera, pilot and hardware claims below are still not made.)*
 
 Not claimed: G1 closed, camera wiring complete, real camera validated, pilot
 complete, hardware certified, commercial-ready, Software 1.0 READY.
