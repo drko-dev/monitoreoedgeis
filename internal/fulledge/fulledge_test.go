@@ -490,6 +490,15 @@ func TestInvalidDeviceConfig(t *testing.T) {
 	if err != nil || valid != DeviceCUDA {
 		t.Errorf("expected valid cuda, got %v, err: %v", valid, err)
 	}
+
+	mps, err := ParseDeviceMode("mps")
+	if err != nil || mps != DeviceMPS {
+		t.Errorf("expected valid mps, got %v, err: %v", mps, err)
+	}
+	hwMPS := NewHardwareManager(DeviceMPS, mockHardwareDetector{cudaAvailable: false}, nil)
+	if hwMPS.CurrentDevice() != string(DeviceMPS) {
+		t.Errorf("expected explicit MPS selection, got %s", hwMPS.CurrentDevice())
+	}
 }
 
 func TestBoundedResourceBehavior(t *testing.T) {

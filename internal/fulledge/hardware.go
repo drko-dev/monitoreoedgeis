@@ -15,6 +15,7 @@ type DeviceMode string
 const (
 	DeviceCPU  DeviceMode = "cpu"
 	DeviceCUDA DeviceMode = "cuda"
+	DeviceMPS  DeviceMode = "mps"
 	DeviceAuto DeviceMode = "auto"
 )
 
@@ -25,10 +26,12 @@ func ParseDeviceMode(raw string) (DeviceMode, error) {
 		return DeviceCPU, nil
 	case string(DeviceCUDA):
 		return DeviceCUDA, nil
+	case string(DeviceMPS):
+		return DeviceMPS, nil
 	case string(DeviceAuto):
 		return DeviceAuto, nil
 	default:
-		return "", fmt.Errorf("%w: %q (must be cpu, cuda, or auto)", ErrInvalidDevice, raw)
+		return "", fmt.Errorf("%w: %q (must be cpu, cuda, mps, or auto)", ErrInvalidDevice, raw)
 	}
 }
 
@@ -123,6 +126,11 @@ func (m *HardwareManager) resolve() {
 		}
 	case DeviceCPU:
 		m.currentDevice = string(DeviceCPU)
+	case DeviceMPS:
+		// MPS availability is authoritatively confirmed by the Python worker
+		// during its health handshake. Go deliberately avoids embedding a
+		// second PyTorch/Metal probe; an unsupported request fails closed there.
+		m.currentDevice = string(DeviceMPS)
 	case DeviceAuto:
 		fallthrough
 	default:
@@ -134,7 +142,7 @@ func (m *HardwareManager) resolve() {
 	}
 }
 
-// CurrentDevice returns the currently resolved inference device ("cpu" or "cuda").
+// CurrentDevice returns the currently resolved inference device ("cpu", "cuda", or explicit "mps").
 func (m *HardwareManager) CurrentDevice() string {
 	return m.currentDevice
 }

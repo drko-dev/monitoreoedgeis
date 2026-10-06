@@ -35,6 +35,7 @@ type RuntimeAdapter struct {
 	logger       *slog.Logger
 
 	cloudSinkFn         func() processing.Sink
+	edgeVideoSinkFn     func() processing.Sink
 	visionSinkFn        func() (processing.Sink, func(ctx context.Context) error, func(ctx context.Context) error)
 	currentVisionStopFn func(ctx context.Context) error
 	healthCheck         func(ctx context.Context) error
@@ -58,6 +59,15 @@ type AdapterOption func(*RuntimeAdapter)
 func WithCloudSinkFactory(fn func() processing.Sink) AdapterOption {
 	return func(a *RuntimeAdapter) {
 		a.cloudSinkFn = fn
+	}
+}
+
+// WithEdgeVideoSinkFactory registers the optional Full Edge display-only
+// video sink added next to the vision sink when transitioning to edge. A nil
+// result only disables live view; it never blocks the edge transition.
+func WithEdgeVideoSinkFactory(fn func() processing.Sink) AdapterOption {
+	return func(a *RuntimeAdapter) {
+		a.edgeVideoSinkFn = fn
 	}
 }
 
@@ -493,6 +503,11 @@ func (a *RuntimeAdapter) transitionMode(ctx context.Context, from, to config.Pro
 
 			newSinks = append(newSinks, vs)
 			newVisionStop = stopFn
+			if a.edgeVideoSinkFn != nil {
+				if evs := a.edgeVideoSinkFn(); evs != nil {
+					newSinks = append(newSinks, evs)
+				}
+			}
 		} else {
 			return fmt.Errorf("vision sink factory not configured; target mode edge is not operational")
 		}

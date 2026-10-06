@@ -281,7 +281,18 @@ func (c *Client) PostFrame(ctx context.Context, deviceID, credential, candidateK
 
 // PostFrameWithMetadata extends PostFrame with optional hybrid candidate headers (Milestone J7).
 func (c *Client) PostFrameWithMetadata(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte, meta FrameMetadata) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+FramesPath, bytes.NewReader(jpeg))
+	return c.postFrame(ctx, FramesPath, deviceID, credential, candidateKey, seq, capturedAt, jpeg, meta)
+}
+
+// PostVideoFrame uploads one display-only frame to VideoFramesPath. It is
+// the Full Edge live-view path: the SaaS stores it for snapshots/MJPEG and
+// never runs inference on it (local YOLO stays the inference authority).
+func (c *Client) PostVideoFrame(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte) error {
+	return c.postFrame(ctx, VideoFramesPath, deviceID, credential, candidateKey, seq, capturedAt, jpeg, FrameMetadata{ProcessingMode: "edge"})
+}
+
+func (c *Client) postFrame(ctx context.Context, path, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte, meta FrameMetadata) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(jpeg))
 	if err != nil {
 		return fmt.Errorf("transport: build request: %w", err)
 	}

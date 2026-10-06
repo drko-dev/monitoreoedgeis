@@ -100,7 +100,7 @@ func TestTargeted_01_RealStartupCloudToEdgeCreatesVisionSink(t *testing.T) {
 
 	// VideoManager routers have vision sink
 	sinks := a.VideoManager().ExtraSinks()
-	if len(sinks) != 1 || sinks[0].Name() != "edge-vision" {
+	if !isFullEdgeSinks(sinks) {
 		t.Fatalf("expected exactly 1 edge-vision sink in VideoManager, got: %+v", sinks)
 	}
 }
@@ -115,7 +115,7 @@ func TestTargeted_02_RealStartupEdgeToCloudCreatesCloudSink(t *testing.T) {
 		t.Fatalf("expected initial mode edge, got %s", a.Health().ProcessingMode())
 	}
 	sinks := a.VideoManager().ExtraSinks()
-	if len(sinks) != 1 || sinks[0].Name() != "edge-vision" {
+	if !isFullEdgeSinks(sinks) {
 		t.Fatalf("expected edge-vision sink initially, got: %+v", sinks)
 	}
 
@@ -397,7 +397,7 @@ func TestTargetedOperational_03_CloudToEdgeWithWorkerReadySucceeds(t *testing.T)
 
 	// Router has VisionSink
 	sinks := a.VideoManager().ExtraSinks()
-	if len(sinks) != 1 || sinks[0].Name() != "edge-vision" {
+	if !isFullEdgeSinks(sinks) {
 		t.Fatalf("expected router to have edge-vision sink, got: %+v", sinks)
 	}
 
@@ -422,7 +422,7 @@ func TestTargetedOperational_04_EdgeToCloudWithNilCloudSinkFails(t *testing.T) {
 
 	// Router maintains VisionSink
 	sinks := a.VideoManager().ExtraSinks()
-	if len(sinks) != 1 || sinks[0].Name() != "edge-vision" {
+	if !isFullEdgeSinks(sinks) {
 		t.Fatalf("expected router to maintain edge-vision sink, got: %+v", sinks)
 	}
 
@@ -734,4 +734,11 @@ func TestIntegration_HitoO_Case2_FailRollback(t *testing.T) {
 	if st.LastApplyStatus != "failed" {
 		t.Fatalf("expected LastApplyStatus to be 'failed', got: %q", st.LastApplyStatus)
 	}
+}
+
+// isFullEdgeSinks reports whether the router holds exactly the Full Edge sinks:
+// local inference (edge-vision) plus display-only live video (edge-video), and
+// never a Cloud inference sink.
+func isFullEdgeSinks(sinks []processing.Sink) bool {
+	return len(sinks) == 2 && sinks[0].Name() == "edge-vision" && sinks[1].Name() == edgeVideoSinkName
 }

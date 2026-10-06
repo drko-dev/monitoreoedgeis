@@ -342,6 +342,11 @@ func New(cfg *config.Config) *Agent {
 					initialVisionStop = mod.Stop
 				}
 			}
+			// Full Edge live view: display-only frames alongside (never
+			// instead of) the vision sink. Inference authority stays local.
+			if evs := newEdgeVideoSink(cfg, creds, reporter, log); evs != nil {
+				extraSinks = append(extraSinks, evs)
+			}
 
 			videoMgr := processing.NewManager(procCfg, rtspMgr, reporter, logging.Component(log, "video-pipeline"), extraSinks...)
 			mods = append(mods, videoMgr)
@@ -369,6 +374,9 @@ func New(cfg *config.Config) *Agent {
 						a.anprTransport.SetSink(nil) // mode transitioned away from cloud/hybrid -- stop sending
 					}
 					return sink
+				}),
+				remoteconfig.WithEdgeVideoSinkFactory(func() processing.Sink {
+					return buildEdgeVideoSink(cfg, creds, reporter, log)
 				}),
 				remoteconfig.WithVisionSinkFactory(func() (processing.Sink, func(ctx context.Context) error, func(ctx context.Context) error) {
 					var c vision.EventConsumer
