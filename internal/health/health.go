@@ -78,6 +78,9 @@ type Snapshot struct {
 	// telemetry only — never a priced or estimated cost (see
 	// internal/cloudsink).
 	Cloud *cloudsink.Status `json:"cloud,omitempty"`
+	// EdgeVideo is the Full Edge display-only video upload (live view /
+	// snapshots, never inference). Omitted outside ProcessingMode=edge.
+	EdgeVideo *cloudsink.Status `json:"edge_video,omitempty"`
 	// Vision is Milestone K's local YOLO worker/model status. Omitted
 	// outside ProcessingMode=edge. Never carries a frame, an RTSP URI, or a
 	// credential — only worker lifecycle state, model file metadata, and
@@ -204,6 +207,7 @@ type Reporter struct {
 	cameraTargets     *CameraTargetsStatus
 	cameraCredentials *CameraCredentialsStatus
 	cloud             *cloudsink.Status
+	edgeVideo         *cloudsink.Status
 	vision            *vision.Status
 	fullEdge          *fulledge.Status
 	localEventBacklog *edgebacklog.Status
@@ -385,6 +389,11 @@ func (r *Reporter) Snapshot() Snapshot {
 		copied := *r.cloud
 		cloud = &copied
 	}
+	var edgeVideo *cloudsink.Status
+	if r.edgeVideo != nil {
+		copied := *r.edgeVideo
+		edgeVideo = &copied
+	}
 	var fe *fulledge.Status
 	if r.fullEdge != nil {
 		copied := *r.fullEdge
@@ -477,6 +486,7 @@ func (r *Reporter) Snapshot() Snapshot {
 		Cameras:             cams,
 		VideoPipeline:       vp,
 		Cloud:               cloud,
+		EdgeVideo:           edgeVideo,
 		Vision:              vis,
 		FullEdge:            fe,
 		LocalEventBacklog:   backlog,
@@ -524,6 +534,15 @@ func (r *Reporter) SetCloudStatus(s cloudsink.Status) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cloud = &s
+}
+
+// SetEdgeVideoStatus records the latest Full Edge display-only video upload
+// snapshot. Kept apart from SetCloudStatus so video transport is never
+// reported as Cloud inference traffic.
+func (r *Reporter) SetEdgeVideoStatus(s cloudsink.Status) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.edgeVideo = &s
 }
 
 // SetVisionStatus records the latest local YOLO worker/model status

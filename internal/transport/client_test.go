@@ -567,3 +567,25 @@ func TestPostFrameRateLimitedRetryAfter(t *testing.T) {
 		t.Errorf("RetryAfter = %v, want 15s", rle.RetryAfter)
 	}
 }
+
+func TestPostVideoFrameUsesDisplayOnlyPath(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != VideoFramesPath {
+			t.Errorf("path = %q, want %q", r.URL.Path, VideoFramesPath)
+		}
+		if got := r.Header.Get("X-Processing-Mode"); got != "edge" {
+			t.Errorf("X-Processing-Mode = %q, want edge", got)
+		}
+		if got := r.Header.Get("X-Candidate-Key"); got != "cam-1" {
+			t.Errorf("X-Candidate-Key = %q", got)
+		}
+		w.WriteHeader(http.StatusAccepted)
+	})
+	c, err := New(srv.URL, true, 2*time.Second, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PostVideoFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{0xFF, 0xD8, 0xFF, 0xD9}); err != nil {
+		t.Fatalf("PostVideoFrame() error = %v", err)
+	}
+}

@@ -843,3 +843,32 @@ func TestTargeted_UnreadyVisionSinkFailsTransition(t *testing.T) {
 		t.Fatalf("expected router to maintain cloud sink, got: %+v", sinks)
 	}
 }
+
+// hybrid -> edge with a live-view factory: the router gets the vision sink
+// plus the display-only video sink, and still no cloud sink.
+func TestTargeted_HybridToEdgeAddsEdgeVideoSink(t *testing.T) {
+	adapter, videoMgr, _, _, _ := setupTestRuntime(t, config.ModeHybrid)
+	WithEdgeVideoSinkFactory(func() processing.Sink { return newTestSink("edge-video") })(adapter)
+
+	edgeMode := config.ModeEdge
+	if err := adapter.Apply(context.Background(), RuntimeConfig{ProcessingMode: &edgeMode}); err != nil {
+		t.Fatalf("apply hybrid->edge failed: %v", err)
+	}
+	var names []string
+	for _, s := range videoMgr.ExtraSinks() {
+		names = append(names, s.Name())
+	}
+	if len(names) != 2 || names[0] != "vision-sink" || names[1] != "edge-video" {
+		t.Fatalf("router extra sinks = %v, want [vision-sink edge-video]", names)
+	}
+
+	cloudMode := config.ModeCloud
+	if err := adapter.Apply(context.Background(), RuntimeConfig{ProcessingMode: &cloudMode}); err != nil {
+		t.Fatalf("apply edge->cloud failed: %v", err)
+	}
+	for _, s := range videoMgr.ExtraSinks() {
+		if s.Name() == "edge-video" {
+			t.Fatal("edge video sink must not survive leaving edge mode")
+		}
+	}
+}

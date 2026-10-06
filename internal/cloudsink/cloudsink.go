@@ -213,6 +213,7 @@ func (s *stats) snapshot(startedAt time.Time, cfg Config, limiter *TokenBucket, 
 // atomic only because /status and the I6 drain goroutine read/write them
 // from other goroutines.
 type CloudSink struct {
+	name       string // router sink name; empty means "cloud" (see WithName)
 	sender     FrameSender
 	deviceID   string
 	credential string
@@ -251,6 +252,12 @@ type Option func(*CloudSink)
 // Edge with no buffer limits configured must still be able to start and
 // upload frames directly, exactly as before I6). maxAge <= 0 disables
 // age-based eviction.
+// WithName overrides the router sink name (default "cloud"), so a sink that
+// reuses this transport for a different purpose is never reported as cloud.
+func WithName(name string) Option {
+	return func(s *CloudSink) { s.name = name }
+}
+
 func WithBuffer(dir string, maxBytes int64, maxFrames int, maxAge time.Duration) Option {
 	return func(s *CloudSink) {
 		if maxBytes <= 0 || maxFrames <= 0 {
@@ -308,7 +315,12 @@ func New(sender FrameSender, deviceID, credential string, cfg Config, logger *sl
 }
 
 // Name implements processing.Sink.
-func (s *CloudSink) Name() string { return "cloud" }
+func (s *CloudSink) Name() string {
+	if s.name != "" {
+		return s.name
+	}
+	return "cloud"
+}
 
 // Close implements the Router's optional sinkCloser hook: it stops the
 // drain goroutine and waits for it to exit, so shutdown never leaves it

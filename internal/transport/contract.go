@@ -44,6 +44,13 @@ const (
 	// authenticated device and camera_id from X-Candidate-Key server-side;
 	// neither is ever sent directly by the Edge.
 	FramesPath = "/api/v1/edge/frames"
+	// VideoFramesPath ingests one display-only JPEG frame from a Full Edge
+	// (ProcessingMode=edge) for live view/snapshots. Same headers and auth as
+	// FramesPath, but the SaaS never runs inference on it. A separate path
+	// (not an X-Processing-Mode value on FramesPath) makes the contract fail
+	// closed: a SaaS that predates it answers 404 instead of silently
+	// treating the frame as a Cloud-inference frame.
+	VideoFramesPath = "/api/v1/edge/video-frames"
 	// AnprCandidatesPath accepts Hito J6 ANPR/LPR candidates as
 	// multipart/form-data (a "metadata" JSON part -- ANPRCandidateEnvelope
 	// v1 -- plus a "crop" image/jpeg part), never base64-in-JSON. The SaaS
