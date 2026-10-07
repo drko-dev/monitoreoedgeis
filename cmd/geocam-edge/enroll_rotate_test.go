@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -80,7 +81,7 @@ func TestRunEnrollGeneratesCredentialLocallyAndSendsOnlyHash(t *testing.T) {
 	ident := identity.Identity{EdgeID: testEdgeID}
 	host := platform.Info{OS: "linux", GOARCH: "arm64"}
 
-	creds, warning, err := runEnroll(context.Background(), client, ident, host, "gw_enroll_valid")
+	creds, warning, err := runEnroll(context.Background(), client, ident, host, "gw_enroll_valid", false)
 	if err != nil {
 		t.Fatalf("runEnroll() error = %v", err)
 	}
@@ -127,7 +128,7 @@ func TestRunEnrollMeFailureStillPersistsCredentialWithEmptyOrgSite(t *testing.T)
 	ident := identity.Identity{EdgeID: testEdgeID}
 	host := platform.Info{OS: "linux", GOARCH: "arm64"}
 
-	creds, warning, err := runEnroll(context.Background(), client, ident, host, "gw_enroll_valid")
+	creds, warning, err := runEnroll(context.Background(), client, ident, host, "gw_enroll_valid", false)
 	if err != nil {
 		t.Fatalf("runEnroll() error = %v, want nil (claim already succeeded)", err)
 	}
@@ -156,7 +157,7 @@ func TestRunEnrollClaimFailureDiscardsCredential(t *testing.T) {
 	ident := identity.Identity{EdgeID: testEdgeID}
 	host := platform.Info{OS: "linux", GOARCH: "arm64"}
 
-	_, _, err := runEnroll(context.Background(), client, ident, host, "bad-token")
+	_, _, err := runEnroll(context.Background(), client, ident, host, "bad-token", false)
 	if !errors.Is(err, transport.ErrTokenInvalid) {
 		t.Fatalf("err = %v, want ErrTokenInvalid", err)
 	}
@@ -288,4 +289,49 @@ func decodeAndCapture(t *testing.T, r *http.Request, dst *[]byte) []byte {
 	}
 	*dst = buf
 	return buf
+}
+
+// A Full Edge claims its code on /edge/claim (device_kind=edge), never on the
+// gateway enroll endpoint, and refuses an identity that is not edge.
+func TestRunEnroll_FullEdgeClaimsEdgeIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		kind    string
+		wantErr bool
+	}{{"edge", false}, {"gateway", true}} {
+		var claimBody map[string]any
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case transport.EdgeClaimPath:
+				_ = json.NewDecoder(r.Body).Decode(&claimBody)
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(transport.EnrollResponse{DeviceID: "edg_new", DeviceKind: tc.kind})
+			case transport.MePath:
+				_, _ = io.WriteString(w, `{"device_id":"edg_new","organization_id":1,"site_id":4}`)
+			default:
+				t.Errorf("unexpected path %s (Full Edge must not use the gateway enroll)", r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		client := newClient(t, srv.URL)
+		creds, _, err := runEnroll(context.Background(), client, identity.Identity{EdgeID: testEdgeID}, platform.Info{OS: "darwin", GOARCH: "arm64"}, "ABCD-EFGH", true)
+		srv.Close()
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("device_kind=%s accepted as Full Edge identity", tc.kind)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("runEnroll(fullEdge) error = %v", err)
+		}
+		if creds.DeviceID != "edg_new" || creds.Credential == "" {
+			t.Fatalf("creds = %+v", creds)
+		}
+		if claimBody["code"] != "ABCD-EFGH" || claimBody["claim_request_id"] != testEdgeID || claimBody["edge_id"] != testEdgeID {
+			t.Fatalf("claim body = %v", claimBody)
+		}
+		if strings.Contains(fmt.Sprint(claimBody), creds.Credential) {
+			t.Fatal("claim body leaked the plaintext credential")
+		}
+	}
 }

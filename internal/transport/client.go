@@ -215,6 +215,35 @@ func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse,
 	return resp, nil
 }
 
+// EdgeClaimRequest is the body sent to EdgeClaimPath (extra="forbid"
+// server-side). ClaimRequestID is the idempotency key; we send edge_id.
+type EdgeClaimRequest struct {
+	Code           string `json:"code"`
+	EdgeID         string `json:"edge_id,omitempty"`
+	DeviceKeyHash  string `json:"device_key_hash"`
+	ClaimRequestID string `json:"claim_request_id"`
+	AgentVersion   string `json:"agent_version,omitempty"`
+	Platform       string `json:"platform,omitempty"`
+	Architecture   string `json:"architecture,omitempty"`
+}
+
+// ClaimEdge claims a Full Edge enrollment code, registering this device as
+// device_kind=edge. Errors map exactly like Enroll's.
+func (c *Client) ClaimEdge(ctx context.Context, req EdgeClaimRequest) (EnrollResponse, error) {
+	var resp EnrollResponse
+	status, _, body, err := c.do(ctx, http.MethodPost, EdgeClaimPath, "", "", req)
+	if err != nil {
+		return resp, err
+	}
+	if status != http.StatusOK && status != http.StatusCreated {
+		return resp, mapEnrollError(status, body)
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return resp, fmt.Errorf("%w: decoding edge claim response: %v", ErrUnexpectedStatus, err)
+	}
+	return resp, nil
+}
+
 // Me returns the authenticated edge's own metadata. deviceID and credential
 // are both required: the SaaS's authenticate_edge_device() treats X-Device-Id
 // as mandatory even when the credential arrives via Authorization: Bearer. A

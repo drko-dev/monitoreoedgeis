@@ -505,7 +505,11 @@ func runEnrollCmd(args []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.SaaSTimeout+time.Second)
 	defer cancel()
 
-	creds, warning, err := runEnroll(ctx, client, ident, host, token)
+	// A Full Edge (GEOCAM_PROCESSING_MODE=edge) must be registered as
+	// device_kind=edge: only that identity may publish local-events and
+	// display-only video. It claims a Full Edge enrollment code; a gateway
+	// token is rejected there by the SaaS, never silently accepted.
+	creds, warning, err := runEnroll(ctx, client, ident, host, token, cfg.ProcessingMode == config.ModeEdge)
 	if err != nil {
 		// Claim never happened server-side (or the credential could not be
 		// generated in the first place): nothing to persist.
@@ -554,7 +558,7 @@ func runEnrollCmd(args []string) {
 // left empty rather than losing the now-valid credential: the enrollment
 // already happened server-side, so discarding cred here would leave the
 // device claimed remotely but unable to authenticate at all.
-func runEnroll(ctx context.Context, client *transport.Client, ident identity.Identity, host platform.Info, token string) (creds credentials.Credentials, warning string, err error) {
+func runEnroll(ctx context.Context, client *transport.Client, ident identity.Identity, host platform.Info, token string, fullEdge bool) (creds credentials.Credentials, warning string, err error) {
 	// Zero-knowledge model: the credential is generated and kept entirely on
 	// this device. Only its SHA-256 hash ever reaches the SaaS.
 	cred, err := credentials.GenerateCredential()
@@ -565,15 +569,31 @@ func runEnroll(ctx context.Context, client *transport.Client, ident identity.Ide
 	// No "hostname" field exists in the real enroll contract
 	// (agent_version/platform/architecture only) — omitted rather than
 	// stuffed into an unrelated field.
-	resp, err := client.Enroll(ctx, transport.EnrollRequest{
-		EnrollmentToken:   token,
-		GatewayInstanceID: ident.EdgeID,
-		DeviceKeyHash:     credentials.HashCredential(cred),
-		AgentVersion:      agent.Version,
-		Platform:          host.OS,
-		Architecture:      host.GOARCH,
-		EdgeID:            ident.EdgeID,
-	})
+	var resp transport.EnrollResponse
+	if fullEdge {
+		resp, err = client.ClaimEdge(ctx, transport.EdgeClaimRequest{
+			Code:           token,
+			EdgeID:         ident.EdgeID,
+			DeviceKeyHash:  credentials.HashCredential(cred),
+			ClaimRequestID: ident.EdgeID,
+			AgentVersion:   agent.Version,
+			Platform:       host.OS,
+			Architecture:   host.GOARCH,
+		})
+		if err == nil && resp.DeviceKind != "edge" {
+			err = fmt.Errorf("%w: Full Edge enrollment returned device_kind %q, want edge", transport.ErrUnexpectedStatus, resp.DeviceKind)
+		}
+	} else {
+		resp, err = client.Enroll(ctx, transport.EnrollRequest{
+			EnrollmentToken:   token,
+			GatewayInstanceID: ident.EdgeID,
+			DeviceKeyHash:     credentials.HashCredential(cred),
+			AgentVersion:      agent.Version,
+			Platform:          host.OS,
+			Architecture:      host.GOARCH,
+			EdgeID:            ident.EdgeID,
+		})
+	}
 	if err != nil {
 		return credentials.Credentials{}, "", err
 	}

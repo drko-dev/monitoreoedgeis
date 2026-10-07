@@ -18,6 +18,11 @@ const (
 	// only device_id/device_kind — no org/site metadata (fetch those via
 	// GET MePath once authenticated with the locally-generated credential).
 	EnrollPath = "/api/v1/gateway/enroll"
+	// EdgeClaimPath claims a one-time Full Edge enrollment code (XXXX-XXXX).
+	// Same zero-knowledge model as EnrollPath, but the SaaS registers the
+	// device as device_kind=edge: only an edge identity may publish
+	// local-events and display-only video. A gateway token never works here.
+	EdgeClaimPath = "/api/v1/edge/claim"
 	// MePath returns the authenticated edge's own metadata (no secrets).
 	MePath = "/api/v1/edge/me"
 	// RotateKeyPath is the self-service credential rotation endpoint. The
