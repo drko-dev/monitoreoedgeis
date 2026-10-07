@@ -633,4 +633,3 @@ func TestPostVideoFrameGatewayForbidden(t *testing.T) {
 		t.Fatalf("403 must fail with no live demand, got ack=%+v err=%v", ack, err)
 	}
 }
-
