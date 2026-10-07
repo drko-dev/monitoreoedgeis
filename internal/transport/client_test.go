@@ -585,7 +585,52 @@ func TestPostVideoFrameUsesDisplayOnlyPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.PostVideoFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{0xFF, 0xD8, 0xFF, 0xD9}); err != nil {
+	if _, err := c.PostVideoFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{0xFF, 0xD8, 0xFF, 0xD9}); err != nil {
 		t.Fatalf("PostVideoFrame() error = %v", err)
 	}
 }
+
+func TestPostVideoFrameReturnsLiveDemand(t *testing.T) {
+	for _, tc := range []struct {
+		body        string
+		wantViewers int
+		wantLive    bool
+	}{
+		{`{"status":"accepted","live_requested":true,"live_viewers":2}`, 2, true},
+		{`{"status":"accepted","live_requested":false,"live_viewers":0}`, 0, false},
+		{`{"status":"accepted"}`, 0, false}, // older SaaS: no live demand
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = io.WriteString(w, tc.body)
+		}))
+		c, err := New(srv.URL, true, 2*time.Second, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ack, err := c.PostVideoFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{0xFF, 0xD8, 0xFF, 0xD9})
+		srv.Close()
+		if err != nil {
+			t.Fatalf("PostVideoFrame() error = %v", err)
+		}
+		if ack.LiveViewers != tc.wantViewers || ack.LiveRequested != tc.wantLive {
+			t.Errorf("body %s: ack = %+v", tc.body, ack)
+		}
+	}
+}
+
+func TestPostVideoFrameGatewayForbidden(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL, true, 2*time.Second, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ack, err := c.PostVideoFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{0xFF, 0xD8, 0xFF, 0xD9})
+	if err == nil || ack.LiveRequested {
+		t.Fatalf("403 must fail with no live demand, got ack=%+v err=%v", ack, err)
+	}
+}
+

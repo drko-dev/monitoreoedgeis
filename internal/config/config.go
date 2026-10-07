@@ -62,8 +62,17 @@ type Config struct {
 	// Video pipeline settings (Milestone H). Meaningless without RTSP
 	// connectivity, so it is only actually wired up when both
 	// ConnectivityEnabled and VideoPipelineEnabled are true.
-	VideoPipelineEnabled        bool
-	VideoTargetFPS              float64
+	VideoPipelineEnabled bool
+	VideoTargetFPS       float64
+	// Full Edge Live View (on-demand). VideoTargetFPS keeps governing
+	// preview/wall and local inference; LiveTargetFPS only applies while a
+	// SaaS user has "En vivo" open for that camera, until LiveIdleTimeout
+	// after the last viewer leaves. LiveTargetFPS 0 = source FPS, capped at
+	// MaxLiveTargetFPS. LiveStreamRole must equal StreamRole: live reuses the
+	// inference decode, it never opens a second RTSP session.
+	LiveTargetFPS               float64
+	LiveStreamRole              string
+	LiveIdleTimeout             time.Duration
 	VideoOutputWidth            int
 	VideoOutputHeight           int
 	VideoRingBufferSize         int
@@ -245,6 +254,11 @@ const (
 	// Video pipeline defaults and bounds (Milestone H).
 	DefaultVideoPipelineEnabled        = false
 	DefaultVideoTargetFPS              = 5.0
+	DefaultLiveTargetFPS               = 15.0
+	MaxLiveTargetFPS                   = 30.0
+	DefaultLiveIdleTimeout             = 10 * time.Second
+	MinLiveIdleTimeout                 = 1 * time.Second
+	MaxLiveIdleTimeout                 = 5 * time.Minute
 	MinVideoTargetFPS                  = 0.1
 	MaxVideoTargetFPS                  = 30.0
 	DefaultVideoOutputWidth            = 640
@@ -401,6 +415,8 @@ func loadFromEnvironment() (*Config, error) {
 
 		VideoPipelineEnabled:        DefaultVideoPipelineEnabled,
 		VideoTargetFPS:              DefaultVideoTargetFPS,
+		LiveTargetFPS:               DefaultLiveTargetFPS,
+		LiveIdleTimeout:             DefaultLiveIdleTimeout,
 		VideoOutputWidth:            DefaultVideoOutputWidth,
 		VideoOutputHeight:           DefaultVideoOutputHeight,
 		VideoRingBufferSize:         DefaultVideoRingBufferSize,
@@ -578,6 +594,14 @@ func loadFromEnvironment() (*Config, error) {
 		}
 		cfg.StreamRole = role
 	}
+	cfg.LiveStreamRole = cfg.StreamRole
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_LIVE_STREAM_ROLE")); raw != "" {
+		role := strings.ToLower(raw)
+		if role != cfg.StreamRole {
+			return nil, fmt.Errorf("invalid live stream role %q: live view reuses the %q inference decode, set GEOCAM_STREAM_ROLE instead", raw, cfg.StreamRole)
+		}
+		cfg.LiveStreamRole = role
+	}
 
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_STREAM_TIMEOUT")); raw != "" {
 		d, err := time.ParseDuration(raw)
@@ -605,6 +629,27 @@ func loadFromEnvironment() (*Config, error) {
 				raw, MinVideoTargetFPS, MaxVideoTargetFPS)
 		}
 		cfg.VideoTargetFPS = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_LIVE_TARGET_FPS")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid live target FPS %q: %w", raw, err)
+		}
+		if v < 0 || v > MaxLiveTargetFPS {
+			return nil, fmt.Errorf("invalid live target FPS %q: must be between 0 (source FPS) and %g", raw, MaxLiveTargetFPS)
+		}
+		cfg.LiveTargetFPS = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_LIVE_IDLE_TIMEOUT")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid live idle timeout %q: %w", raw, err)
+		}
+		if d < MinLiveIdleTimeout || d > MaxLiveIdleTimeout {
+			return nil, fmt.Errorf("invalid live idle timeout %q: must be between %s and %s", raw, MinLiveIdleTimeout, MaxLiveIdleTimeout)
+		}
+		cfg.LiveIdleTimeout = d
 	}
 
 	widthSet, heightSet := false, false

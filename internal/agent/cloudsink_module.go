@@ -10,6 +10,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
+	"github.com/drko-dev/monitoreoedgeis/internal/livevideo"
 	"github.com/drko-dev/monitoreoedgeis/internal/logging"
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
 	"github.com/drko-dev/monitoreoedgeis/internal/transport"
@@ -84,14 +85,26 @@ func newCloudSink(cfg *config.Config, creds credentials.Credentials, reporter *h
 	return buildCloudSink(cfg, creds, reporter, log)
 }
 
+// edgeLiveSinkName is the name of the on-demand Live View uplink. It is
+// never registered in the router: livevideo.Controller drives it.
+const edgeLiveSinkName = "edge-live"
+
 // videoFrameSender adapts transport.Client to cloudsink.FrameSender, routing
 // every frame to the display-only VideoFramesPath. It deliberately does not
 // implement cloudsink.MetadataFrameSender, so no hybrid candidate metadata
-// can ever reach the SaaS through it.
-type videoFrameSender struct{ client *transport.Client }
+// can ever reach the SaaS through it. Each answer carries that camera's
+// live-view demand, handed to onAck.
+type videoFrameSender struct {
+	client *transport.Client
+	onAck  func(candidateKey string, ack transport.VideoFrameAck)
+}
 
 func (s videoFrameSender) PostFrame(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte) error {
-	return s.client.PostVideoFrame(ctx, deviceID, credential, candidateKey, seq, capturedAt, jpeg)
+	ack, err := s.client.PostVideoFrame(ctx, deviceID, credential, candidateKey, seq, capturedAt, jpeg)
+	if err == nil && s.onAck != nil {
+		s.onAck(candidateKey, ack)
+	}
+	return err
 }
 
 // edgeVideoHealth reports the video sink's counters under edge_video, never
@@ -100,11 +113,35 @@ type edgeVideoHealth struct{ reporter *health.Reporter }
 
 func (h edgeVideoHealth) SetCloudStatus(s cloudsink.Status) { h.reporter.SetEdgeVideoStatus(s) }
 
-// buildEdgeVideoSink builds the Full Edge live-view sink: it reuses
-// CloudSink's JPEG encoding and I7 rate limits, but uploads to the
-// display-only VideoFramesPath. No offline buffer: a stale live frame is
-// worthless. Returns nil when this Edge has nothing to push frames to.
-func buildEdgeVideoSink(cfg *config.Config, creds credentials.Credentials, reporter *health.Reporter, log *slog.Logger) processing.Sink {
+// previewSink is the router-registered edge-video sink. While a camera is in
+// Live View its preview upload is skipped: the live uplink already carries
+// fresher frames for it, and uploading both would double the bandwidth.
+type previewSink struct {
+	processing.Sink
+	live *livevideo.Controller
+}
+
+func (p previewSink) Route(f processing.Frame) error {
+	if p.live != nil && p.live.Active(f.CandidateKey) {
+		return nil
+	}
+	return p.Sink.Route(f)
+}
+
+func (p previewSink) Close() {
+	if c, ok := p.Sink.(interface{ Close() }); ok {
+		c.Close()
+	}
+}
+
+// buildEdgeVideoSink builds the Full Edge preview sink (router, at
+// GEOCAM_VIDEO_TARGET_FPS) and installs the on-demand live uplink on live.
+// Both reuse CloudSink's JPEG encoding and upload to the display-only
+// VideoFramesPath. No offline buffer: a stale frame is worthless. The live
+// uplink is not capped by GEOCAM_CLOUD_MAX_FPS (the Controller paces it at
+// GEOCAM_LIVE_TARGET_FPS) but still honors the byte-rate cap. Returns nil
+// when this Edge has nothing to push frames to.
+func buildEdgeVideoSink(cfg *config.Config, creds credentials.Credentials, reporter *health.Reporter, log *slog.Logger, live *livevideo.Controller) processing.Sink {
 	if cfg.SaaSURL == "" || !creds.IsEnrolled() || creds.Credential == "" || creds.DeviceID == "" {
 		return nil
 	}
@@ -113,20 +150,32 @@ func buildEdgeVideoSink(cfg *config.Config, creds credentials.Credentials, repor
 		log.Warn("edge video sink disabled: transport client error", slog.Any("error", err))
 		return nil
 	}
+	var onAck func(string, transport.VideoFrameAck)
+	if live != nil {
+		onAck = func(key string, ack transport.VideoFrameAck) { live.Demand(key, ack.LiveViewers) }
+		liveCfg := cloudsink.Config{
+			JPEGQuality:    cfg.CloudJPEGQuality,
+			MaxBytesPerSec: cfg.CloudMaxBytesPerSec,
+			BurstBytes:     cfg.CloudBurstBytes,
+		}
+		live.SetSink(cloudsink.New(videoFrameSender{client, onAck}, creds.DeviceID, creds.Credential, liveCfg,
+			logging.Component(log, "edge-live-sink"), live, cloudsink.WithName(edgeLiveSinkName)))
+	}
 	sinkCfg := cloudsink.Config{
 		JPEGQuality:    cfg.CloudJPEGQuality,
 		MaxBytesPerSec: cfg.CloudMaxBytesPerSec,
 		BurstBytes:     cfg.CloudBurstBytes,
 		MaxFPS:         cfg.CloudMaxFPS,
 	}
-	return cloudsink.New(videoFrameSender{client}, creds.DeviceID, creds.Credential, sinkCfg, logging.Component(log, "edge-video-sink"), edgeVideoHealth{reporter}, cloudsink.WithName(edgeVideoSinkName))
+	preview := cloudsink.New(videoFrameSender{client, onAck}, creds.DeviceID, creds.Credential, sinkCfg, logging.Component(log, "edge-video-sink"), edgeVideoHealth{reporter}, cloudsink.WithName(edgeVideoSinkName))
+	return previewSink{Sink: preview, live: live}
 }
 
 // newEdgeVideoSink returns the live-view sink only in ModeEdge; in cloud and
 // hybrid the CloudSink already carries the video.
-func newEdgeVideoSink(cfg *config.Config, creds credentials.Credentials, reporter *health.Reporter, log *slog.Logger) processing.Sink {
+func newEdgeVideoSink(cfg *config.Config, creds credentials.Credentials, reporter *health.Reporter, log *slog.Logger, live *livevideo.Controller) processing.Sink {
 	if cfg.ProcessingMode != config.ModeEdge {
 		return nil
 	}
-	return buildEdgeVideoSink(cfg, creds, reporter, log)
+	return buildEdgeVideoSink(cfg, creds, reporter, log, live)
 }
