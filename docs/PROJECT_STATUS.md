@@ -3,7 +3,32 @@
 > Answers one question: **"¿Dónde estamos parados ahora?"**
 > Git + the final Hito Z integration are the source of truth. Historical sections below are retained as implementation history and may describe the state that existed at those earlier hitos.
 
-## Current: Full Edge per-camera inference FPS — Phase 1
+## Current: Full Edge adaptive inference (stages 1–4)
+
+| Stage | PR | Status |
+| --- | --- | --- |
+| 1 MotionGate (observation) | #122 | MERGED `a9cd3f7` |
+| 2 Controller FIXED/ADAPTIVE + ANPR as demand | #123 | OPEN, awaiting merge authorization |
+| 3 Capacity manager | #124 (on #123) | OPEN |
+| 4 Remote contract (Edge) | #125 (on #124) | OPEN |
+| 4 Remote contract (SaaS) | monitoreoia #235 | OPEN |
+
+**Validated locally on the TC70** (binary from the #125 tip, then restored to `91dc806`):
+- ADAPTIVE goes idle 2 → active 10 within one 0.5 s sample of motion, holds 10 s, then ramps 8/6/4/2 at 1 step/s.
+- Allocation was never below the minimum.
+- Measured capacity was 14.6 FPS with a 15 % reserve.
+- Preview averaged 1.98 FPS and Live View 7.2 FPS (same as baseline).
+- MPS ran with 0 errors and Cloud inference was 0.
+- Clips are ~30 frames at ~10 FPS, 3.0 s.
+
+### Pending calibration (not done yet)
+1. Physical detection tests: walking and running passes, night/IR, lighting changes, wind and foliage. So far these are covered only by synthetic sequences.
+2. Multi-camera physical validation: fairness, saturation and priorities are covered by unit tests only.
+3. **Events vs. inference rate.** On the TC70, ADAPTIVE (mostly at 10 FPS) produced 32 `edge_local` events in 16 min, against 1 in 25 min at FIXED 2 FPS. This must be explained (real activity vs. dedup and track interplay with the rate) before ADAPTIVE is enabled in production. Dedup was not modified.
+4. `remoteconfig.copyConfig` drops `cameras[].anpr` (pre-existing, out of scope).
+5. Live View degradation (SaaS latency) and Phase 2 per-camera resolution stay as listed below.
+
+## Full Edge per-camera inference FPS — Phase 1
 
 | Field | Value |
 | --- | --- |

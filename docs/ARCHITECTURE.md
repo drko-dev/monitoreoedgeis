@@ -521,6 +521,39 @@ controller on top.
 - *Off switch.* `GEOCAM_EDGE_MOTION_GATE=false`. Cloud and hybrid never
   build a gate.
 
+**Adaptive inference (`internal/inference`).** In edge mode, with
+`GEOCAM_EDGE_INFERENCE_MANAGER=true` (the default), the `Manager` is the
+**only** component that sets sampler rates. It ticks every 100 ms, and
+only while the runtime mode is edge.
+
+- *Per-camera policy (`Controller`).*
+  - **FIXED** is the default and runs at `target_fps`: identical to the
+    pre-existing behavior.
+  - **ADAPTIVE** runs at `idle_fps` while the MotionGate is idle and
+    switches to `active_fps` on the first tick after activity. It holds
+    `idle_timeout` after the last motion, then steps down 25 % of the range
+    per second to `idle_fps`. It never goes below `idle_fps`.
+  - Defaults are 2/10/15 FPS, 10 s, sensitivity medium, priority normal.
+    `GEOCAM_EDGE_INFERENCE_MODE` sets the default policy.
+- *Capacity.*
+  - The worker is serial, so capacity = 1000 / median of the last 32
+    service times (encode + IPC + YOLO, measured by `FreshSink`). It counts
+    as measured only after ≥ 10 samples, which keeps warm-up out. It is
+    never derived from CPU %, and each device measures its own: no M4
+    figure is assumed for a Pi HAT.
+  - A reserve (`GEOCAM_EDGE_INFERENCE_RESERVE`, 15 %) is never allocated.
+  - Every camera gets its minimum first, then the rest by priority weight
+    (1/2/4) up to its demand.
+  - If the minimums do not fit, the device reports `saturated` and each
+    affected camera carries `min_demand_exceeds_capacity`.
+- *ANPR.* A burst is demand capped at `max_fps` that competes for
+  capacity; the hint no longer sets samplers.
+- *Remote config.* `cameras[k].inference` (see #125/#235), with remote
+  `target_fps` as the FIXED rate. Both are applied live.
+- *Status.* `adaptive_inference.cameras[k]` and
+  `adaptive_inference.device` (see `inference.CameraStatus` and
+  `inference.DeviceStatus`).
+
 
 **Demand contract.** Each `video-frames` answer carries that camera's
 demand: `{"live_requested": bool, "live_viewers": N}`. The SaaS counts a
