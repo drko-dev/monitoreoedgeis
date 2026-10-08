@@ -70,7 +70,8 @@ type Detection struct {
 	Label      string     `json:"label"`
 	Type       string     `json:"type"` // "person" | "vehicle"
 	Confidence float64    `json:"confidence"`
-	BBox       [4]float64 `json:"bbox"` // x1, y1, x2, y2 in output-frame pixels
+	BBox       [4]float64 `json:"bbox"`               // x1, y1, x2, y2 in output-frame pixels
+	TrackID    *int64     `json:"track_id,omitempty"` // set only by a worker that runs a tracker
 }
 
 // InferRequest is what a Sink hands the Worker for one frame.

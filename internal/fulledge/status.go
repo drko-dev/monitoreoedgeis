@@ -5,6 +5,7 @@ package fulledge
 type Status struct {
 	LocalDetections        int64          `json:"local_detections"`
 	LocalEventsCreated     int64          `json:"local_events_created"`
+	EventsDeduplicated     int64          `json:"events_deduplicated"`
 	EvidenceSaved          int64          `json:"evidence_saved"`
 	EvidenceFailures       int64          `json:"evidence_failures"`
 	LocalEventBacklog      int64          `json:"local_event_backlog"`

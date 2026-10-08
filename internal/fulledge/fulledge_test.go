@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -567,9 +568,10 @@ func TestConcurrentProcessInferenceRace(t *testing.T) {
 		go func(workerID int) {
 			defer wg.Done()
 			for i := 0; i < iterations; i++ {
-				frame := createTestYUVFrame("cam-race", uint64(workerID*100+i))
+				cam := fmt.Sprintf("cam-race-%d", workerID)
+				frame := createTestYUVFrame(cam, uint64(workerID*100+i))
 				res := InferenceResult{
-					CandidateKey: "cam-race",
+					CandidateKey: cam,
 					FrameSeq:     uint64(workerID*100 + i),
 					Detections: []LocalDetection{
 						{ClassID: 0, Label: "person", Confidence: 0.9, BBox: BoundingBox{X1: 10, Y1: 10, X2: 50, Y2: 50}},
@@ -585,10 +587,14 @@ func TestConcurrentProcessInferenceRace(t *testing.T) {
 
 	wg.Wait()
 
-	st := hs.get()
-	expectedTotal := int64(workers * iterations)
-	if st.LocalEventsCreated != expectedTotal {
-		t.Errorf("expected %d events created, got %d", expectedTotal, st.LocalEventsCreated)
+	// Each worker is its own camera holding one still person: exactly one
+	// event per camera, every other sighting deduplicated, nothing lost.
+	st := svc.Status()
+	if st.LocalEventsCreated != int64(workers) {
+		t.Errorf("expected %d events created (one per camera), got %d", workers, st.LocalEventsCreated)
+	}
+	if got := st.LocalEventsCreated + st.EventsDeduplicated; got != int64(workers*iterations) {
+		t.Errorf("created+deduplicated = %d, want %d", got, workers*iterations)
 	}
 }
 

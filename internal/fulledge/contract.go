@@ -58,6 +58,10 @@ type LocalDetection struct {
 	Tipo       string      `json:"tipo"`
 	Confidence float64     `json:"confidence"`
 	BBox       BoundingBox `json:"bbox"`
+	// TrackID is the detector's tracker identity, when it runs one. It is
+	// the primary deduplication key; without it the Deduper falls back to
+	// camera + class + IoU.
+	TrackID *int64 `json:"track_id,omitempty"`
 }
 
 // ValidateConfidence checks the model's real score is finite and in [0,1] —

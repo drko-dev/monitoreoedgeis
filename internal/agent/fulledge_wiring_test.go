@@ -395,3 +395,50 @@ func TestFullEdgeWiring_CorrelationIDSurvivesBacklogRestart(t *testing.T) {
 		t.Fatalf("CorrelationID after restart = %q, want %q", got, "cam-restart-99")
 	}
 }
+
+// A burst of repeated sightings of one person must create one event: the
+// bounded backlog (here 10 operations) never fills and never drops.
+func TestFullEdgeWiring_RepeatedDetectionBurstDoesNotFloodBacklog(t *testing.T) {
+	dataDir := t.TempDir()
+	logger := slog.New(slog.DiscardHandler)
+	store, err := fulledge.NewEventStore(dataDir)
+	if err != nil {
+		t.Fatalf("NewEventStore: %v", err)
+	}
+	limits := fulledge.NewLimitsManager(fulledge.LimitsConfig{MaxConcurrentInference: 1, QueueDepth: 8}, nil, nil, logger)
+	evidenceMgr, err := fulledge.NewEvidenceManager(dataDir, limits, 85, logger)
+	if err != nil {
+		t.Fatalf("NewEvidenceManager: %v", err)
+	}
+	svc := fulledge.NewService(fulledge.ServiceConfig{EdgeID: "edge-test", DataDir: dataDir, DeviceMode: fulledge.DeviceCPU},
+		store, evidenceMgr, fulledge.NewHardwareManager(fulledge.DeviceCPU, nil, logger), limits, nil, logger)
+	backlog, err := edgebacklog.Open(edgebacklog.Config{Dir: t.TempDir(), MaxOperations: 10, MaxBytes: 10 << 20})
+	if err != nil {
+		t.Fatalf("edgebacklog.Open: %v", err)
+	}
+	consumer := newFullEdgeEventConsumer(svc, backlog, nil, nil, dataDir, logger)
+
+	start := time.Date(2026, 10, 7, 21, 0, 0, 0, time.UTC)
+	for i := 0; i < 300; i++ { // 150 s at 2 FPS, the TC70 pattern that flooded the backlog
+		consumer.ConsumeInference(vision.InferenceResult{
+			CandidateKey: "cam-1",
+			FrameSeq:     uint64(i),
+			Timestamp:    start.Add(time.Duration(i) * 500 * time.Millisecond),
+			Device:       "mps",
+			Detections: []vision.Detection{
+				{ClassID: 0, Label: "person", Type: vision.DetectionTypePerson, Confidence: 0.84, BBox: [4]float64{214, 71, 403, 332}},
+			},
+		}, []byte("jpeg"))
+	}
+
+	st := svc.Status()
+	if st.LocalDetections != 300 || st.LocalEventsCreated != 1 || st.EventsDeduplicated != 299 {
+		t.Fatalf("detections=%d created=%d deduplicated=%d, want 300/1/299", st.LocalDetections, st.LocalEventsCreated, st.EventsDeduplicated)
+	}
+	if st.EvidenceSaved != 1 {
+		t.Fatalf("EvidenceSaved = %d, want 1 (no evidence for deduplicated sightings)", st.EvidenceSaved)
+	}
+	if bs := backlog.Status(); bs.Drops != 0 || bs.BacklogCount != 1 {
+		t.Fatalf("backlog count=%d drops=%d, want 1/0", bs.BacklogCount, bs.Drops)
+	}
+}
