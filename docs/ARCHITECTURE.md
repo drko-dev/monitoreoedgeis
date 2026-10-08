@@ -436,12 +436,45 @@ would have to reimplement pipeline startup.
 
 Full Edge (`GEOCAM_PROCESSING_MODE=edge`) uploads display-only video to
 `POST /api/v1/edge/video-frames`; the SaaS never runs inference on it.
-There are two rates per camera:
+There are three independent rates per camera:
 
 | Flow | Rate | Path |
 | --- | --- | --- |
-| Preview / wall | `GEOCAM_VIDEO_TARGET_FPS` (e.g. 2) | router -> `edge-video` sink (same sampler as local YOLO) |
+| Local inference (YOLO) | `target_fps`: `GEOCAM_VIDEO_TARGET_FPS`, overridable per camera by remote config `cameras[candidate_key].target_fps` (applied live, no restart) | paced sampler -> router -> `FreshSink` -> `edge-vision` |
+| Preview / wall | `GEOCAM_EDGE_PREVIEW_FPS` (default 2) | same sampler -> router -> `PacedSink` -> `edge-video` sink |
 | Live View, on demand | `GEOCAM_LIVE_TARGET_FPS` (default 15, `0` = source FPS, max 30) | decode tap -> `livevideo.Controller` -> `edge-live` uplink |
+
+**Inference rate (edge mode only).** `target_fps` is the inference rate.
+Raising it, or an ANPR burst, never raises the preview: `PacedSink` caps
+each camera's preview on its own drift-free schedule. In edge mode the
+sampler is paced (`processing.NewPacedSampler`), so the effective rate
+matches the configured one. A plain minimum-interval gate rounds each emit
+up to the next source frame: a 15 FPS source gave 7.5 at 10 and 3.75 at 5.
+Cloud and hybrid keep that minimum-interval sampler unchanged.
+
+**Shared worker: fairness and freshness.** One YOLO worker serves every
+camera serially. `processing.FreshSink` replaces the router FIFO in front
+of it: it keeps one pending frame per camera (a newer frame supersedes
+it), serves cameras round-robin, and drops a frame older than 2 s when its
+turn comes. A fast camera therefore takes only its own turn, and latency
+cannot grow behind a queue. The sum of all cameras' `target_fps` should
+fit the worker budget. Measured on an M4 (MPS, 640 px) the worker takes
+~30 ms per inference in isolation and ~65 ms end to end (JPEG + IPC), so
+roughly 15 inferences/s in total. Beyond that, `effective_fps` falls below
+`configured_fps` evenly across cameras.
+
+**Clips.** The ring buffer holds sampled frames, so it grows with a
+camera's `target_fps` to keep `clipPreEvent` (3 s) plus 1 s of history,
+bounded at 300 frames; `GEOCAM_VIDEO_RING_BUFFER_SIZE` is the floor.
+Clips are encoded at the frames' measured rate (timestamps), so they play
+in real time at any inference rate.
+
+**Per-camera metrics.** `/status` adds `edge_inference` (keyed by
+candidate_key: `configured_fps`, `effective_fps` over 5 s, `processed`,
+`errors`, `last_latency_ms`/`avg_latency_ms` of encode+IPC+inference,
+`last_frame_age_ms`, `dropped_superseded`, `dropped_stale`) and
+`edge_preview` (`configured_fps`, `effective_fps`, `forwarded`,
+`throttled`).
 
 **Demand contract.** Each `video-frames` answer carries that camera's
 demand: `{"live_requested": bool, "live_viewers": N}`. The SaaS counts a
@@ -450,7 +483,7 @@ viewer while an operator's MJPEG `/stream` is open. `live_viewers > 0`
 report 0 viewers, the camera falls back to preview when that window
 lapses. No extra control channel or polling: the 15s control poll is too
 slow for opening a modal, and the preview upload already reaches the
-SaaS every 1/`VIDEO_TARGET_FPS` seconds. An older SaaS without the
+SaaS every 1/`EDGE_PREVIEW_FPS` seconds. An older SaaS without the
 fields simply never requests live.
 
 **Invariants.**
