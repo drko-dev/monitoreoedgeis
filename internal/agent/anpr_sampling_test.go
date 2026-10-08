@@ -233,3 +233,36 @@ func TestSamplerBurstHint_ConcurrentRequestRelease_RaceSafe(t *testing.T) {
 		<-done
 	}
 }
+
+type fakeBurstController struct {
+	*fakeFPSController
+	bursts map[string]float64
+}
+
+func (c *fakeBurstController) SetBurstFPS(key string, fps float64) { c.bursts[key] = fps }
+
+// With an inference.Manager owning the samplers, bursts are demand: the
+// hint never sets the sampler and release clears the demand (no stale
+// baseline restore).
+func TestSamplerBurstHint_BurstDemandController(t *testing.T) {
+	h := newSamplerBurstHint()
+	ctrl := &fakeBurstController{fakeFPSController: newFakeFPSController(map[string]float64{"cam1": 2}), bursts: map[string]float64{}}
+	h.setController(ctrl)
+
+	h.RequestBurstFPS("cam1", "b1", 10)
+	h.RequestBurstFPS("cam1", "b2", 12)
+	if ctrl.bursts["cam1"] != 12 {
+		t.Fatalf("burst demand = %v, want max 12", ctrl.bursts["cam1"])
+	}
+	h.ReleaseBurstFPS("cam1", "b2")
+	if ctrl.bursts["cam1"] != 10 {
+		t.Fatalf("after releasing one = %v, want 10", ctrl.bursts["cam1"])
+	}
+	h.ReleaseBurstFPS("cam1", "b1")
+	if ctrl.bursts["cam1"] != 0 {
+		t.Fatalf("after releasing all = %v, want 0", ctrl.bursts["cam1"])
+	}
+	if fps, _ := ctrl.CurrentTargetFPS("cam1"); fps != 2 {
+		t.Fatalf("hint touched the sampler directly: %v", fps)
+	}
+}

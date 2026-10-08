@@ -7,7 +7,9 @@ import (
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
+	"github.com/drko-dev/monitoreoedgeis/internal/inference"
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
+	"github.com/drko-dev/monitoreoedgeis/internal/remoteconfig"
 	"github.com/drko-dev/monitoreoedgeis/internal/vision"
 )
 
@@ -102,7 +104,9 @@ func (a *Agent) freshInference(vs *vision.Sink, reporter *health.Reporter) proce
 		}
 		return managerFPSController{a.videoManager}.CurrentTargetFPS(key)
 	}
-	return processing.NewFreshSink(vs, inferenceMaxFrameAge, configured, reporter.SetEdgeInferenceStatus)
+	fs := processing.NewFreshSink(vs, inferenceMaxFrameAge, configured, reporter.SetEdgeInferenceStatus)
+	a.freshSink.Store(fs)
+	return fs
 }
 
 // motionObservingConsumer tells each camera's passive MotionGate when local
@@ -131,3 +135,84 @@ func (a *Agent) motionObserved(inner vision.EventConsumer) vision.EventConsumer 
 		return a.videoManager.MotionGate(key)
 	}}
 }
+
+// inferenceVideo adapts processing.Manager to inference.Video.
+type inferenceVideo struct{ m *processing.Manager }
+
+func (v inferenceVideo) CandidateKeys() []string { return v.m.CandidateKeys() }
+func (v inferenceVideo) CurrentTargetFPS(key string) (float64, bool) {
+	return managerFPSController{v.m}.CurrentTargetFPS(key)
+}
+func (v inferenceVideo) SetTargetFPS(key string, fps float64) error {
+	return v.m.SetTargetFPS(key, fps)
+}
+func (v inferenceVideo) MotionState(key string) string {
+	if g := v.m.MotionGate(key); g != nil {
+		return g.State()
+	}
+	return ""
+}
+func (v inferenceVideo) SetMotionSensitivity(key, s string) {
+	if g := v.m.MotionGate(key); g != nil {
+		g.SetSensitivity(s)
+	}
+}
+
+func (a *Agent) newInferenceManager(videoMgr *processing.Manager, reporter *health.Reporter) *inference.Manager {
+	return inference.NewManager(inferenceVideo{videoMgr}, inference.Options{
+		GlobalTargetFPS: a.cfg.VideoTargetFPS,
+		Default:         inference.CameraConfig{Mode: a.cfg.EdgeInferenceMode, MotionSensitivity: a.cfg.EdgeMotionSensitivity},
+		Reserve:         a.cfg.EdgeInferenceReserve,
+		OnStatus:        reporter.SetAdaptiveInferenceStatus,
+		// Only while the runtime is in edge mode: after a remote switch to
+		// cloud/hybrid the samplers are not ours.
+		Active: func() bool {
+			if m, ok := a.runtimeApplier.(interface{ CurrentMode() config.ProcessingMode }); ok {
+				return m.CurrentMode() == config.ModeEdge
+			}
+			return a.cfg.ProcessingMode == config.ModeEdge
+		},
+		Measure: func() map[string]inference.Measured {
+			fs := a.freshSink.Load()
+			if fs == nil {
+				return nil
+			}
+			out := map[string]inference.Measured{}
+			for key, st := range fs.Status() {
+				out[key] = inference.Measured{EffectiveFPS: st.EffectiveFPS, LatencyMS: st.AvgLatencyMS, Dropped: st.DroppedStale + st.DroppedSuperseded}
+			}
+			return out
+		},
+	})
+}
+
+// inferencePolicy is nil (adapter keeps setting samplers) when no Manager.
+func (a *Agent) inferencePolicy() remoteconfig.InferencePolicy {
+	if a.inferenceMgr == nil {
+		return nil
+	}
+	return a.inferenceMgr
+}
+
+// inferenceModule runs the Manager's tick loop for the agent's lifetime.
+type inferenceModule struct{ mgr *inference.Manager }
+
+func (inferenceModule) Name() string { return "inference-manager" }
+func (m inferenceModule) Start(ctx context.Context) error {
+	go m.mgr.Run(ctx)
+	return nil
+}
+func (inferenceModule) Stop(context.Context) error { return nil }
+
+// anprBurstController lets the ANPR burst hint talk to the Manager: bursts
+// are demand (SetBurstFPS), never a direct sampler change.
+type anprBurstController struct{ mgr *inference.Manager }
+
+func (c anprBurstController) CurrentTargetFPS(key string) (float64, bool) {
+	return c.mgr.CurrentTargetFPS(key)
+}
+func (c anprBurstController) SetTargetFPS(key string, fps float64) error {
+	c.mgr.SetBurstFPS(key, fps)
+	return nil
+}
+func (c anprBurstController) SetBurstFPS(key string, fps float64) { c.mgr.SetBurstFPS(key, fps) }

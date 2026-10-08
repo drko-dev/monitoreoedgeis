@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/anpr"
@@ -25,6 +26,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/fulledge"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
+	"github.com/drko-dev/monitoreoedgeis/internal/inference"
 	"github.com/drko-dev/monitoreoedgeis/internal/livevideo"
 	"github.com/drko-dev/monitoreoedgeis/internal/logging"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
@@ -66,6 +68,8 @@ type Agent struct {
 	visionSink          *vision.Sink
 	liveVideo           *livevideo.Controller
 	wallDetections      *recentDetections
+	freshSink           atomic.Pointer[processing.FreshSink]
+	inferenceMgr        *inference.Manager
 	modelManager        *vision.ModelManager
 	runtimeApplier      remoteconfig.Applier
 	remoteConfig        *remoteconfig.Module
@@ -375,8 +379,18 @@ func New(cfg *config.Config) *Agent {
 			if a.fullEdgeConsumer != nil {
 				a.fullEdgeConsumer.SetHistoryProvider(videoMgr)
 			}
+			if cfg.ProcessingMode == config.ModeEdge && cfg.EdgeInferenceManager {
+				// Full Edge: inference.Manager is the only owner of sampler
+				// rates; ANPR bursts become its demand.
+				a.inferenceMgr = a.newInferenceManager(videoMgr, reporter)
+				mods = append(mods, inferenceModule{mgr: a.inferenceMgr})
+			}
 			if a.anprSamplingHint != nil {
-				a.anprSamplingHint.SetManager(videoMgr)
+				if a.inferenceMgr != nil {
+					a.anprSamplingHint.setController(anprBurstController{a.inferenceMgr})
+				} else {
+					a.anprSamplingHint.SetManager(videoMgr)
+				}
 			}
 
 			a.runtimeApplier = remoteconfig.NewRuntimeAdapter(
@@ -411,6 +425,7 @@ func New(cfg *config.Config) *Agent {
 					}
 					return a.freshInference(vs, reporter), mod.Start, mod.Stop
 				}),
+				remoteconfig.WithInferencePolicy(a.inferencePolicy()),
 				remoteconfig.WithModeChangeCallback(func(mode string) {
 					reporter.SetProcessingMode(mode)
 				}),

@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
+	"github.com/drko-dev/monitoreoedgeis/internal/inference"
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
 	"github.com/drko-dev/monitoreoedgeis/internal/rtsp"
 	"github.com/drko-dev/monitoreoedgeis/internal/vision"
@@ -49,6 +51,8 @@ type RuntimeAdapter struct {
 	hasPrevious bool
 
 	currentMode config.ProcessingMode
+	modeNow     atomic.Value // config.ProcessingMode, readable without mu
+	inference   InferencePolicy
 	activeSinks []processing.Sink
 }
 
@@ -100,6 +104,17 @@ func WithModeChangeCallback(fn func(mode string)) AdapterOption {
 }
 
 // WithHealthCheck overrides or complements the default pipeline health check.
+// InferencePolicy owns Full Edge sampler rates (internal/inference.Manager).
+// In edge mode the adapter hands it target_fps instead of setting samplers.
+type InferencePolicy interface {
+	ApplyRemote(global *float64, cameras map[string]inference.CameraConfig) error
+}
+
+// WithInferencePolicy routes edge-mode target_fps through p.
+func WithInferencePolicy(p InferencePolicy) AdapterOption {
+	return func(a *RuntimeAdapter) { a.inference = p }
+}
+
 func WithHealthCheck(fn func(ctx context.Context) error) AdapterOption {
 	return func(a *RuntimeAdapter) {
 		a.healthCheck = fn
@@ -132,6 +147,7 @@ func NewRuntimeAdapter(
 
 	adapter.initialCfg = adapter.snapshotCurrentConfig()
 	adapter.currentCfg = copyConfig(adapter.initialCfg)
+	adapter.modeNow.Store(adapter.currentMode)
 	return adapter
 }
 
@@ -239,6 +255,7 @@ func (a *RuntimeAdapter) Apply(ctx context.Context, patch RuntimeConfig) error {
 	a.currentCfg = effective
 	if effective.ProcessingMode != nil {
 		a.currentMode = *effective.ProcessingMode
+		a.modeNow.Store(a.currentMode)
 		if a.onModeChange != nil {
 			a.onModeChange(string(a.currentMode))
 		}
@@ -265,6 +282,7 @@ func (a *RuntimeAdapter) Rollback(ctx context.Context) error {
 	a.currentCfg = targetCfg
 	if targetCfg.ProcessingMode != nil {
 		a.currentMode = *targetCfg.ProcessingMode
+		a.modeNow.Store(a.currentMode)
 		if a.onModeChange != nil {
 			a.onModeChange(string(a.currentMode))
 		}
@@ -316,6 +334,7 @@ func (a *RuntimeAdapter) RollbackRuntimeConfig(ctx context.Context, previous Con
 	a.currentCfg = target
 	if target.ProcessingMode != nil {
 		a.currentMode = *target.ProcessingMode
+		a.modeNow.Store(a.currentMode)
 		if a.onModeChange != nil {
 			a.onModeChange(string(a.currentMode))
 		}
@@ -339,6 +358,7 @@ func (a *RuntimeAdapter) applyState(ctx context.Context, cfg RuntimeConfig) erro
 			return fmt.Errorf("mode transition %s -> %s: %w", a.currentMode, targetMode, err)
 		}
 		a.currentMode = targetMode
+		a.modeNow.Store(a.currentMode)
 	}
 
 	// Model updates
@@ -375,8 +395,15 @@ func (a *RuntimeAdapter) applyState(ctx context.Context, cfg RuntimeConfig) erro
 	}
 	a.videoManager.SetConfig(mgrCfg)
 
-	// Hot-reload global FPS on active pipelines
-	if cfg.TargetFPS != nil {
+	// Full Edge with an inference policy: it owns every sampler rate, so
+	// target_fps (global and per camera) goes to it, never to the samplers.
+	policy := a.inference != nil && targetMode == config.ModeEdge
+	if policy {
+		if err := a.inference.ApplyRemote(cfg.TargetFPS, inferencePolicies(cfg.Cameras)); err != nil {
+			return fmt.Errorf("inference policy: %w", err)
+		}
+	} else if cfg.TargetFPS != nil {
+		// Hot-reload global FPS on active pipelines
 		_ = a.videoManager.SetTargetFPS("", *cfg.TargetFPS)
 	}
 
@@ -411,7 +438,7 @@ func (a *RuntimeAdapter) applyState(ctx context.Context, cfg RuntimeConfig) erro
 
 		// Per-camera overrides
 		if camOverride, ok := cfg.Cameras[candidateKey]; ok {
-			if camOverride.TargetFPS != nil {
+			if camOverride.TargetFPS != nil && !policy {
 				_ = a.videoManager.SetTargetFPS(candidateKey, *camOverride.TargetFPS)
 			}
 			if camOverride.OutputWidth != nil && (camCfg.OutputWidth != *camOverride.OutputWidth || camCfg.OutputHeight != *camOverride.OutputHeight) {
@@ -660,4 +687,30 @@ func MergeConfig(base, patch RuntimeConfig) RuntimeConfig {
 	}
 
 	return res
+}
+
+// inferencePolicies maps remote per-camera overrides to inference
+// policies: target_fps is the FIXED rate.
+func inferencePolicies(cams map[string]CameraConfig) map[string]inference.CameraConfig {
+	out := make(map[string]inference.CameraConfig, len(cams))
+	for key, c := range cams {
+		var p inference.CameraConfig
+		if c.TargetFPS != nil {
+			p.TargetFPS = *c.TargetFPS
+		}
+		if p != (inference.CameraConfig{}) {
+			out[key] = p
+		}
+	}
+	return out
+}
+
+// CurrentMode returns the processing mode in force.
+// It never takes the adapter lock, which Apply holds across mode
+// transitions.
+func (a *RuntimeAdapter) CurrentMode() config.ProcessingMode {
+	if m, ok := a.modeNow.Load().(config.ProcessingMode); ok {
+		return m
+	}
+	return ""
 }
