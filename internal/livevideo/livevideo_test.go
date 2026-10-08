@@ -185,3 +185,67 @@ func TestOfferNeverBlocksAndCountsResults(t *testing.T) {
 		t.Fatal("failed upload not counted")
 	}
 }
+
+// concurrencySink records how many Route calls overlap.
+type concurrencySink struct {
+	mu        sync.Mutex
+	inFlight  int
+	maxFlight int
+}
+
+func (s *concurrencySink) Name() string { return "edge-live" }
+func (s *concurrencySink) Route(processing.Frame) error {
+	s.mu.Lock()
+	s.inFlight++
+	s.maxFlight = max(s.maxFlight, s.inFlight)
+	s.mu.Unlock()
+	time.Sleep(30 * time.Millisecond)
+	s.mu.Lock()
+	s.inFlight--
+	s.mu.Unlock()
+	return nil
+}
+
+func TestUploadsOverlapToHideUplinkLatency(t *testing.T) {
+	sink := &concurrencySink{}
+	c, _ := newTestController(t, 15, sink)
+	for i := 0; i < 20; i++ {
+		c.Offer(processing.Frame{CandidateKey: "cam"})
+		time.Sleep(5 * time.Millisecond)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && c.Status().FramesSent+c.Status().FramesDropped < 20 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if sink.maxFlight < 2 || sink.maxFlight > uploadWorkers {
+		t.Fatalf("max uploads in flight = %d, want 2..%d", sink.maxFlight, uploadWorkers)
+	}
+}
+
+func TestPacerKeepsJitteredSourceAtTargetRate(t *testing.T) {
+	p := newPacer(15)
+	at := time.Unix(1_700_000_000, 0)
+	emitted := 0
+	// ~14.3 FPS source whose decode timestamps alternate 40 ms / 100 ms.
+	for i := 0; i < 300; i++ {
+		if p.allow(at) {
+			emitted++
+		}
+		at = at.Add(time.Duration(40+60*(i%2)) * time.Millisecond)
+	}
+	if emitted < 285 {
+		t.Fatalf("emitted %d of 300 jittered frames, want >= 285", emitted)
+	}
+	// Never faster than the target: a 60 FPS burst still yields ~15 FPS.
+	p, emitted = newPacer(15), 0
+	for i := 0; i < 600; i++ {
+		if p.allow(at.Add(time.Duration(i) * time.Second / 60)) {
+			emitted++
+		}
+	}
+	if emitted < 148 || emitted > 152 {
+		t.Fatalf("emitted %d over 10s of 60 FPS input, want ~150", emitted)
+	}
+}

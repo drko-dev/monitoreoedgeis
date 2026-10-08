@@ -28,8 +28,45 @@ import (
 // the uplink is slower than the camera, new frames are dropped, never queued.
 const queueDepth = 2
 
+// uploadWorkers bounds uploads in flight. Each upload is one HTTPS round trip
+// whose latency (~100-150 ms, mostly SaaS-side auth + worker IPC) would cap a
+// sequential uploader near 7 FPS; a few in flight reach the live target. The
+// SaaS discards a frame older than the one it already displays, so completion
+// order does not matter.
+const uploadWorkers = 3
+
 // fpsWindow is the window effective_fps is measured over.
 const fpsWindow = 2 * time.Second
+
+// statusInterval republishes the status so effective_fps and active decay
+// to 0/false once uploads stop, instead of freezing at the last value.
+const statusInterval = time.Second
+
+// pacer paces live frames on a fixed grid (next += interval) rather than
+// "interval since the last emit": decode timestamps jitter around the camera
+// period, and a last-emit sampler targeting ~15 FPS on a ~15 FPS source
+// drops every frame that lands early, roughly halving the live rate. After a
+// gap longer than two intervals the grid resyncs to now, so a stall can never
+// turn into more than a two-frame burst.
+type pacer struct {
+	interval time.Duration
+	next     time.Time
+}
+
+func newPacer(fps float64) *pacer {
+	return &pacer{interval: time.Duration(float64(time.Second) / fps)}
+}
+
+func (p *pacer) allow(t time.Time) bool {
+	if t.Before(p.next) {
+		return false
+	}
+	if t.Sub(p.next) > 2*p.interval {
+		p.next = t
+	}
+	p.next = p.next.Add(p.interval)
+	return true
+}
 
 // Status is the /status "live_video" block. Never carries URLs or secrets.
 type Status struct {
@@ -49,7 +86,7 @@ type Status struct {
 type camera struct {
 	until   time.Time
 	viewers int
-	sampler *processing.Sampler
+	sampler *pacer
 }
 
 // Controller is a processing.LiveTap. Safe for concurrent use.
@@ -96,9 +133,26 @@ func newWithClock(targetFPS, maxFPS float64, idle time.Duration, publish func(St
 		stop:      make(chan struct{}),
 		cams:      make(map[string]*camera),
 	}
-	c.wg.Add(1)
-	go c.uploadLoop()
+	c.wg.Add(uploadWorkers + 1)
+	for range uploadWorkers {
+		go c.uploadLoop()
+	}
+	go c.statusLoop()
 	return c
+}
+
+func (c *Controller) statusLoop() {
+	defer c.wg.Done()
+	t := time.NewTicker(statusInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-c.stop:
+			return
+		case <-t.C:
+			c.publishStatus()
+		}
+	}
 }
 
 // SetSink installs (or, with nil, removes) the live uplink. Removing it --
@@ -124,7 +178,7 @@ func (c *Controller) Demand(candidateKey string, viewers int) {
 			c.mu.Unlock()
 			return
 		}
-		cam = &camera{sampler: processing.NewSampler(c.targetFPS)}
+		cam = &camera{sampler: newPacer(c.targetFPS)}
 		c.cams[candidateKey] = cam
 	}
 	changed := cam.viewers != viewers
@@ -162,7 +216,7 @@ func (c *Controller) Wants(candidateKey string, at time.Time) bool {
 		c.publishStatus()
 		return false
 	}
-	ok := cam.sampler.ShouldEmit(at)
+	ok := cam.sampler.allow(at)
 	c.mu.Unlock()
 	return ok
 }
