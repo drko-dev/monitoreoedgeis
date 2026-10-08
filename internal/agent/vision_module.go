@@ -179,7 +179,7 @@ func (a *Agent) newInferenceManager(videoMgr *processing.Manager, reporter *heal
 			}
 			out := map[string]inference.Measured{}
 			for key, st := range fs.Status() {
-				out[key] = inference.Measured{EffectiveFPS: st.EffectiveFPS, LatencyMS: st.AvgLatencyMS, Dropped: st.DroppedStale + st.DroppedSuperseded}
+				out[key] = inference.Measured{EffectiveFPS: st.EffectiveFPS, LatencyMS: st.MedianLatencyMS, Samples: st.LatencySamples, Dropped: st.DroppedStale + st.DroppedSuperseded}
 			}
 			return out
 		},

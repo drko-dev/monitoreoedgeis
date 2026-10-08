@@ -24,7 +24,8 @@ type Video interface {
 // in front of the worker).
 type Measured struct {
 	EffectiveFPS float64
-	LatencyMS    float64 // average service time per inference (encode+IPC+YOLO)
+	LatencyMS    float64 // median recent service time per inference (encode+IPC+YOLO)
+	Samples      int     // inferences LatencyMS is based on
 	Dropped      int64
 }
 

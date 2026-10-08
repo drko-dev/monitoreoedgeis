@@ -2,6 +2,10 @@ package inference
 
 import "math"
 
+// minLatencySamples is how many inferences a camera needs before its
+// service time counts as a capacity measurement.
+const minLatencySamples = 10
+
 // measureDevice derives device capacity from measured service time: the
 // worker is serial, so capacity = 1000 / average latency. Utilization is
 // the measured busy fraction (sum of effective FPS x latency).
@@ -10,7 +14,7 @@ func measureDevice(measured map[string]Measured, reserve float64) DeviceStatus {
 	var latSum, weight, busy float64
 	for _, mm := range measured {
 		dev.MeasuredThroughput += mm.EffectiveFPS
-		if mm.LatencyMS > 0 && mm.EffectiveFPS > 0 {
+		if mm.LatencyMS > 0 && mm.EffectiveFPS > 0 && mm.Samples >= minLatencySamples {
 			latSum += mm.LatencyMS * mm.EffectiveFPS
 			weight += mm.EffectiveFPS
 			busy += mm.EffectiveFPS * mm.LatencyMS / 1000

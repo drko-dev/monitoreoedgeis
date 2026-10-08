@@ -11,7 +11,7 @@ func measuredAt(v *fakeVideo, latencyMS float64) func() map[string]Measured {
 	return func() map[string]Measured {
 		out := map[string]Measured{}
 		for _, k := range v.CandidateKeys() {
-			out[k] = Measured{EffectiveFPS: v.rate(k), LatencyMS: latencyMS}
+			out[k] = Measured{EffectiveFPS: v.rate(k), LatencyMS: latencyMS, Samples: 32}
 		}
 		return out
 	}
@@ -161,4 +161,23 @@ func TestWaterFillRedistributesUnusedShare(t *testing.T) {
 		t.Fatalf("got %v, want a=1 b=5", got)
 	}
 	_ = time.Second
+}
+
+// Regression (TC70, 2026-10-08): the worker's first inference takes seconds;
+// before minLatencySamples the capacity is "unmeasured" and demand passes
+// through, instead of collapsing the allocation below even the minimum.
+func TestFewSamplesDoNotCountAsCapacity(t *testing.T) {
+	v := newFakeVideo("a")
+	m, _ := newTestManager(v, Options{GlobalTargetFPS: 2, Default: adaptive()})
+	m.opt.Measure = func() map[string]Measured {
+		return map[string]Measured{"a": {EffectiveFPS: 2, LatencyMS: 1900, Samples: 3}}
+	}
+	v.setMotion("a", "active")
+	m.Tick()
+	if v.rate("a") != 10 {
+		t.Fatalf("rate = %v, want 10 (warm-up latency must not count)", v.rate("a"))
+	}
+	if d := m.Status().Device; d.CapacitySource != "unmeasured" {
+		t.Fatalf("capacity source = %q", d.CapacitySource)
+	}
 }
