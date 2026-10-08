@@ -97,10 +97,13 @@ const edgeLiveSinkName = "edge-live"
 type videoFrameSender struct {
 	client *transport.Client
 	onAck  func(candidateKey string, ack transport.VideoFrameAck)
+	// detections attaches the camera's latest local inference boxes so the
+	// SaaS wall can draw them; nil sends none.
+	detections *recentDetections
 }
 
 func (s videoFrameSender) PostFrame(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte) error {
-	ack, err := s.client.PostVideoFrame(ctx, deviceID, credential, candidateKey, seq, capturedAt, jpeg)
+	ack, err := s.client.PostVideoFrame(ctx, deviceID, credential, candidateKey, seq, capturedAt, jpeg, s.detections.Get(candidateKey))
 	if err == nil && s.onAck != nil {
 		s.onAck(candidateKey, ack)
 	}
@@ -141,7 +144,7 @@ func (p previewSink) Close() {
 // uplink is not capped by GEOCAM_CLOUD_MAX_FPS (the Controller paces it at
 // GEOCAM_LIVE_TARGET_FPS) but still honors the byte-rate cap. Returns nil
 // when this Edge has nothing to push frames to.
-func buildEdgeVideoSink(cfg *config.Config, creds credentials.Credentials, reporter *health.Reporter, log *slog.Logger, live *livevideo.Controller) processing.Sink {
+func buildEdgeVideoSink(cfg *config.Config, creds credentials.Credentials, reporter *health.Reporter, log *slog.Logger, live *livevideo.Controller, dets *recentDetections) processing.Sink {
 	if cfg.SaaSURL == "" || !creds.IsEnrolled() || creds.Credential == "" || creds.DeviceID == "" {
 		return nil
 	}
@@ -158,7 +161,7 @@ func buildEdgeVideoSink(cfg *config.Config, creds credentials.Credentials, repor
 			MaxBytesPerSec: cfg.CloudMaxBytesPerSec,
 			BurstBytes:     cfg.CloudBurstBytes,
 		}
-		live.SetSink(cloudsink.New(videoFrameSender{client, onAck}, creds.DeviceID, creds.Credential, liveCfg,
+		live.SetSink(cloudsink.New(videoFrameSender{client, onAck, dets}, creds.DeviceID, creds.Credential, liveCfg,
 			logging.Component(log, "edge-live-sink"), live, cloudsink.WithName(edgeLiveSinkName)))
 	}
 	sinkCfg := cloudsink.Config{
@@ -167,15 +170,15 @@ func buildEdgeVideoSink(cfg *config.Config, creds credentials.Credentials, repor
 		BurstBytes:     cfg.CloudBurstBytes,
 		MaxFPS:         cfg.CloudMaxFPS,
 	}
-	preview := cloudsink.New(videoFrameSender{client, onAck}, creds.DeviceID, creds.Credential, sinkCfg, logging.Component(log, "edge-video-sink"), edgeVideoHealth{reporter}, cloudsink.WithName(edgeVideoSinkName))
+	preview := cloudsink.New(videoFrameSender{client, onAck, dets}, creds.DeviceID, creds.Credential, sinkCfg, logging.Component(log, "edge-video-sink"), edgeVideoHealth{reporter}, cloudsink.WithName(edgeVideoSinkName))
 	return previewSink{Sink: preview, live: live}
 }
 
 // newEdgeVideoSink returns the live-view sink only in ModeEdge; in cloud and
 // hybrid the CloudSink already carries the video.
-func newEdgeVideoSink(cfg *config.Config, creds credentials.Credentials, reporter *health.Reporter, log *slog.Logger, live *livevideo.Controller) processing.Sink {
+func newEdgeVideoSink(cfg *config.Config, creds credentials.Credentials, reporter *health.Reporter, log *slog.Logger, live *livevideo.Controller, dets *recentDetections) processing.Sink {
 	if cfg.ProcessingMode != config.ModeEdge {
 		return nil
 	}
-	return buildEdgeVideoSink(cfg, creds, reporter, log, live)
+	return buildEdgeVideoSink(cfg, creds, reporter, log, live, dets)
 }

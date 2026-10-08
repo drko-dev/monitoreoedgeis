@@ -94,7 +94,7 @@ func TestEdgeLiveView_ViewerLifecycle(t *testing.T) {
 	cfg, creds, reporter := edgeVideoTestDeps(t, config.ModeEdge, srv.URL)
 	live := livevideo.New(15, config.MaxLiveTargetFPS, 300*time.Millisecond, reporter.SetLiveVideoStatus)
 	defer live.Close()
-	preview := newEdgeVideoSink(cfg, creds, reporter, log, live)
+	preview := newEdgeVideoSink(cfg, creds, reporter, log, live, nil)
 	defer preview.(interface{ Close() }).Close()
 
 	// Modal closed: preview uploads, live is off.
@@ -177,13 +177,13 @@ func TestEdgeLiveView_NoCloudSinkInEdgeMode(t *testing.T) {
 	if cs := newCloudSink(cfg, creds, reporter, log); cs != nil {
 		t.Fatalf("cloud sink %q built in edge mode", cs.Name())
 	}
-	vs := newEdgeVideoSink(cfg, creds, reporter, log, live)
+	vs := newEdgeVideoSink(cfg, creds, reporter, log, live, nil)
 	if vs == nil || vs.Name() != edgeVideoSinkName {
 		t.Fatalf("edge video sink = %v", vs)
 	}
 	for _, mode := range []config.ProcessingMode{config.ModeCloud, config.ModeHybrid} {
 		cfg.ProcessingMode = mode
-		if s := newEdgeVideoSink(cfg, creds, reporter, log, live); s != nil {
+		if s := newEdgeVideoSink(cfg, creds, reporter, log, live, nil); s != nil {
 			t.Fatal(fmt.Sprintf("%s: display-only video sink built", mode))
 		}
 	}

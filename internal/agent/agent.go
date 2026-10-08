@@ -65,6 +65,7 @@ type Agent struct {
 	cameraCredsProvider *cameracreds.Provider
 	visionSink          *vision.Sink
 	liveVideo           *livevideo.Controller
+	wallDetections      *recentDetections
 	modelManager        *vision.ModelManager
 	runtimeApplier      remoteconfig.Applier
 	remoteConfig        *remoteconfig.Module
@@ -257,6 +258,8 @@ func New(cfg *config.Config) *Agent {
 			return a.runtimeApplier.CurrentConfig()
 		}, a.anprSamplingHint)
 		a.fullEdgeConsumer = newFullEdgeEventConsumer(a.fullEdgeService, producer, clipper, nil, cfg.DataDir, log)
+		a.wallDetections = newRecentDetections()
+		a.fullEdgeConsumer.wallDetections = a.wallDetections
 		a.fullEdgeConsumer.SetAnprRegistry(a.anprRegistry)
 		a.anprTransport = &anprCloudTransport{logger: log}
 		a.fullEdgeConsumer.SetAnprTransport(a.anprTransport.Send)
@@ -351,7 +354,7 @@ func New(cfg *config.Config) *Agent {
 			}
 			// Full Edge live view: display-only frames alongside (never
 			// instead of) the vision sink. Inference authority stays local.
-			if evs := newEdgeVideoSink(cfg, creds, reporter, log, a.liveVideo); evs != nil {
+			if evs := newEdgeVideoSink(cfg, creds, reporter, log, a.liveVideo, a.wallDetections); evs != nil {
 				extraSinks = append(extraSinks, evs)
 			}
 
@@ -384,7 +387,7 @@ func New(cfg *config.Config) *Agent {
 					return sink
 				}),
 				remoteconfig.WithEdgeVideoSinkFactory(func() processing.Sink {
-					return buildEdgeVideoSink(cfg, creds, reporter, log, a.liveVideo)
+					return buildEdgeVideoSink(cfg, creds, reporter, log, a.liveVideo, a.wallDetections)
 				}),
 				remoteconfig.WithVisionSinkFactory(func() (processing.Sink, func(ctx context.Context) error, func(ctx context.Context) error) {
 					var c vision.EventConsumer

@@ -40,6 +40,9 @@ type fullEdgeEventConsumer struct {
 	// it right after construction) -- a nil registry means Hito J6
 	// candidate extraction is a strict no-op, never a panic.
 	anprRegistry *anpr.Registry
+	// wallDetections, when set, receives every local inference so display
+	// frames can carry its boxes to the SaaS wall.
+	wallDetections *recentDetections
 	// anprTransport receives an accepted candidate's metadata + crop JPEG
 	// for upload. nil (the PREP default) means "not wired yet" -- a
 	// Submit() success with no transport wired is logged and dropped,
@@ -80,6 +83,9 @@ func (c *fullEdgeEventConsumer) SetAnprTransport(fn func(candidate anpr.PlateCan
 
 // ConsumeInference implements vision.EventConsumer.
 func (c *fullEdgeEventConsumer) ConsumeInference(result vision.InferenceResult, jpeg []byte) {
+	if c.wallDetections != nil {
+		c.wallDetections.Set(result.CandidateKey, result.Detections)
+	}
 	limits := c.svc.Limits()
 	// K6 reconciliation: this is the one call site that ever claims a
 	// concurrency slot, so EdgeMaxConcurrentInference (default 1, matching

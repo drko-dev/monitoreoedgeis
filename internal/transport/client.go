@@ -297,6 +297,10 @@ type FrameMetadata struct {
 	CandidateReason string
 	CandidateScore  float64
 	CorrelationID   string
+	// EdgeDetections is a JSON []VideoDetection of a Full Edge's latest local
+	// inference, sent as X-Edge-Detections on display-only frames so the SaaS
+	// wall can draw boxes. Empty sends no header.
+	EdgeDetections string
 }
 
 // PostFrame uploads one sampled video frame to FramesPath (Milestone I).
@@ -320,9 +324,15 @@ func (c *Client) PostFrameWithMetadata(ctx context.Context, deviceID, credential
 //
 // The SaaS answers with that camera's live-view demand (VideoFrameAck): it
 // is how "a user opened En vivo" reaches the Edge without a second channel.
-func (c *Client) PostVideoFrame(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte) (VideoFrameAck, error) {
+func (c *Client) PostVideoFrame(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte, detections []VideoDetection) (VideoFrameAck, error) {
 	var ack VideoFrameAck
-	body, err := c.postFrame(ctx, VideoFramesPath, deviceID, credential, candidateKey, seq, capturedAt, jpeg, FrameMetadata{ProcessingMode: "edge"})
+	meta := FrameMetadata{ProcessingMode: "edge"}
+	if len(detections) > 0 {
+		if b, err := json.Marshal(detections); err == nil {
+			meta.EdgeDetections = string(b)
+		}
+	}
+	body, err := c.postFrame(ctx, VideoFramesPath, deviceID, credential, candidateKey, seq, capturedAt, jpeg, meta)
 	if err != nil {
 		return ack, err
 	}
@@ -336,6 +346,16 @@ func (c *Client) PostVideoFrame(ctx context.Context, deviceID, credential, candi
 
 // VideoFrameAck is the SaaS's answer to a display-only frame: whether any
 // user is watching this camera's live view right now.
+// VideoDetection is one box of a Full Edge's latest local inference, carried
+// on a display-only frame for the wall overlay. Pixel x1,y1,x2,y2.
+type VideoDetection struct {
+	ClassID    int        `json:"class_id"`
+	Label      string     `json:"label"`
+	Type       string     `json:"type"`
+	Confidence float64    `json:"confidence"`
+	BBox       [4]float64 `json:"bbox"`
+}
+
 type VideoFrameAck struct {
 	LiveRequested bool `json:"live_requested"`
 	LiveViewers   int  `json:"live_viewers"`
@@ -365,6 +385,9 @@ func (c *Client) postFrame(ctx context.Context, path, deviceID, credential, cand
 	}
 	if meta.CorrelationID != "" {
 		req.Header.Set("X-Correlation-Id", meta.CorrelationID)
+	}
+	if meta.EdgeDetections != "" {
+		req.Header.Set("X-Edge-Detections", meta.EdgeDetections)
 	}
 
 	c.traffic.Record(TrafficFrames, int64(len(jpeg)), 0, 1)
