@@ -47,7 +47,7 @@ func newDiscoveryModule(
 	engine.SetManualHikvisionEndpoints(cfg.HikvisionEndpoints)
 
 	var client discovery.TransportClient
-	if cfg.SaaSURL != "" && creds.IsEnrolled() && creds.Credential != "" && creds.DeviceID != "" {
+	if saasDiscoveryPullEnabled(cfg, creds) {
 		c, err := transport.New(cfg.SaaSURL, cfg.AllowInsecureHTTP, cfg.SaaSTimeout, Version)
 		if err != nil {
 			return nil, fmt.Errorf("discovery transport: %w", err)
@@ -66,4 +66,12 @@ func newDiscoveryModule(
 		OnStatus:      reporter.SetDiscoveryStatus,
 		OnScanSuccess: onScanSuccess,
 	})
+}
+
+// saasDiscoveryPullEnabled reports whether this Edge polls the SaaS
+// discovery-run queue. That queue is Gateway-only: the SaaS answers a Full
+// Edge (device_kind=edge) with 403 by design, so a Full Edge keeps its local
+// LAN discovery (camera onboarding) but never polls it.
+func saasDiscoveryPullEnabled(cfg *config.Config, creds credentials.Credentials) bool {
+	return cfg.ProcessingMode != config.ModeEdge && cfg.SaaSURL != "" && creds.IsEnrolled() && creds.Credential != "" && creds.DeviceID != ""
 }
