@@ -337,3 +337,24 @@ func TestNoMotionGateWithoutConfig(t *testing.T) {
 		t.Fatal("cloud/hybrid pipelines must not get a motion gate")
 	}
 }
+
+func TestMotionGateLateDetectionReclassifiesClosedEpisode(t *testing.T) {
+	s := newScene(12, 4)
+	r := newGateRun(MotionGateConfig{})
+	r.quiet(s, 30)
+	var during time.Time
+	for x := 0; x < 200; x += 8 {
+		r.feed(s.frame(box{x, 120, 40, 120}))
+		if x == 80 {
+			during = r.t
+		}
+	}
+	r.quiet(s, 45) // episode closes first
+	if st := r.g.Status(); st.EpisodesWithoutDetection != 1 {
+		t.Fatalf("precondition: %+v", st)
+	}
+	r.g.ObserveDetection(during) // inference result for a frame inside it arrives late
+	if st := r.g.Status(); st.EpisodesWithDetection != 1 || st.EpisodesWithoutDetection != 0 {
+		t.Fatalf("late detection not reclassified: with=%d without=%d", st.EpisodesWithDetection, st.EpisodesWithoutDetection)
+	}
+}

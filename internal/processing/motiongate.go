@@ -480,6 +480,12 @@ func (g *MotionGate) ObserveDetection(t time.Time) {
 	ep := g.episodeAtLocked(t)
 	if ep != nil {
 		g.st.DetectionsWhileActive++
+		if !ep.detected && !ep.end.IsZero() {
+			// The episode already closed as "without detection" before this
+			// (late-arriving) inference result: reclassify it.
+			g.st.EpisodesWithoutDetection--
+			g.st.EpisodesWithDetection++
+		}
 		ep.detected = true
 	}
 	if g.lastDet.IsZero() || t.Sub(g.lastDet) >= g.cfg.NewAppearanceGap {
