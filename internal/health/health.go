@@ -84,6 +84,11 @@ type Snapshot struct {
 	EdgeVideo *cloudsink.Status `json:"edge_video,omitempty"`
 	// LiveVideo is the Full Edge on-demand Live View uplink.
 	LiveVideo *livevideo.Status `json:"live_video,omitempty"`
+	// EdgeInference and EdgePreview are Full Edge per-camera rates keyed by
+	// candidate_key: configured vs measured inference FPS, latency and
+	// drops, and the preview pacing next to it. Omitted outside edge mode.
+	EdgeInference map[string]processing.FreshCameraStatus `json:"edge_inference,omitempty"`
+	EdgePreview   map[string]processing.PacedCameraStatus `json:"edge_preview,omitempty"`
 	// Vision is Milestone K's local YOLO worker/model status. Omitted
 	// outside ProcessingMode=edge. Never carries a frame, an RTSP URI, or a
 	// credential — only worker lifecycle state, model file metadata, and
@@ -212,6 +217,8 @@ type Reporter struct {
 	cloud             *cloudsink.Status
 	edgeVideo         *cloudsink.Status
 	liveVideo         *livevideo.Status
+	edgeInference     map[string]processing.FreshCameraStatus
+	edgePreview       map[string]processing.PacedCameraStatus
 	vision            *vision.Status
 	fullEdge          *fulledge.Status
 	localEventBacklog *edgebacklog.Status
@@ -498,6 +505,8 @@ func (r *Reporter) Snapshot() Snapshot {
 		Cloud:               cloud,
 		EdgeVideo:           edgeVideo,
 		LiveVideo:           liveVideo,
+		EdgeInference:       r.edgeInference,
+		EdgePreview:         r.edgePreview,
 		Vision:              vis,
 		FullEdge:            fe,
 		LocalEventBacklog:   backlog,
@@ -552,6 +561,22 @@ func (r *Reporter) SetLiveVideoStatus(s livevideo.Status) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.liveVideo = &s
+}
+
+// SetEdgeInferenceStatus records Full Edge per-camera inference rates.
+// The map is owned by the reporter from here on.
+func (r *Reporter) SetEdgeInferenceStatus(s map[string]processing.FreshCameraStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.edgeInference = s
+}
+
+// SetEdgePreviewStatus records Full Edge per-camera preview pacing.
+// The map is owned by the reporter from here on.
+func (r *Reporter) SetEdgePreviewStatus(s map[string]processing.PacedCameraStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.edgePreview = s
 }
 
 // SetEdgeVideoStatus records the latest Full Edge display-only video upload

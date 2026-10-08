@@ -32,6 +32,12 @@ type Sampler struct {
 
 	lastEmit time.Time
 	hasEmit  bool
+
+	// paced switches the fixed-rate gate from "minimum interval since the
+	// last emit" to drift-free scheduling (see NewPacedSampler). nextDue is
+	// only used when paced.
+	paced   bool
+	nextDue time.Time
 }
 
 // NewSampler creates a Sampler for targetFPS. targetFPS<=0 disables
@@ -42,6 +48,18 @@ func NewSampler(targetFPS float64) *Sampler {
 	if targetFPS > 0 {
 		s.interval = time.Duration(float64(time.Second) / targetFPS)
 	}
+	return s
+}
+
+// NewPacedSampler creates a fixed-rate Sampler whose schedule advances by
+// exactly one interval per emit instead of restarting at the emitted
+// frame. A plain minimum-interval gate rounds every emit up to the next
+// source frame, so a 15 FPS source sampled at 10 FPS yields 7.5 and at 5
+// FPS yields 3.75; paced sampling yields the configured rate. Used by Full
+// Edge, where target_fps is the per-camera inference rate.
+func NewPacedSampler(targetFPS float64) *Sampler {
+	s := NewSampler(targetFPS)
+	s.paced = true
 	return s
 }
 
@@ -90,6 +108,9 @@ func (s *Sampler) SetTargetFPS(targetFPS float64) {
 		s.interval = time.Duration(float64(time.Second) / targetFPS)
 	} else {
 		s.interval = 0
+	}
+	if s.paced && s.hasEmit {
+		s.nextDue = s.lastEmit.Add(s.interval)
 	}
 	s.recomputeIdleIntervalLocked()
 }
@@ -148,6 +169,21 @@ func (s *Sampler) ShouldEmit(t time.Time) bool {
 	defer s.mu.Unlock()
 	interval := s.currentIntervalLocked(t)
 	if interval <= 0 {
+		return true
+	}
+	if s.paced && s.idleInterval <= 0 {
+		if s.hasEmit && t.Before(s.nextDue) {
+			return false
+		}
+		// Advance from the previous due time to stay drift-free, but never
+		// let a gap (decoder restart, stalled camera) bank a burst.
+		next := s.nextDue.Add(interval)
+		if !s.hasEmit || next.Before(t) {
+			next = t.Add(interval)
+		}
+		s.nextDue = next
+		s.lastEmit = t
+		s.hasEmit = true
 		return true
 	}
 	if !s.hasEmit || t.Sub(s.lastEmit) >= interval {

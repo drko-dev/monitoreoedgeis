@@ -719,3 +719,26 @@ func TestLoadLiveViewConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadEdgePreviewFPS(t *testing.T) {
+	t.Setenv("GEOCAM_EDGE_PREVIEW_FPS", "")
+	t.Setenv("GEOCAM_VIDEO_TARGET_FPS", "15")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	// Preview stays at its own default however high inference goes.
+	if cfg.EdgePreviewFPS != 2 || cfg.VideoTargetFPS != 15 {
+		t.Fatalf("preview=%v inference=%v, want 2 and 15", cfg.EdgePreviewFPS, cfg.VideoTargetFPS)
+	}
+	t.Setenv("GEOCAM_EDGE_PREVIEW_FPS", "1")
+	if cfg, err = Load(); err != nil || cfg.EdgePreviewFPS != 1 {
+		t.Fatalf("preview=%v err=%v, want 1", cfg.EdgePreviewFPS, err)
+	}
+	for _, bad := range []string{"0", "31", "x"} {
+		t.Setenv("GEOCAM_EDGE_PREVIEW_FPS", bad)
+		if _, err := Load(); err == nil {
+			t.Fatalf("GEOCAM_EDGE_PREVIEW_FPS=%s accepted", bad)
+		}
+	}
+}

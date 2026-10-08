@@ -64,8 +64,13 @@ type Config struct {
 	// ConnectivityEnabled and VideoPipelineEnabled are true.
 	VideoPipelineEnabled bool
 	VideoTargetFPS       float64
+	// EdgePreviewFPS caps each Full Edge camera's preview/wall upload,
+	// independently of VideoTargetFPS (which in edge mode is the per-camera
+	// inference rate, remotely overridable per camera). Raising inference or
+	// an ANPR burst never raises the preview.
+	EdgePreviewFPS float64
 	// Full Edge Live View (on-demand). VideoTargetFPS keeps governing
-	// preview/wall and local inference; LiveTargetFPS only applies while a
+	// local inference; LiveTargetFPS only applies while a
 	// SaaS user has "En vivo" open for that camera, until LiveIdleTimeout
 	// after the last viewer leaves. LiveTargetFPS 0 = source FPS, capped at
 	// MaxLiveTargetFPS. LiveStreamRole must equal StreamRole: live reuses the
@@ -255,6 +260,7 @@ const (
 	DefaultVideoPipelineEnabled        = false
 	DefaultVideoTargetFPS              = 5.0
 	DefaultLiveTargetFPS               = 15.0
+	DefaultEdgePreviewFPS              = 2.0
 	MaxLiveTargetFPS                   = 30.0
 	DefaultLiveIdleTimeout             = 10 * time.Second
 	MinLiveIdleTimeout                 = 1 * time.Second
@@ -416,6 +422,7 @@ func loadFromEnvironment() (*Config, error) {
 		VideoPipelineEnabled:        DefaultVideoPipelineEnabled,
 		VideoTargetFPS:              DefaultVideoTargetFPS,
 		LiveTargetFPS:               DefaultLiveTargetFPS,
+		EdgePreviewFPS:              DefaultEdgePreviewFPS,
 		LiveIdleTimeout:             DefaultLiveIdleTimeout,
 		VideoOutputWidth:            DefaultVideoOutputWidth,
 		VideoOutputHeight:           DefaultVideoOutputHeight,
@@ -631,6 +638,16 @@ func loadFromEnvironment() (*Config, error) {
 		cfg.VideoTargetFPS = v
 	}
 
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_PREVIEW_FPS")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edge preview FPS %q: %w", raw, err)
+		}
+		if v < MinVideoTargetFPS || v > MaxVideoTargetFPS {
+			return nil, fmt.Errorf("invalid edge preview FPS %q: must be between %g and %g", raw, MinVideoTargetFPS, MaxVideoTargetFPS)
+		}
+		cfg.EdgePreviewFPS = v
+	}
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_LIVE_TARGET_FPS")); raw != "" {
 		v, err := strconv.ParseFloat(raw, 64)
 		if err != nil {

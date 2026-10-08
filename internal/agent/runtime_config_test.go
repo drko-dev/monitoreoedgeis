@@ -303,9 +303,14 @@ func TestTargeted_09_VisionWorkerUsesSharedModelManager(t *testing.T) {
 	if len(sinks) == 0 {
 		t.Fatal("no sinks found")
 	}
-	vs, ok := sinks[0].(*vision.Sink)
+	// Full Edge inference is served through the fresh/fair scheduler.
+	fresh, ok := sinks[0].(*processing.FreshSink)
 	if !ok {
-		t.Fatalf("sink is not *vision.Sink: %T", sinks[0])
+		t.Fatalf("sink is not *processing.FreshSink: %T", sinks[0])
+	}
+	vs, ok := fresh.Inner().(*vision.Sink)
+	if !ok {
+		t.Fatalf("fresh sink inner is not *vision.Sink: %T", fresh.Inner())
 	}
 
 	// Verify vision sink uses the EXACT SAME shared ModelManager pointer

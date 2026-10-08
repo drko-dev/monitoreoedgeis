@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -115,7 +116,7 @@ func newCameraPipeline(candidateKey string, desc rtsp.StreamDescriptor, cfg Conf
 		auCh:         make(chan AccessUnit, cfg.QueueDepth),
 		depack:       depack,
 		sampler:      newPipelineSampler(cfg),
-		ring:         NewRingBuffer(cfg.RingBufferSize),
+		ring:         NewRingBuffer(ringCapacity(cfg)),
 		doneCh:       make(chan struct{}),
 		state:        "starting",
 	}
@@ -154,9 +155,32 @@ func newCameraPipeline(candidateKey string, desc rtsp.StreamDescriptor, cfg Conf
 // supposed to differ.
 func newPipelineSampler(cfg Config) *Sampler {
 	if !cfg.Hybrid.Enabled {
+		if cfg.PacedSampling {
+			return NewPacedSampler(cfg.TargetFPS)
+		}
 		return NewSampler(cfg.TargetFPS)
 	}
 	return NewAdaptiveSampler(cfg.TargetFPS, cfg.Hybrid.IdleFPS, cfg.Hybrid.IdleAfter)
+}
+
+// MaxRingBufferFrames bounds MinHistory-driven ring growth (same ceiling as
+// GEOCAM_VIDEO_RING_BUFFER_SIZE).
+const MaxRingBufferFrames = 300
+
+// ringCapacity is RingBufferSize, grown to cover cfg.MinHistory at
+// cfg.TargetFPS (plus one frame so the window's both ends fit).
+func ringCapacity(cfg Config) int {
+	n := cfg.RingBufferSize
+	if cfg.MinHistory > 0 && cfg.TargetFPS > 0 {
+		need := int(math.Ceil(cfg.TargetFPS*cfg.MinHistory.Seconds())) + 1
+		if need > MaxRingBufferFrames {
+			need = MaxRingBufferFrames
+		}
+		if need > n {
+			n = need
+		}
+	}
+	return n
 }
 
 // Start launches the pipeline's goroutines in the background.
@@ -182,9 +206,13 @@ func (p *cameraPipeline) Stop(ctx context.Context) error {
 func (p *cameraPipeline) SetTargetFPS(fps float64) {
 	p.mu.Lock()
 	p.cfg.TargetFPS = fps
+	capacity := ringCapacity(p.cfg)
 	p.mu.Unlock()
 	if p.sampler != nil {
 		p.sampler.SetTargetFPS(fps)
+	}
+	if p.ring != nil {
+		p.ring.Resize(capacity)
 	}
 }
 
