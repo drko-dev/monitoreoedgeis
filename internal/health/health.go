@@ -21,6 +21,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/fulledge"
 	"github.com/drko-dev/monitoreoedgeis/internal/heartbeat"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
+	"github.com/drko-dev/monitoreoedgeis/internal/inference"
 	"github.com/drko-dev/monitoreoedgeis/internal/livevideo"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
@@ -89,6 +90,9 @@ type Snapshot struct {
 	// drops, and the preview pacing next to it. Omitted outside edge mode.
 	EdgeInference map[string]processing.FreshCameraStatus `json:"edge_inference,omitempty"`
 	EdgePreview   map[string]processing.PacedCameraStatus `json:"edge_preview,omitempty"`
+	// AdaptiveInference is the Full Edge inference.Manager snapshot:
+	// per-camera mode/requested/allocated/effective FPS and device capacity.
+	AdaptiveInference *inference.Status `json:"adaptive_inference,omitempty"`
 	// Vision is Milestone K's local YOLO worker/model status. Omitted
 	// outside ProcessingMode=edge. Never carries a frame, an RTSP URI, or a
 	// credential — only worker lifecycle state, model file metadata, and
@@ -219,6 +223,7 @@ type Reporter struct {
 	liveVideo         *livevideo.Status
 	edgeInference     map[string]processing.FreshCameraStatus
 	edgePreview       map[string]processing.PacedCameraStatus
+	adaptiveInference *inference.Status
 	vision            *vision.Status
 	fullEdge          *fulledge.Status
 	localEventBacklog *edgebacklog.Status
@@ -507,6 +512,7 @@ func (r *Reporter) Snapshot() Snapshot {
 		LiveVideo:           liveVideo,
 		EdgeInference:       r.edgeInference,
 		EdgePreview:         r.edgePreview,
+		AdaptiveInference:   r.adaptiveInference,
 		Vision:              vis,
 		FullEdge:            fe,
 		LocalEventBacklog:   backlog,
@@ -569,6 +575,13 @@ func (r *Reporter) SetEdgeInferenceStatus(s map[string]processing.FreshCameraSta
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.edgeInference = s
+}
+
+// SetAdaptiveInferenceStatus records the inference.Manager snapshot.
+func (r *Reporter) SetAdaptiveInferenceStatus(s inference.Status) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.adaptiveInference = &s
 }
 
 // SetEdgePreviewStatus records Full Edge per-camera preview pacing.

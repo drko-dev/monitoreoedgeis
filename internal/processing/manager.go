@@ -383,6 +383,17 @@ func (m *Manager) SetCameraROI(candidateKey string, rois []ROI) error {
 	return nil
 }
 
+// CandidateKeys returns the cameras that currently have a pipeline.
+func (m *Manager) CandidateKeys() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	keys := make([]string, 0, len(m.pipelines))
+	for k := range m.pipelines {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // MotionGate returns candidateKey's passive motion observer, or nil.
 func (m *Manager) MotionGate(candidateKey string) *MotionGate {
 	m.mu.Lock()

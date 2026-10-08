@@ -74,6 +74,14 @@ type Config struct {
 	// EdgeMotionSensitivity is "low" | "medium" | "high".
 	EdgeMotionGateEnabled bool
 	EdgeMotionSensitivity string
+	// EdgeInferenceManager makes internal/inference the sole owner of
+	// Full Edge sampler rates (per-camera FIXED/ADAPTIVE, capacity, ANPR
+	// bursts). EdgeInferenceMode is the default policy for cameras without
+	// a remote override ("fixed" keeps target_fps behavior);
+	// EdgeInferenceReserve is the capacity fraction never allocated.
+	EdgeInferenceManager bool
+	EdgeInferenceMode    string
+	EdgeInferenceReserve float64
 	// Full Edge Live View (on-demand). VideoTargetFPS keeps governing
 	// local inference; LiveTargetFPS only applies while a
 	// SaaS user has "En vivo" open for that camera, until LiveIdleTimeout
@@ -430,6 +438,9 @@ func loadFromEnvironment() (*Config, error) {
 		EdgePreviewFPS:              DefaultEdgePreviewFPS,
 		EdgeMotionGateEnabled:       true,
 		EdgeMotionSensitivity:       "medium",
+		EdgeInferenceManager:        true,
+		EdgeInferenceMode:           "fixed",
+		EdgeInferenceReserve:        0.15,
 		LiveIdleTimeout:             DefaultLiveIdleTimeout,
 		VideoOutputWidth:            DefaultVideoOutputWidth,
 		VideoOutputHeight:           DefaultVideoOutputHeight,
@@ -667,6 +678,26 @@ func loadFromEnvironment() (*Config, error) {
 			return nil, fmt.Errorf("invalid GEOCAM_EDGE_MOTION_SENSITIVITY %q: must be low, medium or high", raw)
 		}
 		cfg.EdgeMotionSensitivity = raw
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_INFERENCE_MANAGER")); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid GEOCAM_EDGE_INFERENCE_MANAGER %q: %w", raw, err)
+		}
+		cfg.EdgeInferenceManager = v
+	}
+	if raw := strings.ToLower(strings.TrimSpace(os.Getenv("GEOCAM_EDGE_INFERENCE_MODE"))); raw != "" {
+		if raw != "fixed" && raw != "adaptive" {
+			return nil, fmt.Errorf("invalid GEOCAM_EDGE_INFERENCE_MODE %q: must be fixed or adaptive", raw)
+		}
+		cfg.EdgeInferenceMode = raw
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_INFERENCE_RESERVE")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil || v < 0 || v > 0.9 {
+			return nil, fmt.Errorf("invalid GEOCAM_EDGE_INFERENCE_RESERVE %q: must be between 0 and 0.9", raw)
+		}
+		cfg.EdgeInferenceReserve = v
 	}
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_LIVE_TARGET_FPS")); raw != "" {
 		v, err := strconv.ParseFloat(raw, 64)

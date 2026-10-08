@@ -216,6 +216,21 @@ func (g *MotionGate) Run(ctx context.Context) {
 	}
 }
 
+// SetSensitivity changes the noise-floor multiplier ("low"|"medium"|"high")
+// live; the learned background and noise are kept.
+func (g *MotionGate) SetSensitivity(sensitivity string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.cfg.Sensitivity = sensitivity
+}
+
+// State returns the current motion state without copying the full status.
+func (g *MotionGate) State() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.state
+}
+
 // SetROIs replaces the evaluated region; the background is kept.
 func (g *MotionGate) SetROIs(rois []ROI) {
 	g.mu.Lock()

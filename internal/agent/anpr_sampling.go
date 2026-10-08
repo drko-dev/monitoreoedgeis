@@ -60,6 +60,13 @@ func (c managerFPSController) SetTargetFPS(cameraKey string, fps float64) error 
 //
 // A nil controller (not wired yet, or this build has no video pipeline)
 // makes every call a documented no-op -- never a panic.
+// burstDemandController is implemented by an owner of sampler rates (the
+// Full Edge inference.Manager): bursts become demand it arbitrates, instead
+// of the hint setting the sampler and restoring a captured baseline.
+type burstDemandController interface {
+	SetBurstFPS(cameraKey string, fps float64)
+}
+
 type samplerBurstHint struct {
 	mu         sync.Mutex
 	controller videoFPSController
@@ -122,7 +129,9 @@ func (h *samplerBurstHint) ReleaseBurstFPS(cameraKey, burstID string) {
 	delete(st.active, burstID)
 
 	if len(st.active) == 0 {
-		if h.controller != nil {
+		if bd, ok := h.controller.(burstDemandController); ok {
+			bd.SetBurstFPS(cameraKey, 0)
+		} else if h.controller != nil {
 			_ = h.controller.SetTargetFPS(cameraKey, st.baselineFPS)
 		}
 		delete(h.cameras, cameraKey)
@@ -135,13 +144,17 @@ func (h *samplerBurstHint) ReleaseBurstFPS(cameraKey, burstID string) {
 // every currently active burst's requested rate. Must be called with h.mu
 // held; h.controller must be non-nil.
 func (h *samplerBurstHint) applyLocked(cameraKey string, st *cameraBoostState) {
-	effective := st.baselineFPS
+	burst := 0.0
 	for _, fps := range st.active {
-		if fps > effective {
-			effective = fps
+		if fps > burst {
+			burst = fps
 		}
 	}
-	_ = h.controller.SetTargetFPS(cameraKey, effective)
+	if bd, ok := h.controller.(burstDemandController); ok {
+		bd.SetBurstFPS(cameraKey, burst)
+		return
+	}
+	_ = h.controller.SetTargetFPS(cameraKey, max(st.baselineFPS, burst))
 }
 
 // clampBurstFPS enforces the SAME technical ceiling remote-config itself
