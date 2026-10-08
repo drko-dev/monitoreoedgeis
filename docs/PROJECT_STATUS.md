@@ -18,6 +18,7 @@
 
 1. **Live View degradation.** Measured ~6.5 FPS against a 15 FPS target on 2026-10-08. It is not caused by Phase 1: the A/B with `3ab1454` gave 7.7 in the same conditions, and inference at 2 vs 15 gives the same result. SaaS `POST /api/v1/edge/video-frames` latency was p50 353 ms, p90 470 ms and p99 806 ms (about 2 ms the night before), which caps the live uplink. This needs investigation on the SaaS side.
 2. **Multi-camera physical validation.** Fairness (round-robin, latest frame per camera, 2 s staleness drop) is proven by unit tests only. A single M4 worker sustains about 14 inferences/s in total at 640 px, so the sum of all cameras' `target_fps` must fit that budget. This still needs validation with ≥ 2 real cameras: per-camera `effective_fps`, `dropped_stale` and preview isolation.
+3. **Phase 2: per-camera inference resolution.** Not started; it waits on Phase 1 sign-off. The proposal is a per-camera `inference_imgsz` (640/960/1280), sent in each infer request so the worker never restarts. It is only useful together with a higher per-camera `output_width/height`, which restarts that camera's pipeline and enlarges the preview. This needs a cross-repo contract change (Edge + SaaS).
 
 ## Hito S11A — Durable Local Security Audit Journal + Integrity Chain
 
