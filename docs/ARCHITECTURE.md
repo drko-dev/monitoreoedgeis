@@ -476,6 +476,52 @@ candidate_key: `configured_fps`, `effective_fps` over 5 s, `processed`,
 `edge_preview` (`configured_fps`, `effective_fps`, `forwarded`,
 `throttled`).
 
+**Passive motion observation (adaptive inference, stage 1).** In edge mode
+each pipeline has a `processing.MotionGate` fed every decoded frame from
+the same pre-sampler tap as Live View, through a 1-slot mailbox. The gate
+runs in its own goroutine; when it is busy the frame is skipped and counted
+(`frames_skipped`), so capture never waits. It is **observation only**: it
+never calls `SetTargetFPS` or touches the sampler. Stage 2 will add a
+controller on top.
+
+- *Signal.* The frame is reduced to a 32x18 grid of mean luma, sampled at
+  stride 2 from the already-decoded Y plane; nothing is decoded again.
+  Each cell is compared with an EMA background.
+- *Robustness.*
+  - Each cell's threshold is `max(k·noise, 4)`, where the noise is a
+    per-cell EMA. `k` comes from `GEOCAM_EDGE_MOTION_SENSITIVITY`
+    (high 3, medium 4, low 6).
+  - The median cell shift is removed first, so uniform lighting changes
+    are compensated rather than reported.
+  - When more than 60 % of cells change at once (an IR switch or a camera
+    move), the background is re-seeded and nothing is reported.
+  - Isolated changed cells are ignored (spatial coherence), which
+    suppresses sensor grain.
+  - A changed cell that stays still for 1 s is absorbed into the
+    background. That covers presence, parked objects and the ghost an
+    object leaves behind. **Motion ≠ presence**: YOLO keeps covering a
+    still person at its own rate.
+  - Activation needs 2 consecutive candidate frames; a 1 s hold gives
+    hysteresis.
+- *ROIs.* The gate reuses the existing per-camera `hybrid_rois`.
+- *Cost.* Benchmarked on an M4 at ~35 µs/frame for 640x360 and ~160 µs
+  for 1080p.
+- *Correlation with YOLO.* A read-only wrapper around the Full Edge event
+  consumer tells the gate when local YOLO detected something, and forwards
+  every result unchanged. The gate reports `detections_while_active`,
+  `new_appearances[_with_motion]` (a detection after ≥ 5 s without one),
+  `last_appearance_lead_ms` (detection minus activation; > 0 means the
+  gate saw it first) and `episodes_with/without_detection`.
+- *Status.* `video_pipeline.cameras[].motion`: `motion_state`
+  (warming/idle/active), `motion_score`, `active_cells`,
+  `frames_evaluated`, `frames_skipped`, `evaluated_fps`,
+  `avg_cost_us`/`max_cost_us`, `noise_floor_avg`, `activations`,
+  `lighting_compensations`, `global_changes`, `absorbed_cells`,
+  `last/max_activation_latency_ms` and the correlation counters.
+- *Off switch.* `GEOCAM_EDGE_MOTION_GATE=false`. Cloud and hybrid never
+  build a gate.
+
+
 **Demand contract.** Each `video-frames` answer carries that camera's
 demand: `{"live_requested": bool, "live_viewers": N}`. The SaaS counts a
 viewer while an operator's MJPEG `/stream` is open. `live_viewers > 0`

@@ -39,6 +39,7 @@ type cameraPipeline struct {
 	// motion is nil unless cfg.Hybrid.Enabled; owned solely by readLoop,
 	// same as sampler (Milestone J).
 	motion *MotionDetector
+	gate   *MotionGate // passive activity observer, nil unless cfg.MotionGate
 
 	// decoderFactory defaults to a real FFmpegDecoder; tests override it
 	// with a fake to exercise the pipeline without spawning ffmpeg — this
@@ -131,6 +132,13 @@ func newCameraPipeline(candidateKey string, desc rtsp.StreamDescriptor, cfg Conf
 			desc.SpropParameterSets,
 			logger,
 		)
+	}
+	if cfg.MotionGate != nil {
+		gc := *cfg.MotionGate
+		if len(gc.ROIs) == 0 {
+			gc.ROIs = cfg.Hybrid.ROIs
+		}
+		p.gate = NewMotionGate(gc)
 	}
 	return p
 }
@@ -312,6 +320,13 @@ func (p *cameraPipeline) OnPacket(payload []byte, recvAt time.Time) {
 func (p *cameraPipeline) run(ctx context.Context) {
 	defer close(p.doneCh)
 
+	if p.gate != nil {
+		// Off the capture path: readLoop only Offers (never blocks).
+		gateDone := make(chan struct{})
+		go func() { defer close(gateDone); p.gate.Run(ctx) }()
+		defer func() { <-gateDone }()
+	}
+
 	p.wg.Add(1)
 	go p.depacketizeLoop(ctx)
 
@@ -480,6 +495,13 @@ func (p *cameraPipeline) readLoop(ctx context.Context, dec VideoDecoder) {
 			// through) the preview/inference sampler below.
 			if liveTap != nil && liveTap.Wants(p.candidateKey, frame.DecodedAt) {
 				liveTap.Offer(p.toFrame(frame.Width, frame.Height, Resize(frame, outW, outH)))
+			}
+
+			// Passive motion observation sees every decoded frame too,
+			// ahead of the sampler, so activity is noticed at source FPS
+			// whatever the inference rate. Observation only.
+			if p.gate != nil {
+				p.gate.Offer(frame)
 			}
 
 			if !p.sampler.ShouldEmit(frame.DecodedAt) {
@@ -736,5 +758,17 @@ func (p *cameraPipeline) Status() PipelineStatus {
 		DecodeLatencyMs:     latencyMs,
 		LastFrameAt:         lastFrameAt,
 		Hybrid:              hybridStatus,
+		Motion:              p.motionStatus(),
 	}
 }
+
+func (p *cameraPipeline) motionStatus() *MotionGateStatus {
+	if p.gate == nil {
+		return nil
+	}
+	st := p.gate.Status()
+	return &st
+}
+
+// MotionGate returns the pipeline's passive motion observer, or nil.
+func (p *cameraPipeline) MotionGate() *MotionGate { return p.gate }

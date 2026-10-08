@@ -104,3 +104,30 @@ func (a *Agent) freshInference(vs *vision.Sink, reporter *health.Reporter) proce
 	}
 	return processing.NewFreshSink(vs, inferenceMaxFrameAge, configured, reporter.SetEdgeInferenceStatus)
 }
+
+// motionObservingConsumer tells each camera's passive MotionGate when local
+// YOLO detected something (activation vs. detection correlation), then
+// forwards the result unchanged. It never filters, delays or alters events.
+type motionObservingConsumer struct {
+	inner vision.EventConsumer
+	gate  func(candidateKey string) *processing.MotionGate
+}
+
+func (c motionObservingConsumer) ConsumeInference(result vision.InferenceResult, jpeg []byte) {
+	if g := c.gate(result.CandidateKey); g != nil {
+		g.ObserveDetection(result.Timestamp)
+	}
+	c.inner.ConsumeInference(result, jpeg)
+}
+
+func (a *Agent) motionObserved(inner vision.EventConsumer) vision.EventConsumer {
+	if !a.cfg.EdgeMotionGateEnabled {
+		return inner
+	}
+	return motionObservingConsumer{inner: inner, gate: func(key string) *processing.MotionGate {
+		if a.videoManager == nil {
+			return nil
+		}
+		return a.videoManager.MotionGate(key)
+	}}
+}

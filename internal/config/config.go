@@ -69,6 +69,11 @@ type Config struct {
 	// inference rate, remotely overridable per camera). Raising inference or
 	// an ANPR burst never raises the preview.
 	EdgePreviewFPS float64
+	// EdgeMotionGateEnabled runs the passive per-camera motion observer in
+	// edge mode (stage 1: measurement only, never changes a rate).
+	// EdgeMotionSensitivity is "low" | "medium" | "high".
+	EdgeMotionGateEnabled bool
+	EdgeMotionSensitivity string
 	// Full Edge Live View (on-demand). VideoTargetFPS keeps governing
 	// local inference; LiveTargetFPS only applies while a
 	// SaaS user has "En vivo" open for that camera, until LiveIdleTimeout
@@ -423,6 +428,8 @@ func loadFromEnvironment() (*Config, error) {
 		VideoTargetFPS:              DefaultVideoTargetFPS,
 		LiveTargetFPS:               DefaultLiveTargetFPS,
 		EdgePreviewFPS:              DefaultEdgePreviewFPS,
+		EdgeMotionGateEnabled:       true,
+		EdgeMotionSensitivity:       "medium",
 		LiveIdleTimeout:             DefaultLiveIdleTimeout,
 		VideoOutputWidth:            DefaultVideoOutputWidth,
 		VideoOutputHeight:           DefaultVideoOutputHeight,
@@ -647,6 +654,19 @@ func loadFromEnvironment() (*Config, error) {
 			return nil, fmt.Errorf("invalid edge preview FPS %q: must be between %g and %g", raw, MinVideoTargetFPS, MaxVideoTargetFPS)
 		}
 		cfg.EdgePreviewFPS = v
+	}
+	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_MOTION_GATE")); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid GEOCAM_EDGE_MOTION_GATE %q: %w", raw, err)
+		}
+		cfg.EdgeMotionGateEnabled = v
+	}
+	if raw := strings.ToLower(strings.TrimSpace(os.Getenv("GEOCAM_EDGE_MOTION_SENSITIVITY"))); raw != "" {
+		if raw != "low" && raw != "medium" && raw != "high" {
+			return nil, fmt.Errorf("invalid GEOCAM_EDGE_MOTION_SENSITIVITY %q: must be low, medium or high", raw)
+		}
+		cfg.EdgeMotionSensitivity = raw
 	}
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_LIVE_TARGET_FPS")); raw != "" {
 		v, err := strconv.ParseFloat(raw, 64)

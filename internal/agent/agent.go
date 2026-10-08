@@ -326,6 +326,9 @@ func New(cfg *config.Config) *Agent {
 				// make it exact and keep clip pre-event history at any rate.
 				procCfg.PacedSampling = true
 				procCfg.MinHistory = clipPreEvent + clipHistoryMargin
+				if cfg.EdgeMotionGateEnabled {
+					procCfg.MotionGate = &processing.MotionGateConfig{Sensitivity: cfg.EdgeMotionSensitivity}
+				}
 			}
 			modelMgr := vision.NewModelManager(cfg.EdgeYOLOModelsDir, cfg.EdgeYOLOPersonModel, cfg.EdgeYOLOVehicleModel)
 			a.modelManager = modelMgr
@@ -349,7 +352,7 @@ func New(cfg *config.Config) *Agent {
 			// would otherwise see a non-nil interface holding a nil pointer.
 			var consumer vision.EventConsumer
 			if a.fullEdgeConsumer != nil {
-				consumer = a.fullEdgeConsumer
+				consumer = a.motionObserved(a.fullEdgeConsumer)
 			}
 			var initialVisionStop func(ctx context.Context) error
 			if vs, mod := newVisionSink(cfg, reporter, consumer, log, modelMgr); vs != nil {
@@ -400,7 +403,7 @@ func New(cfg *config.Config) *Agent {
 				remoteconfig.WithVisionSinkFactory(func() (processing.Sink, func(ctx context.Context) error, func(ctx context.Context) error) {
 					var c vision.EventConsumer
 					if a.fullEdgeConsumer != nil {
-						c = a.fullEdgeConsumer
+						c = a.motionObserved(a.fullEdgeConsumer)
 					}
 					vs, mod := buildVisionSink(cfg, reporter, c, modelMgr, log)
 					if mod == nil {
