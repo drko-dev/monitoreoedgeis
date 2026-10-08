@@ -25,6 +25,7 @@ type ServiceConfig struct {
 // Service coordinates Full Edge local event creation, hardware management, limits, and evidence storage.
 type Service struct {
 	cfg        ServiceConfig
+	dedup      *Deduper
 	hardware   *HardwareManager
 	limits     *LimitsManager
 	store      *EventStore
@@ -35,6 +36,7 @@ type Service struct {
 
 	localDetections    atomic.Int64
 	localEventsCreated atomic.Int64
+	eventsDeduplicated atomic.Int64
 	evidenceSaved      atomic.Int64
 	evidenceFailures   atomic.Int64
 }
@@ -55,6 +57,7 @@ func NewService(cfg ServiceConfig, store *EventStore, evidence *EvidenceManager,
 	}
 	s := &Service{
 		cfg:        cfg,
+		dedup:      NewDeduper(0, 0, 0),
 		hardware:   hw,
 		limits:     limits,
 		store:      store,
@@ -112,6 +115,14 @@ func (s *Service) ProcessInference(res InferenceResult, optFrame *processing.Fra
 		res.Device = s.hardware.CurrentDevice()
 	}
 
+	fresh := s.admit(res)
+	if len(fresh) == 0 {
+		// Every detection continues an object that already has an event:
+		// no new event, and no evidence written for it.
+		s.publishStatus()
+		return nil, nil
+	}
+
 	var evRef *EvidenceRef
 	if optFrame != nil && s.evidence != nil {
 		// A fresh random UUID identifies this shared capture on disk — never
@@ -141,25 +152,7 @@ func (s *Service) ProcessInference(res InferenceResult, optFrame *processing.Fra
 	}
 
 	var created []*LocalEvent
-	for _, det := range res.Detections {
-		if err := det.BBox.Validate(0, 0); err != nil {
-			if s.logger != nil {
-				s.logger.Warn("dropping detection with invalid bbox",
-					slog.String("candidate_key", res.CandidateKey),
-					slog.String("correlation_id", res.CorrelationID),
-					slog.Any("error", err))
-			}
-			continue
-		}
-		if err := det.ValidateConfidence(); err != nil {
-			if s.logger != nil {
-				s.logger.Warn("dropping detection with invalid confidence",
-					slog.String("candidate_key", res.CandidateKey),
-					slog.String("correlation_id", res.CorrelationID),
-					slog.Any("error", err))
-			}
-			continue
-		}
+	for _, det := range fresh {
 		evt, err := NewLocalEvent(s.cfg.EdgeID, s.cfg.TenantID, s.cfg.SiteID, s.cfg.ModelName, res, det, evRef)
 		if err != nil {
 			return created, fmt.Errorf("fulledge: create local event: %w", err)
@@ -190,6 +183,14 @@ func (s *Service) ProcessInferenceWithJPEG(res InferenceResult, jpegBytes []byte
 		res.Device = s.hardware.CurrentDevice()
 	}
 
+	fresh := s.admit(res)
+	if len(fresh) == 0 {
+		// Every detection continues an object that already has an event:
+		// no new event, and no evidence written for it.
+		s.publishStatus()
+		return nil, nil
+	}
+
 	var evRef *EvidenceRef
 	if len(jpegBytes) > 0 && s.evidence != nil {
 		captureUUID, err := identity.NewUUIDv4()
@@ -216,25 +217,7 @@ func (s *Service) ProcessInferenceWithJPEG(res InferenceResult, jpegBytes []byte
 	}
 
 	var created []*LocalEvent
-	for _, det := range res.Detections {
-		if err := det.BBox.Validate(0, 0); err != nil {
-			if s.logger != nil {
-				s.logger.Warn("dropping detection with invalid bbox",
-					slog.String("candidate_key", res.CandidateKey),
-					slog.String("correlation_id", res.CorrelationID),
-					slog.Any("error", err))
-			}
-			continue
-		}
-		if err := det.ValidateConfidence(); err != nil {
-			if s.logger != nil {
-				s.logger.Warn("dropping detection with invalid confidence",
-					slog.String("candidate_key", res.CandidateKey),
-					slog.String("correlation_id", res.CorrelationID),
-					slog.Any("error", err))
-			}
-			continue
-		}
+	for _, det := range fresh {
 		evt, err := NewLocalEvent(s.cfg.EdgeID, s.cfg.TenantID, s.cfg.SiteID, s.cfg.ModelName, res, det, evRef)
 		if err != nil {
 			return created, fmt.Errorf("fulledge: create local event: %w", err)
@@ -254,6 +237,47 @@ func (s *Service) ProcessInferenceWithJPEG(res InferenceResult, jpegBytes []byte
 	return created, nil
 }
 
+// admit drops invalid detections, then keeps only those that start a new
+// event: a detection continuing an object already reported is counted as
+// deduplicated instead.
+func (s *Service) admit(res InferenceResult) []LocalDetection {
+	valid := make([]LocalDetection, 0, len(res.Detections))
+	for _, det := range res.Detections {
+		if err := det.BBox.Validate(0, 0); err != nil {
+			if s.logger != nil {
+				s.logger.Warn("dropping detection with invalid bbox",
+					slog.String("candidate_key", res.CandidateKey),
+					slog.String("correlation_id", res.CorrelationID),
+					slog.Any("error", err))
+			}
+			continue
+		}
+		if err := det.ValidateConfidence(); err != nil {
+			if s.logger != nil {
+				s.logger.Warn("dropping detection with invalid confidence",
+					slog.String("candidate_key", res.CandidateKey),
+					slog.String("correlation_id", res.CorrelationID),
+					slog.Any("error", err))
+			}
+			continue
+		}
+		valid = append(valid, det)
+	}
+	at := res.FrameTimestamp
+	if at.IsZero() {
+		at = time.Now()
+	}
+	fresh := valid[:0]
+	for i, isNew := range s.dedup.Admit(res.CandidateKey, at, valid) {
+		if isNew {
+			fresh = append(fresh, valid[i])
+		} else {
+			s.eventsDeduplicated.Add(1)
+		}
+	}
+	return fresh
+}
+
 // Status returns the current Full Edge status snapshot.
 func (s *Service) Status() Status {
 	var backlog int64
@@ -264,6 +288,7 @@ func (s *Service) Status() Status {
 	return Status{
 		LocalDetections:        s.localDetections.Load(),
 		LocalEventsCreated:     s.localEventsCreated.Load(),
+		EventsDeduplicated:     s.eventsDeduplicated.Load(),
 		EvidenceSaved:          s.evidenceSaved.Load(),
 		EvidenceFailures:       s.evidenceFailures.Load(),
 		LocalEventBacklog:      backlog,

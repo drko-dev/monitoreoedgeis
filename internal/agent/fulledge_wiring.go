@@ -116,7 +116,8 @@ func (c *fullEdgeEventConsumer) ConsumeInference(result vision.InferenceResult, 
 			// Pixel x1,y1,x2,y2 — the exact semantics the worker produces
 			// (K2), preserved unchanged through fulledge (K2/integration
 			// item #2's bbox unification).
-			BBox: fulledge.BoundingBox{X1: det.BBox[0], Y1: det.BBox[1], X2: det.BBox[2], Y2: det.BBox[3]},
+			BBox:    fulledge.BoundingBox{X1: det.BBox[0], Y1: det.BBox[1], X2: det.BBox[2], Y2: det.BBox[3]},
+			TrackID: det.TrackID,
 		})
 	}
 
