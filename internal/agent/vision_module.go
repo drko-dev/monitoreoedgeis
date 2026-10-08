@@ -3,9 +3,11 @@ package agent
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
+	"github.com/drko-dev/monitoreoedgeis/internal/processing"
 	"github.com/drko-dev/monitoreoedgeis/internal/vision"
 )
 
@@ -74,4 +76,31 @@ func newVisionSink(cfg *config.Config, reporter *health.Reporter, consumer visio
 		mm = models[0]
 	}
 	return buildVisionSink(cfg, reporter, consumer, mm, log)
+}
+
+// clipPreEvent is how much history before an event a clip covers;
+// clipHistoryMargin keeps the ring a little longer than that so the window's
+// oldest frame is never the one being overwritten.
+const (
+	clipPreEvent      = 3 * time.Second
+	clipHistoryMargin = time.Second
+)
+
+// inferenceMaxFrameAge drops a frame whose turn at the shared YOLO worker
+// comes later than this after it was decoded: an old detection is worse
+// than a skipped one. With one pending frame per camera it only triggers
+// when the round-robin round itself exceeds it (worker overloaded).
+const inferenceMaxFrameAge = 2 * time.Second
+
+// freshInference puts vs behind a processing.FreshSink: latest frame per
+// camera, served round-robin, so one fast camera never queues ahead of the
+// others at the single YOLO worker (and the Router FIFO never fills).
+func (a *Agent) freshInference(vs *vision.Sink, reporter *health.Reporter) processing.Sink {
+	configured := func(key string) (float64, bool) {
+		if a.videoManager == nil {
+			return 0, false
+		}
+		return managerFPSController{a.videoManager}.CurrentTargetFPS(key)
+	}
+	return processing.NewFreshSink(vs, inferenceMaxFrameAge, configured, reporter.SetEdgeInferenceStatus)
 }

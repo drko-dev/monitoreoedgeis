@@ -215,6 +215,16 @@ type Config struct {
 	// sampler (Full Edge Live View). It never feeds the router, so live FPS
 	// is independent of preview/inference FPS and never reaches edge-vision.
 	LiveTap LiveTap
+	// PacedSampling selects NewPacedSampler for non-hybrid pipelines, so the
+	// effective rate matches TargetFPS. Set only in Full Edge, where
+	// TargetFPS is the per-camera inference rate; cloud and hybrid keep the
+	// minimum-interval gate unchanged.
+	PacedSampling bool
+	// MinHistory, when > 0, grows each camera's ring buffer to hold at least
+	// this much time at its current TargetFPS (bounded by
+	// MaxRingBufferFrames), so clip pre-event history survives a higher
+	// per-camera rate. RingBufferSize stays the floor.
+	MinHistory time.Duration
 	// Hybrid holds Milestone J's local-analysis tunables. Meaningless
 	// unless Hybrid.Enabled (set by agent wiring from
 	// config.ProcessingMode == config.ModeHybrid, not a second on/off

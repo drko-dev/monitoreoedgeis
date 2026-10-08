@@ -69,3 +69,27 @@ func (r *RingBuffer) Dropped() int64 {
 	defer r.mu.Unlock()
 	return r.dropped
 }
+
+// Resize changes the capacity, keeping the newest frames that still fit.
+// capacity <= 0 is treated as 1. Frames discarded by a shrink count as
+// dropped.
+func (r *RingBuffer) Resize(capacity int) {
+	if capacity <= 0 {
+		capacity = 1
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if capacity == r.capacity {
+		return
+	}
+	keep := r.count
+	if keep > capacity {
+		r.dropped += int64(keep - capacity)
+		keep = capacity
+	}
+	buf := make([]Frame, capacity)
+	for i := 0; i < keep; i++ {
+		buf[i] = r.buf[(r.head+r.count-keep+i)%r.capacity]
+	}
+	r.buf, r.head, r.count, r.capacity = buf, 0, keep, capacity
+}

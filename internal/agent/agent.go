@@ -229,10 +229,12 @@ func New(cfg *config.Config) *Agent {
 		var clipper *evidence.Clipper
 		if cfg.DataDir != "" && cfg.VideoRingBufferSize > 0 {
 			clipCfg := evidence.ClipConfig{
-				DataDir:      cfg.DataDir,
-				FFmpegPath:   cfg.VideoFFmpegPath,
-				MaxFrames:    cfg.VideoRingBufferSize,
-				PreEvent:     3 * time.Second,
+				DataDir:    cfg.DataDir,
+				FFmpegPath: cfg.VideoFFmpegPath,
+				// The ring grows with a camera's target_fps (see procCfg.MinHistory),
+				// so the clip bound is the ring ceiling.
+				MaxFrames:    max(cfg.VideoRingBufferSize, processing.MaxRingBufferFrames),
+				PreEvent:     clipPreEvent,
 				PostEvent:    0,
 				FrameRate:    float64(cfg.VideoTargetFPS),
 				MaxSizeBytes: cfg.EdgeMaxClipSizeBytes,
@@ -319,6 +321,12 @@ func New(cfg *config.Config) *Agent {
 			// edge-video upload comes back with live demand.
 			a.liveVideo = livevideo.New(cfg.LiveTargetFPS, config.MaxLiveTargetFPS, cfg.LiveIdleTimeout, reporter.SetLiveVideoStatus)
 			procCfg.LiveTap = a.liveVideo
+			if cfg.ProcessingMode == config.ModeEdge {
+				// Full Edge: target_fps is the per-camera inference rate, so
+				// make it exact and keep clip pre-event history at any rate.
+				procCfg.PacedSampling = true
+				procCfg.MinHistory = clipPreEvent + clipHistoryMargin
+			}
 			modelMgr := vision.NewModelManager(cfg.EdgeYOLOModelsDir, cfg.EdgeYOLOPersonModel, cfg.EdgeYOLOVehicleModel)
 			a.modelManager = modelMgr
 
@@ -345,7 +353,7 @@ func New(cfg *config.Config) *Agent {
 			}
 			var initialVisionStop func(ctx context.Context) error
 			if vs, mod := newVisionSink(cfg, reporter, consumer, log, modelMgr); vs != nil {
-				extraSinks = append(extraSinks, vs)
+				extraSinks = append(extraSinks, a.freshInference(vs, reporter))
 				mods = append(mods, mod)
 				a.visionSink = vs
 				if mod != nil {
@@ -398,7 +406,7 @@ func New(cfg *config.Config) *Agent {
 					if mod == nil {
 						return vs, nil, nil
 					}
-					return vs, mod.Start, mod.Stop
+					return a.freshInference(vs, reporter), mod.Start, mod.Stop
 				}),
 				remoteconfig.WithModeChangeCallback(func(mode string) {
 					reporter.SetProcessingMode(mode)

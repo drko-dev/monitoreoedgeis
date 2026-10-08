@@ -217,7 +217,7 @@ func (c *Clipper) Capture(ctx context.Context, history FrameHistory, eventUUID s
 
 func (c *Clipper) encode(ctx context.Context, output string, frames []processing.Frame) error {
 	f := frames[0]
-	cmd := exec.CommandContext(ctx, c.cfg.FFmpegPath, "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", fmt.Sprintf("%dx%d", f.OutputWidth, f.OutputHeight), "-r", fmt.Sprintf("%.3f", c.cfg.FrameRate), "-i", "pipe:0", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mp4", output)
+	cmd := exec.CommandContext(ctx, c.cfg.FFmpegPath, "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", fmt.Sprintf("%dx%d", f.OutputWidth, f.OutputHeight), "-r", fmt.Sprintf("%.3f", clipFrameRate(frames, c.cfg.FrameRate)), "-i", "pipe:0", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mp4", output)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -255,6 +255,23 @@ func selectFrames(frames []processing.Frame, from, to time.Time, max int) []proc
 	}
 	return out
 }
+
+// clipFrameRate is the input rate that makes the clip play in real time:
+// the frames' measured rate over their own timestamps. A per-camera
+// target_fps differing from the global one (or an ANPR burst) otherwise
+// made a fixed-rate clip play slowed down or sped up. fallback applies when
+// the timestamps cannot tell (a single frame, or no forward span).
+func clipFrameRate(frames []processing.Frame, fallback float64) float64 {
+	if len(frames) < 2 {
+		return fallback
+	}
+	span := frames[len(frames)-1].Timestamp.Sub(frames[0].Timestamp)
+	if span <= 0 {
+		return fallback
+	}
+	return float64(len(frames)-1) / span.Seconds()
+}
+
 func sameShape(frames []processing.Frame) error {
 	for _, f := range frames {
 		if f.OutputWidth != frames[0].OutputWidth || f.OutputHeight != frames[0].OutputHeight || len(f.Data) != len(frames[0].Data) {

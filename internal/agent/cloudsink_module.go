@@ -171,7 +171,9 @@ func buildEdgeVideoSink(cfg *config.Config, creds credentials.Credentials, repor
 		MaxFPS:         cfg.CloudMaxFPS,
 	}
 	preview := cloudsink.New(videoFrameSender{client, onAck, dets}, creds.DeviceID, creds.Credential, sinkCfg, logging.Component(log, "edge-video-sink"), edgeVideoHealth{reporter}, cloudsink.WithName(edgeVideoSinkName))
-	return previewSink{Sink: preview, live: live}
+	// Paced per camera at GEOCAM_EDGE_PREVIEW_FPS: in edge mode target_fps is
+	// the inference rate, and the preview must not follow it up.
+	return previewSink{Sink: processing.NewPacedSink(preview, cfg.EdgePreviewFPS, reporter.SetEdgePreviewStatus), live: live}
 }
 
 // newEdgeVideoSink returns the live-view sink only in ModeEdge; in cloud and
