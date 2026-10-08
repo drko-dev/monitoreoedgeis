@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/drko-dev/monitoreoedgeis/internal/cloudsink"
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
@@ -49,7 +48,7 @@ func TestEdgeVideoSink_SelectionPerMode(t *testing.T) {
 	} {
 		cfg, creds, reporter := edgeVideoTestDeps(t, tc.mode, "https://example.invalid")
 		cs := newCloudSink(cfg, creds, reporter, log)
-		vs := newEdgeVideoSink(cfg, creds, reporter, log)
+		vs := newEdgeVideoSink(cfg, creds, reporter, log, nil)
 		if (cs != nil) != tc.wantCloud {
 			t.Errorf("%s: cloud sink present = %v, want %v", tc.mode, cs != nil, tc.wantCloud)
 		}
@@ -67,7 +66,7 @@ func TestEdgeVideoSink_SelectionPerMode(t *testing.T) {
 
 func TestEdgeVideoSink_NotEnrolledIsNil(t *testing.T) {
 	cfg, _, reporter := edgeVideoTestDeps(t, config.ModeEdge, "https://example.invalid")
-	if vs := newEdgeVideoSink(cfg, credentials.Credentials{}, reporter, slog.New(slog.DiscardHandler)); vs != nil {
+	if vs := newEdgeVideoSink(cfg, credentials.Credentials{}, reporter, slog.New(slog.DiscardHandler), nil); vs != nil {
 		t.Fatal("edge video sink built without enrollment")
 	}
 }
@@ -100,11 +99,11 @@ func TestEdgeVideoSink_UploadsDisplayOnlyFrames(t *testing.T) {
 	defer srv.Close()
 
 	cfg, creds, reporter := edgeVideoTestDeps(t, config.ModeEdge, srv.URL)
-	sink := newEdgeVideoSink(cfg, creds, reporter, slog.New(slog.DiscardHandler))
+	sink := newEdgeVideoSink(cfg, creds, reporter, slog.New(slog.DiscardHandler), nil)
 	if sink == nil {
 		t.Fatal("edge video sink is nil")
 	}
-	defer sink.(*cloudsink.CloudSink).Close()
+	defer sink.(interface{ Close() }).Close()
 
 	frame := processing.Frame{
 		CandidateKey: "local:m4:synthetic", Seq: 1, Timestamp: time.Now(),

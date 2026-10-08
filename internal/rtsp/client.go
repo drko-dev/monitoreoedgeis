@@ -27,6 +27,13 @@ type Session struct {
 	cseq       int
 	authParams map[string]string
 
+	// sessionTimeout is the server's session timeout (RFC 2326 §12.37,
+	// "Session: id;timeout=N", default 60 s). Without a request inside it the
+	// camera tears the session down mid-PLAY, so ReadPacket sends a
+	// GET_PARAMETER keepalive every sessionTimeout/2.
+	sessionTimeout time.Duration
+	lastKeepalive  time.Time
+
 	// videoChannel/rtcpChannel are the interleaved channel numbers actually
 	// negotiated in the SETUP response (RFC 2326 §12.39 Transport header),
 	// not assumed from what was requested. A camera that echoes a different
@@ -196,6 +203,7 @@ func (s *Session) setup(setupURI string, timeout time.Duration) error {
 	}
 	// Session value might be "12345678;timeout=60"
 	s.sessionID = strings.TrimSpace(strings.Split(rawSession, ";")[0])
+	s.sessionTimeout = parseSessionTimeout(rawSession)
 
 	// Use the interleaved channels actually echoed by the camera, falling
 	// back to what was requested only if the response omits them (some
@@ -360,7 +368,45 @@ func (s *Session) play(timeout time.Duration) error {
 		return fmt.Errorf("%w: status %d", ErrPlayFailed, status)
 	}
 
+	s.lastKeepalive = time.Now()
 	return nil
+}
+
+// defaultSessionTimeout is RFC 2326's default when SETUP omits timeout=.
+const defaultSessionTimeout = 60 * time.Second
+
+// parseSessionTimeout extracts timeout=N (seconds) from a Session header
+// value, falling back to the RFC default.
+func parseSessionTimeout(rawSession string) time.Duration {
+	for _, part := range strings.Split(rawSession, ";")[1:] {
+		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(k), "timeout") {
+			continue
+		}
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return defaultSessionTimeout
+}
+
+// keepaliveIfDue sends a GET_PARAMETER keepalive without waiting for the
+// reply: ReadPacket is the only reader, and it consumes the interleaved
+// response as a regular RTSP message.
+func (s *Session) keepaliveIfDue() error {
+	if s.sessionID == "" || s.lastKeepalive.IsZero() {
+		return nil
+	}
+	timeout := s.sessionTimeout
+	if timeout <= 0 {
+		timeout = defaultSessionTimeout
+	}
+	if time.Since(s.lastKeepalive) < timeout/2 {
+		return nil
+	}
+	s.lastKeepalive = time.Now()
+	_, err := s.conn.Write([]byte(s.buildRequest("GET_PARAMETER", s.baseURI, map[string]string{"Session": s.sessionID})))
+	return err
 }
 
 // ReadPacket reads a single interleaved RTP or RTCP packet ($ + channel + len + data).
@@ -371,6 +417,9 @@ func (s *Session) ReadPacket(timeout time.Duration) (channel int, payload []byte
 			if err := s.conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 				return 0, nil, err
 			}
+		}
+		if err := s.keepaliveIfDue(); err != nil {
+			return 0, nil, fmt.Errorf("rtsp: keepalive: %w", err)
 		}
 
 		b, err := s.reader.ReadByte()
@@ -410,9 +459,40 @@ func (s *Session) ReadPacket(timeout time.Duration) (channel int, payload []byte
 			return int(chanByte), buf, nil
 		}
 
-		// Non-$ byte: could be RTSP control message response line, skip line
-		_, _ = s.reader.ReadString('\n')
+		// Non-$ byte: an interleaved RTSP message (e.g. the keepalive reply).
+		// Consume it whole, body included, so a Content-Length body is never
+		// mistaken for packet framing.
+		_ = s.reader.UnreadByte()
+		if err := s.skipMessage(); err != nil {
+			if isTimeout(err) {
+				return 0, nil, ErrTimeout
+			}
+			return 0, nil, err
+		}
 	}
+}
+
+// skipMessage discards one RTSP message: start line, headers, then
+// Content-Length bytes of body.
+func (s *Session) skipMessage() error {
+	contentLen := 0
+	for {
+		line, err := s.reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			break
+		}
+		if k, v, ok := strings.Cut(line, ":"); ok && strings.EqualFold(strings.TrimSpace(k), "content-length") {
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+				contentLen = n
+			}
+		}
+	}
+	_, err := s.reader.Discard(contentLen)
+	return err
 }
 
 // Teardown sends TEARDOWN and closes the connection.
@@ -446,6 +526,13 @@ func (s *Session) sendRequest(method, uri string, extraHeaders map[string]string
 		}
 	}
 
+	if _, err := s.conn.Write([]byte(s.buildRequest(method, uri, extraHeaders))); err != nil {
+		return 0, nil, "", err
+	}
+	return s.readResponse()
+}
+
+func (s *Session) buildRequest(method, uri string, extraHeaders map[string]string) string {
 	var req strings.Builder
 	fmt.Fprintf(&req, "%s %s RTSP/1.0\r\n", method, uri)
 	fmt.Fprintf(&req, "CSeq: %d\r\n", s.cseq)
@@ -462,11 +549,10 @@ func (s *Session) sendRequest(method, uri string, extraHeaders map[string]string
 		fmt.Fprintf(&req, "%s: %s\r\n", k, v)
 	}
 	req.WriteString("\r\n")
+	return req.String()
+}
 
-	if _, err := s.conn.Write([]byte(req.String())); err != nil {
-		return 0, nil, "", err
-	}
-
+func (s *Session) readResponse() (int, map[string]string, string, error) {
 	statusLine, err := s.reader.ReadString('\n')
 	if err != nil {
 		return 0, nil, "", err

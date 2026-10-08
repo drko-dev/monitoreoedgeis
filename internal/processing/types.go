@@ -211,6 +211,10 @@ type Config struct {
 	CandidateAllowlist     []string
 	FFmpegPath             string
 	DecodeTimeout          time.Duration
+	// LiveTap, when set, sees every decoded frame ahead of the TargetFPS
+	// sampler (Full Edge Live View). It never feeds the router, so live FPS
+	// is independent of preview/inference FPS and never reaches edge-vision.
+	LiveTap LiveTap
 	// Hybrid holds Milestone J's local-analysis tunables. Meaningless
 	// unless Hybrid.Enabled (set by agent wiring from
 	// config.ProcessingMode == config.ModeHybrid, not a second on/off
@@ -266,4 +270,13 @@ type HybridStatus struct {
 	ActiveFPS        float64 `json:"active_fps"`
 	ROICount         int     `json:"roi_count"`
 	LastMotionScore  float64 `json:"last_motion_score"`
+}
+
+// LiveTap is the on-demand Live View hook into cameraPipeline.readLoop.
+// Wants is called for every decoded frame and must be cheap and
+// non-blocking; Offer is only called when Wants returned true and must not
+// block the decode loop either.
+type LiveTap interface {
+	Wants(candidateKey string, at time.Time) bool
+	Offer(f Frame)
 }

@@ -432,6 +432,48 @@ subcommand: the pipeline runs inside the daemon, so polling `/status` is a
 strictly better validation path than a separate short-lived CLI probe that
 would have to reimplement pipeline startup.
 
+## Full Edge Live View (`internal/livevideo`)
+
+Full Edge (`GEOCAM_PROCESSING_MODE=edge`) uploads display-only video to
+`POST /api/v1/edge/video-frames`; the SaaS never runs inference on it.
+There are two rates per camera:
+
+| Flow | Rate | Path |
+| --- | --- | --- |
+| Preview / wall | `GEOCAM_VIDEO_TARGET_FPS` (e.g. 2) | router -> `edge-video` sink (same sampler as local YOLO) |
+| Live View, on demand | `GEOCAM_LIVE_TARGET_FPS` (default 15, `0` = source FPS, max 30) | decode tap -> `livevideo.Controller` -> `edge-live` uplink |
+
+**Demand contract.** Each `video-frames` answer carries that camera's
+demand: `{"live_requested": bool, "live_viewers": N}`. The SaaS counts a
+viewer while an operator's MJPEG `/stream` is open. `live_viewers > 0`
+(re)arms live for `GEOCAM_LIVE_IDLE_TIMEOUT` (default 10s); once answers
+report 0 viewers, the camera falls back to preview when that window
+lapses. No extra control channel or polling: the 15s control poll is too
+slow for opening a modal, and the preview upload already reaches the
+SaaS every 1/`VIDEO_TARGET_FPS` seconds. An older SaaS without the
+fields simply never requests live.
+
+**Invariants.**
+- The live tap sits before the preview/inference sampler and never feeds
+  the router. It never reaches `edge-vision`, so inference rate and
+  inference count do not change with viewers.
+- No second RTSP session: `GEOCAM_LIVE_STREAM_ROLE` must equal
+  `GEOCAM_STREAM_ROLE`.
+- While a camera is live its preview upload is skipped, so there is no
+  duplicate bandwidth.
+- The live uplink honors the byte-rate cap but not `GEOCAM_CLOUD_MAX_FPS`.
+- It is bounded and drop-new (queue 2) and never blocks the decode loop.
+- Transport is JPEG over HTTPS behind `processing.Sink`. WebRTC can replace
+  the sink without touching demand handling or inference.
+- `/status.live_video` reports: active, active_viewers, target and
+  effective FPS, frames sent/failed/dropped, bytes, last_frame_at and
+  candidate keys. It never includes URLs or credentials.
+
+**Identity.** Only `device_kind=edge` may publish display-only video or
+local events. A Full Edge therefore enrolls with
+`geocam-edge enroll` and a Full Edge enrollment code (`POST
+/api/v1/edge/claim`), never with a gateway token.
+
 ## Docker image: ffmpeg dependency and its license (Milestone H)
 
 The final image (`gcr.io/distroless/static-debian12:nonroot`) gains one

@@ -25,6 +25,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/fulledge"
 	"github.com/drko-dev/monitoreoedgeis/internal/health"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
+	"github.com/drko-dev/monitoreoedgeis/internal/livevideo"
 	"github.com/drko-dev/monitoreoedgeis/internal/logging"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
@@ -63,6 +64,7 @@ type Agent struct {
 	discovery           *discovery.Module
 	cameraCredsProvider *cameracreds.Provider
 	visionSink          *vision.Sink
+	liveVideo           *livevideo.Controller
 	modelManager        *vision.ModelManager
 	runtimeApplier      remoteconfig.Applier
 	remoteConfig        *remoteconfig.Module
@@ -309,6 +311,11 @@ func New(cfg *config.Config) *Agent {
 					IdleAfter:       cfg.HybridIdleAfter,
 				},
 			}
+			// Full Edge Live View: one controller for all cameras, tapping decoded
+			// frames ahead of the preview/inference sampler. Inert until an
+			// edge-video upload comes back with live demand.
+			a.liveVideo = livevideo.New(cfg.LiveTargetFPS, config.MaxLiveTargetFPS, cfg.LiveIdleTimeout, reporter.SetLiveVideoStatus)
+			procCfg.LiveTap = a.liveVideo
 			modelMgr := vision.NewModelManager(cfg.EdgeYOLOModelsDir, cfg.EdgeYOLOPersonModel, cfg.EdgeYOLOVehicleModel)
 			a.modelManager = modelMgr
 
@@ -344,7 +351,7 @@ func New(cfg *config.Config) *Agent {
 			}
 			// Full Edge live view: display-only frames alongside (never
 			// instead of) the vision sink. Inference authority stays local.
-			if evs := newEdgeVideoSink(cfg, creds, reporter, log); evs != nil {
+			if evs := newEdgeVideoSink(cfg, creds, reporter, log, a.liveVideo); evs != nil {
 				extraSinks = append(extraSinks, evs)
 			}
 
@@ -367,6 +374,7 @@ func New(cfg *config.Config) *Agent {
 				remoteconfig.WithStartTimeout(cfg.EdgeYOLOStartTimeout),
 				remoteconfig.WithInitialVisionStop(initialVisionStop),
 				remoteconfig.WithCloudSinkFactory(func() processing.Sink {
+					a.liveVideo.SetSink(nil) // left ModeEdge: no display-only live uplink
 					sink := buildCloudSink(cfg, creds, reporter, log)
 					if concrete, ok := sink.(*cloudsink.CloudSink); ok && a.anprTransport != nil {
 						a.anprTransport.SetSink(concrete)
@@ -376,7 +384,7 @@ func New(cfg *config.Config) *Agent {
 					return sink
 				}),
 				remoteconfig.WithEdgeVideoSinkFactory(func() processing.Sink {
-					return buildEdgeVideoSink(cfg, creds, reporter, log)
+					return buildEdgeVideoSink(cfg, creds, reporter, log, a.liveVideo)
 				}),
 				remoteconfig.WithVisionSinkFactory(func() (processing.Sink, func(ctx context.Context) error, func(ctx context.Context) error) {
 					var c vision.EventConsumer

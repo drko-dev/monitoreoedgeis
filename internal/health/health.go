@@ -21,6 +21,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/fulledge"
 	"github.com/drko-dev/monitoreoedgeis/internal/heartbeat"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
+	"github.com/drko-dev/monitoreoedgeis/internal/livevideo"
 	"github.com/drko-dev/monitoreoedgeis/internal/platform"
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
 	"github.com/drko-dev/monitoreoedgeis/internal/remoteconfig"
@@ -81,6 +82,8 @@ type Snapshot struct {
 	// EdgeVideo is the Full Edge display-only video upload (live view /
 	// snapshots, never inference). Omitted outside ProcessingMode=edge.
 	EdgeVideo *cloudsink.Status `json:"edge_video,omitempty"`
+	// LiveVideo is the Full Edge on-demand Live View uplink.
+	LiveVideo *livevideo.Status `json:"live_video,omitempty"`
 	// Vision is Milestone K's local YOLO worker/model status. Omitted
 	// outside ProcessingMode=edge. Never carries a frame, an RTSP URI, or a
 	// credential — only worker lifecycle state, model file metadata, and
@@ -208,6 +211,7 @@ type Reporter struct {
 	cameraCredentials *CameraCredentialsStatus
 	cloud             *cloudsink.Status
 	edgeVideo         *cloudsink.Status
+	liveVideo         *livevideo.Status
 	vision            *vision.Status
 	fullEdge          *fulledge.Status
 	localEventBacklog *edgebacklog.Status
@@ -389,6 +393,12 @@ func (r *Reporter) Snapshot() Snapshot {
 		copied := *r.cloud
 		cloud = &copied
 	}
+	var liveVideo *livevideo.Status
+	if r.liveVideo != nil {
+		copied := *r.liveVideo
+		copied.CandidateKeys = append([]string(nil), r.liveVideo.CandidateKeys...)
+		liveVideo = &copied
+	}
 	var edgeVideo *cloudsink.Status
 	if r.edgeVideo != nil {
 		copied := *r.edgeVideo
@@ -487,6 +497,7 @@ func (r *Reporter) Snapshot() Snapshot {
 		VideoPipeline:       vp,
 		Cloud:               cloud,
 		EdgeVideo:           edgeVideo,
+		LiveVideo:           liveVideo,
 		Vision:              vis,
 		FullEdge:            fe,
 		LocalEventBacklog:   backlog,
@@ -534,6 +545,13 @@ func (r *Reporter) SetCloudStatus(s cloudsink.Status) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cloud = &s
+}
+
+// SetLiveVideoStatus records the latest Full Edge Live View uplink status.
+func (r *Reporter) SetLiveVideoStatus(s livevideo.Status) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.liveVideo = &s
 }
 
 // SetEdgeVideoStatus records the latest Full Edge display-only video upload

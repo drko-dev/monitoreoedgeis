@@ -444,37 +444,23 @@ func (p *cameraPipeline) readLoop(ctx context.Context, dec VideoDecoder) {
 			p.mu.Lock()
 			p.lastFrameAt = &at
 			p.lastDecodeLatency = latency
+			outW, outH := p.cfg.OutputWidth, p.cfg.OutputHeight
+			liveTap := p.cfg.LiveTap
 			p.mu.Unlock()
+
+			// Live View taps the decode at its own FPS, before (and never
+			// through) the preview/inference sampler below.
+			if liveTap != nil && liveTap.Wants(p.candidateKey, frame.DecodedAt) {
+				liveTap.Offer(p.toFrame(frame.Width, frame.Height, Resize(frame, outW, outH)))
+			}
 
 			if !p.sampler.ShouldEmit(frame.DecodedAt) {
 				continue
 			}
 			p.framesSampled.Add(1)
 
-			srcW, srcH := frame.Width, frame.Height
-			p.mu.Lock()
-			outW, outH := p.cfg.OutputWidth, p.cfg.OutputHeight
-			p.mu.Unlock()
 			resized := Resize(frame, outW, outH)
-
-			f := Frame{
-				CandidateKey:     p.candidateKey,
-				Timestamp:        resized.DecodedAt,
-				SourceReceivedAt: resized.SourceReceivedAt,
-				Seq:              resized.PipelineSeq,
-				SourceWidth:      srcW,
-				SourceHeight:     srcH,
-				OutputWidth:      resized.Width,
-				OutputHeight:     resized.Height,
-				Codec:            p.descriptor.Codec,
-				StreamRole:       p.descriptor.StreamRole,
-				Data:             resized.Data,
-				// Hito N: assigned unconditionally for every mode (edge,
-				// cloud, hybrid) — this is the one place the canonical
-				// correlation id is created; nothing downstream re-derives
-				// it (see internal/vision, internal/agent/fulledge_wiring.go).
-				CorrelationID: fmt.Sprintf("%s-%d", p.candidateKey, resized.PipelineSeq),
-			}
+			f := p.toFrame(frame.Width, frame.Height, resized)
 
 			dispatch := true
 			if p.motion != nil {
@@ -545,6 +531,28 @@ func (p *cameraPipeline) readLoop(ctx context.Context, dec VideoDecoder) {
 				router.Dispatch(f)
 			}
 		}
+	}
+}
+
+// toFrame builds the routed Frame for an already-resized decoded frame.
+func (p *cameraPipeline) toFrame(srcW, srcH int, resized DecodedFrame) Frame {
+	return Frame{
+		CandidateKey:     p.candidateKey,
+		Timestamp:        resized.DecodedAt,
+		SourceReceivedAt: resized.SourceReceivedAt,
+		Seq:              resized.PipelineSeq,
+		SourceWidth:      srcW,
+		SourceHeight:     srcH,
+		OutputWidth:      resized.Width,
+		OutputHeight:     resized.Height,
+		Codec:            p.descriptor.Codec,
+		StreamRole:       p.descriptor.StreamRole,
+		Data:             resized.Data,
+		// Hito N: assigned unconditionally for every mode (edge,
+		// cloud, hybrid) — this is the one place the canonical
+		// correlation id is created; nothing downstream re-derives
+		// it (see internal/vision, internal/agent/fulledge_wiring.go).
+		CorrelationID: fmt.Sprintf("%s-%d", p.candidateKey, resized.PipelineSeq),
 	}
 }
 

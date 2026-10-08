@@ -215,6 +215,35 @@ func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse,
 	return resp, nil
 }
 
+// EdgeClaimRequest is the body sent to EdgeClaimPath (extra="forbid"
+// server-side). ClaimRequestID is the idempotency key; we send edge_id.
+type EdgeClaimRequest struct {
+	Code           string `json:"code"`
+	EdgeID         string `json:"edge_id,omitempty"`
+	DeviceKeyHash  string `json:"device_key_hash"`
+	ClaimRequestID string `json:"claim_request_id"`
+	AgentVersion   string `json:"agent_version,omitempty"`
+	Platform       string `json:"platform,omitempty"`
+	Architecture   string `json:"architecture,omitempty"`
+}
+
+// ClaimEdge claims a Full Edge enrollment code, registering this device as
+// device_kind=edge. Errors map exactly like Enroll's.
+func (c *Client) ClaimEdge(ctx context.Context, req EdgeClaimRequest) (EnrollResponse, error) {
+	var resp EnrollResponse
+	status, _, body, err := c.do(ctx, http.MethodPost, EdgeClaimPath, "", "", req)
+	if err != nil {
+		return resp, err
+	}
+	if status != http.StatusOK && status != http.StatusCreated {
+		return resp, mapEnrollError(status, body)
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return resp, fmt.Errorf("%w: decoding edge claim response: %v", ErrUnexpectedStatus, err)
+	}
+	return resp, nil
+}
+
 // Me returns the authenticated edge's own metadata. deviceID and credential
 // are both required: the SaaS's authenticate_edge_device() treats X-Device-Id
 // as mandatory even when the credential arrives via Authorization: Bearer. A
@@ -281,20 +310,41 @@ func (c *Client) PostFrame(ctx context.Context, deviceID, credential, candidateK
 
 // PostFrameWithMetadata extends PostFrame with optional hybrid candidate headers (Milestone J7).
 func (c *Client) PostFrameWithMetadata(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte, meta FrameMetadata) error {
-	return c.postFrame(ctx, FramesPath, deviceID, credential, candidateKey, seq, capturedAt, jpeg, meta)
+	_, err := c.postFrame(ctx, FramesPath, deviceID, credential, candidateKey, seq, capturedAt, jpeg, meta)
+	return err
 }
 
 // PostVideoFrame uploads one display-only frame to VideoFramesPath. It is
 // the Full Edge live-view path: the SaaS stores it for snapshots/MJPEG and
 // never runs inference on it (local YOLO stays the inference authority).
-func (c *Client) PostVideoFrame(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte) error {
-	return c.postFrame(ctx, VideoFramesPath, deviceID, credential, candidateKey, seq, capturedAt, jpeg, FrameMetadata{ProcessingMode: "edge"})
+//
+// The SaaS answers with that camera's live-view demand (VideoFrameAck): it
+// is how "a user opened En vivo" reaches the Edge without a second channel.
+func (c *Client) PostVideoFrame(ctx context.Context, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte) (VideoFrameAck, error) {
+	var ack VideoFrameAck
+	body, err := c.postFrame(ctx, VideoFramesPath, deviceID, credential, candidateKey, seq, capturedAt, jpeg, FrameMetadata{ProcessingMode: "edge"})
+	if err != nil {
+		return ack, err
+	}
+	// Best-effort: an older SaaS without the fields simply means "no live".
+	_ = json.Unmarshal(body, &ack)
+	if ack.LiveViewers < 0 {
+		ack.LiveViewers = 0
+	}
+	return ack, nil
 }
 
-func (c *Client) postFrame(ctx context.Context, path, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte, meta FrameMetadata) error {
+// VideoFrameAck is the SaaS's answer to a display-only frame: whether any
+// user is watching this camera's live view right now.
+type VideoFrameAck struct {
+	LiveRequested bool `json:"live_requested"`
+	LiveViewers   int  `json:"live_viewers"`
+}
+
+func (c *Client) postFrame(ctx context.Context, path, deviceID, credential, candidateKey string, seq uint64, capturedAt time.Time, jpeg []byte, meta FrameMetadata) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(jpeg))
 	if err != nil {
-		return fmt.Errorf("transport: build request: %w", err)
+		return nil, fmt.Errorf("transport: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "image/jpeg")
 	req.Header.Set("User-Agent", c.userAgent)
@@ -321,11 +371,11 @@ func (c *Client) postFrame(ctx context.Context, path, deviceID, credential, cand
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			return fmt.Errorf("%w: POST %s", ErrTimeout, FramesPath)
+			return nil, fmt.Errorf("%w: POST %s", ErrTimeout, path)
 		}
 		var netErr interface{ Timeout() bool }
 		if errors.As(err, &netErr) && netErr.Timeout() {
-			return fmt.Errorf("%w: POST %s", ErrTimeout, FramesPath)
+			return nil, fmt.Errorf("%w: POST %s", ErrTimeout, path)
 		}
 		// %w (not %v) on err: preserves context.Canceled in the chain when
 		// the caller's own context was cancelled mid-request (e.g. Milestone
@@ -333,13 +383,13 @@ func (c *Client) postFrame(ctx context.Context, path, deviceID, credential, cand
 		// context.Canceled) still works for the caller — while
 		// errors.Is(result, ErrSaaSUnavailable) keeps working too, since Go
 		// supports multiple %w verbs in one Errorf.
-		return fmt.Errorf("%w: POST %s: %w", ErrSaaSUnavailable, FramesPath, err)
+		return nil, fmt.Errorf("%w: POST %s: %w", ErrSaaSUnavailable, path, err)
 	}
 	defer resp.Body.Close()
-	n, _ := io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	c.traffic.Record(TrafficFrames, 0, n, 0)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	c.traffic.Record(TrafficFrames, 0, int64(len(respBody)), 0)
 
-	return classifyFrameStatusWithHeader(resp.StatusCode, resp.Header)
+	return respBody, classifyFrameStatusWithHeader(resp.StatusCode, resp.Header)
 }
 
 // PostANPRCandidate uploads one Hito J6 ANPR/LPR candidate as

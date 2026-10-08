@@ -680,3 +680,42 @@ func TestLoadRetentionZeroExplicitlyDisables(t *testing.T) {
 		t.Fatalf("explicit 0 must be accepted as disabled, got %+v", cfg)
 	}
 }
+
+func TestLoadLiveViewConfig(t *testing.T) {
+	for _, k := range []string{"GEOCAM_STREAM_ROLE", "GEOCAM_LIVE_TARGET_FPS", "GEOCAM_LIVE_STREAM_ROLE", "GEOCAM_LIVE_IDLE_TIMEOUT", "GEOCAM_VIDEO_TARGET_FPS"} {
+		t.Setenv(k, "")
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.LiveTargetFPS != 15 || cfg.LiveIdleTimeout != 10*time.Second || cfg.LiveStreamRole != cfg.StreamRole {
+		t.Fatalf("defaults: fps=%v idle=%v role=%q", cfg.LiveTargetFPS, cfg.LiveIdleTimeout, cfg.LiveStreamRole)
+	}
+
+	// Preview and live are independent knobs.
+	t.Setenv("GEOCAM_VIDEO_TARGET_FPS", "2")
+	t.Setenv("GEOCAM_LIVE_TARGET_FPS", "0") // source FPS
+	t.Setenv("GEOCAM_LIVE_STREAM_ROLE", "SUB")
+	t.Setenv("GEOCAM_LIVE_IDLE_TIMEOUT", "5s")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.VideoTargetFPS != 2 || cfg.LiveTargetFPS != 0 || cfg.LiveIdleTimeout != 5*time.Second || cfg.LiveStreamRole != "sub" {
+		t.Fatalf("got preview=%v live=%v idle=%v role=%q", cfg.VideoTargetFPS, cfg.LiveTargetFPS, cfg.LiveIdleTimeout, cfg.LiveStreamRole)
+	}
+
+	for env, val := range map[string]string{
+		"GEOCAM_LIVE_TARGET_FPS":   "31",
+		"GEOCAM_LIVE_IDLE_TIMEOUT": "100ms",
+		"GEOCAM_LIVE_STREAM_ROLE":  "main", // live reuses the inference decode (sub)
+	} {
+		t.Run(env, func(t *testing.T) {
+			t.Setenv(env, val)
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s=%s accepted", env, val)
+			}
+		})
+	}
+}
