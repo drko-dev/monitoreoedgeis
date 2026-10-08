@@ -3,7 +3,24 @@
 > Answers one question: **"¿Dónde estamos parados ahora?"**
 > Git + the final Hito Z integration are the source of truth. Historical sections below are retained as implementation history and may describe the state that existed at those earlier hitos.
 
-## Current: Hito S11A — Durable Local Security Audit Journal + Integrity Chain
+## Current: Full Edge per-camera inference FPS — Phase 1
+
+| Field | Value |
+| --- | --- |
+| **PR #120 merged** | YES — `feat(fulledge): decouple per-camera inference FPS from preview`, merge commit `91dc806` |
+| **IMPLEMENTED** | `target_fps` = Full Edge inference rate (paced sampler), preview paced by `GEOCAM_EDGE_PREVIEW_FPS` (default 2), `FreshSink` fairness/freshness in front of YOLO, clip ring sized to 3 s pre-event, clips at measured rate, `/status.edge_inference` / `edge_preview` per camera. See `docs/ARCHITECTURE.md` (Full Edge Live View). |
+| **TESTED** | YES — `go test ./...`, `-race` on processing/agent/evidence/health/config, CI 11/11 |
+| **VALIDATED LOCAL (TC70, M4 MPS)** | YES — inference 2/5/10/15 → 2.00/5.01/10.00/13.64 effective, preview 2.0 at every step, 0 inference errors, 0 backlog drops, Cloud inference 0, mid-run clip 42 frames / 3.02 s at 15 FPS. Results in PR #120. |
+| **DEPLOYED** | Local M4 Full Edge agent runs `91dc806`; no SaaS change |
+| **PHASE 2 (per-camera inference resolution)** | NOT STARTED — waits on Phase 1 sign-off |
+
+### Open items (independent)
+
+1. **Live View degradation.** Measured ~6.5 FPS against a 15 FPS target on 2026-10-08. It is not caused by Phase 1: the A/B with `3ab1454` gave 7.7 in the same conditions, and inference at 2 vs 15 gives the same result. SaaS `POST /api/v1/edge/video-frames` latency was p50 353 ms, p90 470 ms and p99 806 ms (about 2 ms the night before), which caps the live uplink. This needs investigation on the SaaS side.
+2. **Multi-camera physical validation.** Fairness (round-robin, latest frame per camera, 2 s staleness drop) is proven by unit tests only. A single M4 worker sustains about 14 inferences/s in total at 640 px, so the sum of all cameras' `target_fps` must fit that budget. This still needs validation with ≥ 2 real cameras: per-camera `effective_fps`, `dropped_stale` and preview isolation.
+3. **Phase 2: per-camera inference resolution.** Not started; it waits on Phase 1 sign-off. The proposal is a per-camera `inference_imgsz` (640/960/1280), sent in each infer request so the worker never restarts. It is only useful together with a higher per-camera `output_width/height`, which restarts that camera's pipeline and enlarges the preview. This needs a cross-repo contract change (Edge + SaaS).
+
+## Hito S11A — Durable Local Security Audit Journal + Integrity Chain
 
 | Field | Value |
 | --- | --- |
