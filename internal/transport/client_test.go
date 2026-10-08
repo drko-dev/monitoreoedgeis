@@ -585,7 +585,7 @@ func TestPostVideoFrameUsesDisplayOnlyPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.PostVideoFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{0xFF, 0xD8, 0xFF, 0xD9}); err != nil {
+	if _, err := c.PostVideoFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{0xFF, 0xD8, 0xFF, 0xD9}, nil); err != nil {
 		t.Fatalf("PostVideoFrame() error = %v", err)
 	}
 }
@@ -608,7 +608,7 @@ func TestPostVideoFrameReturnsLiveDemand(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ack, err := c.PostVideoFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{0xFF, 0xD8, 0xFF, 0xD9})
+		ack, err := c.PostVideoFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{0xFF, 0xD8, 0xFF, 0xD9}, nil)
 		srv.Close()
 		if err != nil {
 			t.Fatalf("PostVideoFrame() error = %v", err)
@@ -628,8 +628,31 @@ func TestPostVideoFrameGatewayForbidden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ack, err := c.PostVideoFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{0xFF, 0xD8, 0xFF, 0xD9})
+	ack, err := c.PostVideoFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), []byte{0xFF, 0xD8, 0xFF, 0xD9}, nil)
 	if err == nil || ack.LiveRequested {
 		t.Fatalf("403 must fail with no live demand, got ack=%+v err=%v", ack, err)
+	}
+}
+
+func TestPostVideoFrameCarriesEdgeDetectionsOnlyWhenPresent(t *testing.T) {
+	var headers []string
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		headers = append(headers, r.Header.Get("X-Edge-Detections"))
+		w.WriteHeader(http.StatusAccepted)
+	})
+	c, err := New(srv.URL, true, 2*time.Second, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jpeg := []byte{0xFF, 0xD8, 0xFF, 0xD9}
+	dets := []VideoDetection{{ClassID: 0, Label: "person", Type: "person", Confidence: 0.84, BBox: [4]float64{214, 71, 403, 332}}}
+	for _, d := range [][]VideoDetection{dets, nil} {
+		if _, err := c.PostVideoFrame(context.Background(), "device-1", "cred-1", "cam-1", 1, time.Now(), jpeg, d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := `[{"class_id":0,"label":"person","type":"person","confidence":0.84,"bbox":[214,71,403,332]}]`
+	if len(headers) != 2 || headers[0] != want || headers[1] != "" {
+		t.Fatalf("X-Edge-Detections = %q, want [%q, \"\"]", headers, want)
 	}
 }

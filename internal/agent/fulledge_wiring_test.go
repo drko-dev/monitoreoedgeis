@@ -417,6 +417,7 @@ func TestFullEdgeWiring_RepeatedDetectionBurstDoesNotFloodBacklog(t *testing.T) 
 		t.Fatalf("edgebacklog.Open: %v", err)
 	}
 	consumer := newFullEdgeEventConsumer(svc, backlog, nil, nil, dataDir, logger)
+	consumer.wallDetections = newRecentDetections()
 
 	start := time.Date(2026, 10, 7, 21, 0, 0, 0, time.UTC)
 	for i := 0; i < 300; i++ { // 150 s at 2 FPS, the TC70 pattern that flooded the backlog
@@ -440,5 +441,10 @@ func TestFullEdgeWiring_RepeatedDetectionBurstDoesNotFloodBacklog(t *testing.T) 
 	}
 	if bs := backlog.Status(); bs.Drops != 0 || bs.BacklogCount != 1 {
 		t.Fatalf("backlog count=%d drops=%d, want 1/0", bs.BacklogCount, bs.Drops)
+	}
+	// Deduplicated sightings still reach the wall: every inference refreshes
+	// the display boxes even when it creates no event.
+	if got := consumer.wallDetections.Get("cam-1"); len(got) != 1 || got[0].Label != "person" {
+		t.Fatalf("wall detections = %+v, want the latest person box", got)
 	}
 }
