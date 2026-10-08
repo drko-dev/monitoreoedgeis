@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
+	"github.com/drko-dev/monitoreoedgeis/internal/inference"
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
 )
 
@@ -83,6 +85,41 @@ type CameraConfig struct {
 	// gets re-derived (item 37: "el SaaS ya resolvió effective capability;
 	// Edge sólo consume desired effective state").
 	ANPR *CameraANPRConfig `json:"anpr,omitempty"`
+
+	// Inference is the Full Edge per-camera inference policy (FIXED or
+	// ADAPTIVE). Absent = FIXED at target_fps, the pre-existing behavior.
+	// Only applied in edge mode; cloud/hybrid ignore it.
+	Inference *CameraInferenceConfig `json:"inference,omitempty"`
+}
+
+// CameraInferenceConfig is the remote form of inference.CameraConfig.
+// Omitted fields take the Edge defaults (idle 2, active 10, max 15 FPS,
+// idle_timeout_s 10, sensitivity medium, priority normal).
+type CameraInferenceConfig struct {
+	Mode              string  `json:"mode"`
+	IdleFPS           float64 `json:"idle_fps,omitempty"`
+	ActiveFPS         float64 `json:"active_fps,omitempty"`
+	MaxFPS            float64 `json:"max_fps,omitempty"`
+	MotionSensitivity string  `json:"motion_sensitivity,omitempty"`
+	IdleTimeoutS      int     `json:"idle_timeout_s,omitempty"`
+	Priority          string  `json:"priority,omitempty"`
+}
+
+// Policy converts to inference.CameraConfig (target_fps is the FIXED rate).
+func (c *CameraInferenceConfig) Policy(targetFPS *float64) inference.CameraConfig {
+	var p inference.CameraConfig
+	if targetFPS != nil {
+		p.TargetFPS = *targetFPS
+	}
+	if c == nil {
+		return p
+	}
+	p.Mode = c.Mode
+	p.IdleFPS, p.ActiveFPS, p.MaxFPS = c.IdleFPS, c.ActiveFPS, c.MaxFPS
+	p.MotionSensitivity = c.MotionSensitivity
+	p.IdleTimeout = time.Duration(c.IdleTimeoutS) * time.Second
+	p.Priority = c.Priority
+	return p
 }
 
 // CameraANPRConfig is the per-camera ANPR/LPR desired state (item 37).
@@ -206,6 +243,19 @@ func Validate(cfg RuntimeConfig, knownCameras []string) error {
 		for i, roi := range camCfg.HybridROIs {
 			if err := validateROI(roi); err != nil {
 				return fmt.Errorf("remoteconfig: camera %q invalid hybrid_rois[%d]: %w", candidateKey, i, err)
+			}
+		}
+
+		if camCfg.Inference != nil {
+			if camCfg.Inference.Mode == "" {
+				return fmt.Errorf("remoteconfig: camera %q inference.mode is required", candidateKey)
+			}
+			inf := camCfg.Inference
+			if inf.IdleFPS < 0 || inf.ActiveFPS < 0 || inf.MaxFPS < 0 || inf.IdleTimeoutS < 0 {
+				return fmt.Errorf("remoteconfig: camera %q inference values must not be negative (omit a field for its default)", candidateKey)
+			}
+			if err := camCfg.Inference.Policy(camCfg.TargetFPS).WithDefaults(config.DefaultVideoTargetFPS).Validate(); err != nil {
+				return fmt.Errorf("remoteconfig: camera %q %w", candidateKey, err)
 			}
 		}
 	}

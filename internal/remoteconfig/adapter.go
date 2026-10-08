@@ -639,6 +639,10 @@ func copyConfig(c RuntimeConfig) RuntimeConfig {
 				cam.HybridROIs = make([]config.HybridROI, len(v.HybridROIs))
 				copy(cam.HybridROIs, v.HybridROIs)
 			}
+			if v.Inference != nil {
+				inf := *v.Inference
+				cam.Inference = &inf
+			}
 			out.Cameras[k] = cam
 		}
 	}
@@ -694,11 +698,7 @@ func MergeConfig(base, patch RuntimeConfig) RuntimeConfig {
 func inferencePolicies(cams map[string]CameraConfig) map[string]inference.CameraConfig {
 	out := make(map[string]inference.CameraConfig, len(cams))
 	for key, c := range cams {
-		var p inference.CameraConfig
-		if c.TargetFPS != nil {
-			p.TargetFPS = *c.TargetFPS
-		}
-		if p != (inference.CameraConfig{}) {
+		if p := c.Inference.Policy(c.TargetFPS); p != (inference.CameraConfig{}) {
 			out[key] = p
 		}
 	}
