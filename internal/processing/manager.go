@@ -371,10 +371,25 @@ func (m *Manager) SetCameraROI(candidateKey string, rois []ROI) error {
 	if !ok {
 		return fmt.Errorf("processing: camera pipeline %q not found", candidateKey)
 	}
-	if p.MotionDetector() == nil {
-		return fmt.Errorf("processing: camera %q is not running in hybrid mode", candidateKey)
+	if p.MotionDetector() == nil && p.MotionGate() == nil {
+		return fmt.Errorf("processing: camera %q has no motion evaluator (not hybrid, no motion gate)", candidateKey)
 	}
-	p.MotionDetector().SetROIs(rois)
+	if p.MotionDetector() != nil {
+		p.MotionDetector().SetROIs(rois)
+	}
+	if p.MotionGate() != nil {
+		p.MotionGate().SetROIs(rois)
+	}
+	return nil
+}
+
+// MotionGate returns candidateKey's passive motion observer, or nil.
+func (m *Manager) MotionGate(candidateKey string) *MotionGate {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p := m.pipelines[candidateKey]; p != nil {
+		return p.gate
+	}
 	return nil
 }
 

@@ -125,6 +125,9 @@ type PipelineStatus struct {
 	// Hybrid is nil unless Milestone J's local evaluator is active for this
 	// camera (Config.Hybrid.Enabled).
 	Hybrid *HybridStatus `json:"hybrid,omitempty"`
+	// Motion is the passive MotionGate's measurements; nil when the gate is
+	// not configured (cloud/hybrid).
+	Motion *MotionGateStatus `json:"motion,omitempty"`
 }
 
 // VideoPipelineSummary is the small block published to /status under
@@ -225,6 +228,10 @@ type Config struct {
 	// MaxRingBufferFrames), so clip pre-event history survives a higher
 	// per-camera rate. RingBufferSize stays the floor.
 	MinHistory time.Duration
+	// MotionGate, when non-nil, runs a passive per-camera activity detector
+	// on every decoded frame ahead of the sampler (Full Edge stage 1:
+	// observation only, it never changes any rate). nil = off.
+	MotionGate *MotionGateConfig
 	// Hybrid holds Milestone J's local-analysis tunables. Meaningless
 	// unless Hybrid.Enabled (set by agent wiring from
 	// config.ProcessingMode == config.ModeHybrid, not a second on/off
