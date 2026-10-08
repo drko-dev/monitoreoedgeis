@@ -160,3 +160,39 @@ func TestPacedSinkDoesNotBurstAfterGap(t *testing.T) {
 		t.Fatalf("forwarded %d frames in 1 s after a gap, want <= 2 (no banked burst)", got)
 	}
 }
+
+// slowFirst simulates the YOLO worker's warm-up: the first Route is slow.
+type slowFirst struct {
+	n     int
+	delay time.Duration
+}
+
+func (s *slowFirst) Name() string { return "slow-first" }
+func (s *slowFirst) Route(Frame) error {
+	s.n++
+	if s.n == 1 {
+		time.Sleep(s.delay)
+	} else {
+		time.Sleep(time.Millisecond)
+	}
+	return nil
+}
+
+func TestFreshSinkMedianLatencyIgnoresWarmupSpike(t *testing.T) {
+	s := NewFreshSink(&slowFirst{delay: 200 * time.Millisecond}, 0, nil, nil)
+	defer s.Close()
+	for i := 0; i < 12; i++ {
+		_ = s.Route(Frame{CandidateKey: "cam", Timestamp: time.Now()})
+		deadline := time.Now().Add(2 * time.Second)
+		for s.Status()["cam"].Processed < int64(i+1) && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	st := s.Status()["cam"]
+	if st.LatencySamples != 12 {
+		t.Fatalf("samples = %d, want 12", st.LatencySamples)
+	}
+	if st.MedianLatencyMS > 20 {
+		t.Fatalf("median = %.1f ms, want ~1 ms despite the 200 ms warm-up (avg %.1f)", st.MedianLatencyMS, st.AvgLatencyMS)
+	}
+}

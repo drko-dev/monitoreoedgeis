@@ -2,6 +2,7 @@ package processing
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 )
@@ -38,20 +39,52 @@ func (w *windowRate) fps(now time.Time) float64 {
 // for (ConfiguredFPS, the camera's sampler target) next to what the inner
 // sink actually processed.
 type FreshCameraStatus struct {
-	ConfiguredFPS     float64 `json:"configured_fps"`
-	EffectiveFPS      float64 `json:"effective_fps"`
-	Processed         int64   `json:"processed"`
-	Errors            int64   `json:"errors"`
-	LastLatencyMS     float64 `json:"last_latency_ms"`
-	AvgLatencyMS      float64 `json:"avg_latency_ms"`
-	LastFrameAgeMS    float64 `json:"last_frame_age_ms"`
+	ConfiguredFPS  float64 `json:"configured_fps"`
+	EffectiveFPS   float64 `json:"effective_fps"`
+	Processed      int64   `json:"processed"`
+	Errors         int64   `json:"errors"`
+	LastLatencyMS  float64 `json:"last_latency_ms"`
+	AvgLatencyMS   float64 `json:"avg_latency_ms"`
+	LastFrameAgeMS float64 `json:"last_frame_age_ms"`
+	// MedianLatencyMS is the median of the last latencyWindow service
+	// times: robust to the worker's warm-up and to isolated spikes, so it
+	// is what capacity is derived from. LatencySamples is how many it has.
+	MedianLatencyMS   float64 `json:"median_latency_ms"`
+	LatencySamples    int     `json:"latency_samples"`
 	DroppedSuperseded int64   `json:"dropped_superseded"`
 	DroppedStale      int64   `json:"dropped_stale"`
 }
 
+// latencyWindow is how many recent service times the median covers.
+const latencyWindow = 32
+
 type freshCamera struct {
 	FreshCameraStatus
-	rate windowRate
+	rate      windowRate
+	latencies []float64 // ring, newest overwrites oldest
+	latNext   int
+}
+
+func (c *freshCamera) addLatency(ms float64) {
+	if len(c.latencies) < latencyWindow {
+		c.latencies = append(c.latencies, ms)
+		return
+	}
+	c.latencies[c.latNext] = ms
+	c.latNext = (c.latNext + 1) % latencyWindow
+}
+
+func (c *freshCamera) medianLatency() float64 {
+	if len(c.latencies) == 0 {
+		return 0
+	}
+	s := append([]float64(nil), c.latencies...)
+	sort.Float64s(s)
+	m := len(s) / 2
+	if len(s)%2 == 1 {
+		return s[m]
+	}
+	return (s[m-1] + s[m]) / 2
 }
 
 // FreshSink sits in front of a slow, serial sink shared by every camera
@@ -214,6 +247,7 @@ func (s *FreshSink) process(f Frame) {
 		cam.Processed++
 		cam.rate.add(end)
 		cam.LastLatencyMS = latency
+		cam.addLatency(latency)
 		if cam.AvgLatencyMS == 0 {
 			cam.AvgLatencyMS = latency
 		} else {
@@ -234,6 +268,8 @@ func (s *FreshSink) Status() map[string]FreshCameraStatus {
 	for key, c := range s.cams {
 		st := c.FreshCameraStatus
 		st.EffectiveFPS = c.rate.fps(now)
+		st.MedianLatencyMS = c.medianLatency()
+		st.LatencySamples = len(c.latencies)
 		if s.configured != nil {
 			if fps, ok := s.configured(key); ok {
 				st.ConfiguredFPS = fps
