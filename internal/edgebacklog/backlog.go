@@ -29,6 +29,21 @@ var (
 	ErrCameraInactive     = errors.New("edgebacklog: camera is administratively inactive in SaaS")
 )
 
+// Inactive-camera policy (SaaS answers 423 / X-Camera-Status: inactive):
+//   - Records already pending for the camera are retained in pending/ (FIFO
+//     per camera) and re-probed every RetryMax; each probe is the
+//     reactivation detector. The 423 mark is persisted on the record, so it
+//     survives an agent restart.
+//   - New submissions for a camera marked inactive are refused at Enqueue
+//     and counted in InactiveDrops, so an inactive camera cannot fill the
+//     shared capacity and starve active cameras.
+//   - The first accepted probe (camera reactivated) clears the mark and makes
+//     the camera's remaining records due immediately, in order.
+//   - A record still answered with 423 after InactiveRetention is quarantined
+//     (reason camera_inactive_retention_expired) and counted in
+//     InactiveExpired; quarantine/ stays bounded as for any rejected record.
+const DefaultInactiveRetention = 7 * 24 * time.Hour
+
 // maxErrorBytes bounds every string this package records for an operator, the
 // same way rtsp.CameraStreamStatus.LastErrorSafe does. A persistence error
 // message names a path and an errno — never a payload or a credential — but a
@@ -60,6 +75,11 @@ type Config struct {
 	MaxBytes      int64
 	RetryBase     time.Duration
 	RetryMax      time.Duration
+	// InactiveRetention bounds how long a record the SaaS keeps answering
+	// with 423 (camera inactive) is retained and re-probed. Past it the
+	// record is quarantined as camera_inactive_retention_expired. Zero
+	// means DefaultInactiveRetention.
+	InactiveRetention time.Duration
 }
 
 type Status struct {
@@ -110,6 +130,9 @@ type Status struct {
 	InactiveCandidates []string `json:"inactive_candidates,omitempty"`
 	// InactiveDrops counts new submissions refused at Enqueue because the target camera is inactive.
 	InactiveDrops int64 `json:"inactive_drops,omitempty"`
+	// InactiveExpired counts retained records quarantined because their
+	// camera stayed inactive past Config.InactiveRetention.
+	InactiveExpired int64 `json:"inactive_expired,omitempty"`
 }
 
 type record struct {
@@ -119,6 +142,9 @@ type record struct {
 	Submission  Submission `json:"submission"`
 	Attempts    int        `json:"attempts"`
 	NextAttempt time.Time  `json:"next_attempt,omitempty"`
+	// InactiveSince is when the SaaS first answered 423 for this record. It
+	// is persisted so the camera stays marked inactive across a restart.
+	InactiveSince *time.Time `json:"inactive_since,omitempty"`
 }
 
 type Backlog struct {
@@ -134,6 +160,7 @@ type Backlog struct {
 
 	inactiveCandidates map[string]time.Time
 	inactiveDrops      int64
+	inactiveExpired    int64
 
 	persistErrors     int64
 	diskFull          bool
@@ -209,6 +236,9 @@ func Open(cfg Config) (*Backlog, error) {
 	if cfg.RetryMax < cfg.RetryBase {
 		cfg.RetryMax = time.Minute
 	}
+	if cfg.InactiveRetention <= 0 {
+		cfg.InactiveRetention = DefaultInactiveRetention
+	}
 	if err := os.MkdirAll(filepath.Join(cfg.Dir, "pending"), 0o750); err != nil {
 		return nil, err
 	}
@@ -281,6 +311,12 @@ func (b *Backlog) recover() error {
 			continue
 		}
 		b.queue = append(b.queue, r)
+		if r.InactiveSince != nil {
+			key := r.Submission.Event.CandidateKey
+			if since, ok := b.inactiveCandidates[key]; !ok || r.InactiveSince.Before(since) {
+				b.inactiveCandidates[key] = *r.InactiveSince
+			}
+		}
 		if r.Sequence > b.counter {
 			b.counter = r.Sequence
 		}
@@ -466,8 +502,9 @@ func (b *Backlog) ProcessOne(ctx context.Context, sender transport.LocalEventSen
 	}
 
 	if err == nil {
-		if b.inactiveCandidates != nil {
-			delete(b.inactiveCandidates, r.Submission.Event.CandidateKey)
+		if _, marked := b.inactiveCandidates[r.Submission.Event.CandidateKey]; marked || r.InactiveSince != nil {
+			r.InactiveSince = nil
+			b.markActiveLocked(r.Submission.Event.CandidateKey)
 		}
 		nowSuccess := time.Now().UTC()
 		b.lastSuccess = &nowSuccess
@@ -518,11 +555,26 @@ func (b *Backlog) ProcessOne(ctx context.Context, sender transport.LocalEventSen
 		r.NextAttempt = time.Now().Add(b.cfg.RetryMax)
 	}
 	if errors.Is(err, transport.ErrCameraInactive) {
+		now := time.Now()
+		if r.InactiveSince == nil {
+			r.InactiveSince = &now
+		}
+		key := r.Submission.Event.CandidateKey
 		if b.inactiveCandidates == nil {
 			b.inactiveCandidates = make(map[string]time.Time)
 		}
-		b.inactiveCandidates[r.Submission.Event.CandidateKey] = time.Now()
-		r.NextAttempt = time.Now().Add(b.cfg.RetryMax)
+		if _, ok := b.inactiveCandidates[key]; !ok {
+			b.inactiveCandidates[key] = *r.InactiveSince
+		}
+		if now.Sub(*r.InactiveSince) >= b.cfg.InactiveRetention {
+			b.inactiveExpired++
+			b.quarantineAtLocked(idx, r)
+			if b.onQuarantined != nil {
+				b.onQuarantined(r.Submission.Event.EventUUID, "camera_inactive_retention_expired")
+			}
+			return true
+		}
+		r.NextAttempt = now.Add(b.cfg.RetryMax)
 	}
 	b.queue[idx] = r
 	b.persistLocked(r)
@@ -731,8 +783,9 @@ func (b *Backlog) Status() Status {
 		DiskFull:            b.diskFull,
 		QuarantineEvicted:   b.quarantineEvicted,
 		RecoveredOperations: b.recoveredOps,
-		InactiveCandidates: inactiveKeys,
-		InactiveDrops:      b.inactiveDrops,
+		InactiveCandidates:  inactiveKeys,
+		InactiveDrops:       b.inactiveDrops,
+		InactiveExpired:     b.inactiveExpired,
 	}
 	st.OverCapacity = st.BacklogCount > b.cfg.MaxOperations || st.PendingBytes > b.cfg.MaxBytes
 	if len(b.queue) > 0 {
@@ -743,17 +796,26 @@ func (b *Backlog) Status() Status {
 }
 
 // MarkCandidateActive clears any cached inactive status for a camera candidate
-// and accelerates retry for any pending records belonging to it.
+// and accelerates retry for any pending records belonging to it. ProcessOne
+// calls the same logic when a probe for an inactive camera is accepted.
 func (b *Backlog) MarkCandidateActive(candidateKey string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.inactiveCandidates != nil {
-		delete(b.inactiveCandidates, candidateKey)
-	}
+	b.markActiveLocked(candidateKey)
+}
+
+func (b *Backlog) markActiveLocked(candidateKey string) {
+	delete(b.inactiveCandidates, candidateKey)
 	now := time.Now()
 	for i := range b.queue {
-		if b.queue[i].Submission.Event.CandidateKey == candidateKey {
-			b.queue[i].NextAttempt = now
+		r := &b.queue[i]
+		if r.Submission.Event.CandidateKey != candidateKey {
+			continue
+		}
+		r.NextAttempt = now
+		if r.InactiveSince != nil {
+			r.InactiveSince = nil
+			b.persistLocked(*r)
 		}
 	}
 }
