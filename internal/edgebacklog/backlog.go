@@ -36,7 +36,13 @@ var (
 //     survives an agent restart.
 //   - New submissions for a camera marked inactive are refused at Enqueue
 //     and counted in InactiveDrops, so an inactive camera cannot fill the
-//     shared capacity and starve active cameras.
+//     shared capacity and starve active cameras. The one exception keeps the
+//     mark from becoming permanent: when the camera has no pending record
+//     left (its last one expired or was quarantined), Enqueue admits a single
+//     new submission as the probe, at most once per RetryMax. It inherits the
+//     camera's InactiveSince, so a still-inactive camera holds at most one
+//     pending record and that probe is quarantined on its first 423 once the
+//     retention has passed; an accepted probe clears the mark.
 //   - The first accepted probe (camera reactivated) clears the mark and makes
 //     the camera's remaining records due immediately, in order.
 //   - InactiveRetention runs per camera from its first known 423, not per
@@ -164,6 +170,9 @@ type Backlog struct {
 	inactiveCandidates map[string]time.Time
 	inactiveDrops      int64
 	inactiveExpired    int64
+	// inactiveProbeAt is when Enqueue last admitted a probe for an inactive
+	// camera with nothing pending; in memory only (a restart allows one).
+	inactiveProbeAt map[string]time.Time
 
 	persistErrors     int64
 	diskFull          bool
@@ -421,9 +430,21 @@ func (b *Backlog) Enqueue(s Submission) error {
 			return fmt.Errorf("%w: %s", ErrSubmissionConflict, s.Event.EventUUID)
 		}
 	}
-	if _, isInactive := b.inactiveCandidates[s.Event.CandidateKey]; isInactive {
-		b.inactiveDrops++
-		return fmt.Errorf("%w: candidate %s", ErrCameraInactive, s.Event.CandidateKey)
+	var probeSince *time.Time
+	if since, isInactive := b.inactiveCandidates[s.Event.CandidateKey]; isInactive {
+		// A pending record of the camera is its probe; without one (all
+		// expired or quarantined) admit a single new submission as the probe,
+		// at most once per RetryMax, so a later reactivation is still seen.
+		now := time.Now()
+		if b.hasPendingLocked(s.Event.CandidateKey) || now.Before(b.inactiveProbeAt[s.Event.CandidateKey].Add(b.cfg.RetryMax)) {
+			b.inactiveDrops++
+			return fmt.Errorf("%w: candidate %s", ErrCameraInactive, s.Event.CandidateKey)
+		}
+		if b.inactiveProbeAt == nil {
+			b.inactiveProbeAt = make(map[string]time.Time)
+		}
+		b.inactiveProbeAt[s.Event.CandidateKey] = now
+		probeSince = &since
 	}
 	bytes := pendingBytes(b.queue) + submissionBytes(s)
 	if len(b.queue) >= b.cfg.MaxOperations || bytes > b.cfg.MaxBytes {
@@ -431,7 +452,9 @@ func (b *Backlog) Enqueue(s Submission) error {
 		return ErrFull
 	}
 	b.counter++
-	r := record{Sequence: b.counter, CreatedAt: time.Now().UTC(), Stage: "metadata", Submission: s}
+	// A probe inherits the camera's window: still answered 423 past
+	// InactiveRetention, it is quarantined on its first attempt.
+	r := record{Sequence: b.counter, CreatedAt: time.Now().UTC(), Stage: "metadata", Submission: s, InactiveSince: probeSince}
 	if err := b.writeLocked(r); err != nil {
 		// The submission is refused, but the failure is also recorded so
 		// /status reports a full disk even when the caller only logs the
@@ -814,8 +837,18 @@ func (b *Backlog) MarkCandidateActive(candidateKey string) {
 	b.markActiveLocked(candidateKey)
 }
 
+func (b *Backlog) hasPendingLocked(candidateKey string) bool {
+	for _, r := range b.queue {
+		if r.Submission.Event.CandidateKey == candidateKey {
+			return true
+		}
+	}
+	return false
+}
+
 func (b *Backlog) markActiveLocked(candidateKey string) {
 	delete(b.inactiveCandidates, candidateKey)
+	delete(b.inactiveProbeAt, candidateKey)
 	now := time.Now()
 	for i := range b.queue {
 		r := &b.queue[i]

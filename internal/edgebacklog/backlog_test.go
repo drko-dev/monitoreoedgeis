@@ -713,3 +713,81 @@ func TestBacklogInactiveCameraEnqueueStaysIdempotent(t *testing.T) {
 		t.Fatalf("new submission: err=%v drops=%d, want ErrCameraInactive and 1", enqueueErr, b.Status().InactiveDrops)
 	}
 }
+
+func TestBacklogInactiveExpiredCameraReactivatesWithoutRestart(t *testing.T) {
+	d := t.TempDir()
+	retryMax := 30 * time.Millisecond
+	b := openInactive(t, d, retryMax, 20*time.Millisecond)
+	enqueueFor(t, b, d, "a1", "cam-a")
+	inactive := func() *sender { return &sender{errs: []error{transport.ErrCameraInactive}} }
+	b.ProcessOne(context.Background(), inactive(), "device", "token")
+	time.Sleep(retryMax + 10*time.Millisecond)
+	b.ProcessOne(context.Background(), inactive(), "device", "token")
+	st := b.Status()
+	if st.BacklogCount != 0 || st.InactiveExpired != 1 || len(st.InactiveCandidates) != 1 {
+		t.Fatalf("after expiry: %+v, want last record quarantined and cam-a still marked", st)
+	}
+
+	// No pending record is left to probe. The camera is reactivated in SaaS:
+	// a new event is admitted as the probe, accepted, and clears the mark.
+	enqueueFor(t, b, d, "a2", "cam-a")
+	s := &sender{}
+	drain(b, s)
+	if fmt.Sprint(s.calls) != fmt.Sprint([]string{"metadata:a2", "capture:a2"}) {
+		t.Fatalf("calls = %v, want a2 synced", s.calls)
+	}
+	enqueueFor(t, b, d, "a3", "cam-a")
+	enqueueFor(t, b, d, "a4", "cam-a")
+	drain(b, s)
+	st = b.Status()
+	if st.BacklogCount != 0 || len(st.InactiveCandidates) != 0 || st.InactiveDrops != 0 {
+		t.Fatalf("after reactivation: %+v, want empty backlog, no mark, no drops", st)
+	}
+}
+
+func TestBacklogInactiveExpiredCameraCannotRefillBacklog(t *testing.T) {
+	d := t.TempDir()
+	retryMax := 30 * time.Millisecond
+	b := openInactive(t, d, retryMax, 20*time.Millisecond)
+	enqueueFor(t, b, d, "a1", "cam-a")
+	inactive := func() *sender { return &sender{errs: []error{transport.ErrCameraInactive}} }
+	b.ProcessOne(context.Background(), inactive(), "device", "token")
+	time.Sleep(retryMax + 10*time.Millisecond)
+	b.ProcessOne(context.Background(), inactive(), "device", "token")
+
+	// cam-a stays inactive. A burst of new events: only one becomes the
+	// probe, the rest are refused, so the backlog never holds more than one
+	// cam-a record.
+	try := func(id string) error {
+		s := submission(t, d, id)
+		s.Event.CandidateKey = "cam-a"
+		return b.Enqueue(s)
+	}
+	if err := try("p1"); err != nil {
+		t.Fatalf("probe admission: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		if err := try(fmt.Sprintf("x%02d", i)); !errors.Is(err, ErrCameraInactive) {
+			t.Fatalf("burst event %d: err=%v, want ErrCameraInactive", i, err)
+		}
+	}
+	// The probe still gets 423 past retention: quarantined at once, mark kept.
+	b.ProcessOne(context.Background(), inactive(), "device", "token")
+	st := b.Status()
+	if st.BacklogCount != 0 || st.InactiveExpired != 2 || st.InactiveDrops != 10 || len(st.InactiveCandidates) != 1 {
+		t.Fatalf("after probe 423: %+v, want backlog 0, expired 2, drops 10, cam-a marked", st)
+	}
+	// Within RetryMax of the last probe, new events are still refused even
+	// with nothing pending: probing is rate-limited.
+	if err := try("x10"); !errors.Is(err, ErrCameraInactive) {
+		t.Fatalf("event inside probe interval: err=%v, want ErrCameraInactive", err)
+	}
+
+	// Active cameras keep the full shared capacity meanwhile.
+	for i := 0; i < 8; i++ {
+		enqueueFor(t, b, d, fmt.Sprintf("on%02d", i), "cam-on")
+	}
+	if st := b.Status(); st.BacklogCount != 8 || st.Drops != 0 {
+		t.Fatalf("cam-on: %+v, want 8 accepted, no capacity drops", st)
+	}
+}
