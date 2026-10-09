@@ -334,3 +334,105 @@ func TestBacklogWriteLocked_SurvivesLeftoverTmpFile(t *testing.T) {
 		t.Errorf("Quarantined = %d, want 0 (a stray .tmp file is not a record)", got)
 	}
 }
+
+func TestBacklogCameraInactiveRetainsAndRecovers(t *testing.T) {
+	d := t.TempDir()
+	retryMax := 20 * time.Millisecond
+	b := openWithConfig(t, d, 5*time.Millisecond, retryMax)
+
+	var syncedUUID string
+	b.SetSyncCallbacks(func(eventUUID string) {
+		syncedUUID = eventUUID
+	}, func(eventUUID, reason string) {
+		t.Fatalf("unexpected quarantine of %s: %s", eventUUID, reason)
+	})
+
+	sub := submission(t, d, "inactive-evt")
+	if err := b.Enqueue(sub); err != nil {
+		t.Fatal(err)
+	}
+
+	// First attempt: camera administratively inactive in SaaS
+	s := &sender{errs: []error{transport.ErrCameraInactive}}
+	if !b.ProcessOne(context.Background(), s, "device", "token") {
+		t.Fatal("expected ProcessOne to process record on first attempt")
+	}
+
+	// Must NOT be quarantined
+	st := b.Status()
+	if st.Quarantined != 0 {
+		t.Fatalf("Quarantined = %d, want 0 (inactive camera must not quarantine)", st.Quarantined)
+	}
+	if st.BacklogCount != 1 {
+		t.Fatalf("BacklogCount = %d, want 1 (retained in pending)", st.BacklogCount)
+	}
+
+	// Immediate next attempt returns false due to cooldown
+	if b.ProcessOne(context.Background(), s, "device", "token") {
+		t.Fatal("expected ProcessOne to return false while in cooldown")
+	}
+
+	// Wait for cooldown to expire (simulating reactivation)
+	time.Sleep(retryMax + 10*time.Millisecond)
+
+	// Sender now succeeds for metadata and capture
+	s.errs = nil
+	if !b.ProcessOne(context.Background(), s, "device", "token") {
+		t.Fatal("expected ProcessOne to process metadata stage after reactivation")
+	}
+	if !b.ProcessOne(context.Background(), s, "device", "token") {
+		t.Fatal("expected ProcessOne to process capture stage after reactivation")
+	}
+
+	st = b.Status()
+	if st.BacklogCount != 0 {
+		t.Fatalf("BacklogCount = %d, want 0 after full recovery", st.BacklogCount)
+	}
+	if syncedUUID != "inactive-evt" {
+		t.Fatalf("syncedUUID = %q, want inactive-evt", syncedUUID)
+	}
+}
+
+func TestBacklogNoHeadOfLineBlockingAcrossCameras(t *testing.T) {
+	d := t.TempDir()
+	// Long retry max to keep inactive camera deferred
+	b := openWithConfig(t, d, 100*time.Millisecond, 10*time.Second)
+
+	subA := submission(t, d, "evt-cam-inactive")
+	subA.Event.CandidateKey = "cam-inactive"
+	if err := b.Enqueue(subA); err != nil {
+		t.Fatal(err)
+	}
+
+	subB := submission(t, d, "evt-cam-active")
+	subB.Event.CandidateKey = "cam-active"
+	if err := b.Enqueue(subB); err != nil {
+		t.Fatal(err)
+	}
+
+	// Call 1: cam-inactive returns ErrCameraInactive
+	// Call 2: cam-active succeeds
+	s := &sender{errs: []error{transport.ErrCameraInactive, nil}}
+
+	// Process first record (cam-inactive) -> sets NextAttempt 10s into future
+	if !b.ProcessOne(context.Background(), s, "device", "token") {
+		t.Fatal("expected ProcessOne to process cam-inactive")
+	}
+
+	// Process second record (cam-active) -> must NOT be blocked by cam-inactive!
+	if !b.ProcessOne(context.Background(), s, "device", "token") {
+		t.Fatal("cam-active was blocked by deferred cam-inactive (head-of-line blocking violation)")
+	}
+
+	// Check calls made
+	if len(s.calls) < 2 {
+		t.Fatalf("expected at least 2 calls, got %v", s.calls)
+	}
+	if s.calls[0] != "metadata:evt-cam-inactive" {
+		t.Errorf("call 0 = %q, want metadata:evt-cam-inactive", s.calls[0])
+	}
+	if s.calls[1] != "metadata:evt-cam-active" {
+		t.Errorf("call 1 = %q, want metadata:evt-cam-active", s.calls[1])
+	}
+}
+

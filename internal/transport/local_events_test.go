@@ -66,6 +66,9 @@ func TestClassifyLocalEventStatus(t *testing.T) {
 		{name: "idempotent", status: http.StatusOK},
 		{name: "unauthorized is auth error", status: http.StatusUnauthorized, want: ErrUnauthorized},
 		{name: "conflict is permanent", status: http.StatusConflict, want: ErrInvalidRequest},
+		{name: "camera inactive status 423", status: http.StatusLocked, want: ErrCameraInactive},
+		{name: "camera inactive header with 400", status: http.StatusBadRequest, header: http.Header{"X-Camera-Status": []string{"inactive"}}, want: ErrCameraInactive},
+		{name: "camera inactive header with 423", status: http.StatusLocked, header: http.Header{"X-Camera-Status": []string{"inactive"}}, want: ErrCameraInactive},
 		{name: "service unavailable is retryable", status: http.StatusServiceUnavailable, want: ErrRetryableStatus},
 		{name: "rate limited with header", status: http.StatusTooManyRequests, header: http.Header{"Retry-After": []string{"20"}}, want: ErrRateLimited},
 	}

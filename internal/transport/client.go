@@ -41,6 +41,11 @@ var (
 	// RetryAfter carried by RateLimitError rather than applying their own backoff
 	// when the server stated one.
 	ErrRateLimited = errors.New("transport: rate limited by SaaS")
+
+	// ErrCameraInactive indicates that the linked camera is administratively inactive
+	// in the SaaS (HTTP 423 Locked or X-Camera-Status: inactive). The Edge must not
+	// quarantine valid pending events under this condition; instead it defers retry.
+	ErrCameraInactive = errors.New("transport: camera administratively inactive")
 )
 
 // RateLimitError carries the server-stated cooldown from a 429 response.
@@ -514,6 +519,9 @@ func classifyFrameStatus(status int) error {
 //   - Anything else (e.g. an unexpected 1xx/3xx): ErrUnexpectedStatus,
 //     treated as non-retryable since this package cannot say what it means.
 func classifyFrameStatusWithHeader(status int, header http.Header) error {
+	if status == http.StatusLocked || (header != nil && header.Get("X-Camera-Status") == "inactive") {
+		return fmt.Errorf("%w (status %d)", ErrCameraInactive, status)
+	}
 	switch {
 	case status == http.StatusAccepted || status == http.StatusOK:
 		return nil

@@ -407,18 +407,51 @@ func validateEvidence(e *Evidence) error {
 
 func (b *Backlog) ProcessOne(ctx context.Context, sender transport.LocalEventSender, deviceID, credential string) bool {
 	b.mu.Lock()
-	if len(b.queue) == 0 || (!b.queue[0].NextAttempt.IsZero() && time.Now().Before(b.queue[0].NextAttempt)) {
+	if len(b.queue) == 0 {
 		b.mu.Unlock()
 		return false
 	}
-	r := b.queue[0]
+	now := time.Now()
+	targetIdx := -1
+	deferredKeys := make(map[string]struct{})
+	for i, item := range b.queue {
+		if !item.NextAttempt.IsZero() && now.Before(item.NextAttempt) {
+			deferredKeys[item.Submission.Event.CandidateKey] = struct{}{}
+			continue
+		}
+		if _, blocked := deferredKeys[item.Submission.Event.CandidateKey]; blocked {
+			// Maintain strict FIFO order for the same candidate camera
+			continue
+		}
+		targetIdx = i
+		break
+	}
+	if targetIdx == -1 {
+		b.mu.Unlock()
+		return false
+	}
+	r := b.queue[targetIdx]
 	b.mu.Unlock()
+
 	err := b.send(ctx, sender, deviceID, credential, r)
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	idx := -1
+	for i, item := range b.queue {
+		if item.Sequence == r.Sequence {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return true
+	}
+
 	if err == nil {
-		now := time.Now().UTC()
-		b.lastSuccess = &now
+		nowSuccess := time.Now().UTC()
+		b.lastSuccess = &nowSuccess
 		b.lastError = ""
 		b.degraded = false
 		switch r.Stage {
@@ -427,34 +460,30 @@ func (b *Backlog) ProcessOne(ctx context.Context, sender transport.LocalEventSen
 		case "capture":
 			r.Stage = nextStage(r.Submission, "clip")
 		default:
-			b.removeLocked(r)
+			b.removeAtLocked(idx, r)
 			b.notifySynced(r)
 			return true
 		}
 		if r.Stage == "complete" {
-			b.removeLocked(r)
+			b.removeAtLocked(idx, r)
 			b.notifySynced(r)
 			return true
 		}
-		b.queue[0] = r
-		// A failed stage-advance write used to be discarded with `_ =`. The
-		// record stays in memory and the send itself succeeded, so the run
-		// continues — but on the next restart recover() would load the older
-		// stage from disk and re-upload a stage the SaaS already accepted.
-		// That is survivable (the SaaS is idempotent per stage) yet it must
-		// not be invisible, so it is counted and classified.
+		b.queue[idx] = r
 		b.persistLocked(r)
 		return true
 	}
+
 	b.lastError = safeError(err)
 	if errors.Is(err, transport.ErrInvalidRequest) || errors.Is(err, transport.ErrUnexpectedStatus) {
 		reason := b.lastError
-		b.quarantineLocked(r)
+		b.quarantineAtLocked(idx, r)
 		if b.onQuarantined != nil {
 			b.onQuarantined(r.Submission.Event.EventUUID, reason)
 		}
 		return true
 	}
+
 	r.Attempts++
 	delay := b.backoff(r.Attempts)
 	var rle *transport.RateLimitError
@@ -469,7 +498,10 @@ func (b *Backlog) ProcessOne(ctx context.Context, sender transport.LocalEventSen
 		b.degraded = true
 		r.NextAttempt = time.Now().Add(b.cfg.RetryMax)
 	}
-	b.queue[0] = r
+	if errors.Is(err, transport.ErrCameraInactive) {
+		r.NextAttempt = time.Now().Add(b.cfg.RetryMax)
+	}
+	b.queue[idx] = r
 	b.persistLocked(r)
 	return true
 }
@@ -597,10 +629,16 @@ func (b *Backlog) recordPersistFailureLocked(err error) {
 // SaaS side is idempotent on event_uuid, so a duplicate is survivable — but
 // it must never be silent.
 func (b *Backlog) removeLocked(r record) {
+	b.removeAtLocked(0, r)
+}
+
+func (b *Backlog) removeAtLocked(idx int, r record) {
 	if err := b.removeFile(b.path(r)); err != nil && !os.IsNotExist(err) {
 		b.recordPersistFailureLocked(platform.WrapDiskError(err))
 	}
-	b.queue = b.queue[1:]
+	if idx >= 0 && idx < len(b.queue) {
+		b.queue = append(b.queue[:idx], b.queue[idx+1:]...)
+	}
 }
 
 func (b *Backlog) notifySynced(r record) {
@@ -618,6 +656,10 @@ func (b *Backlog) notifySynced(r record) {
 // forever. The fallback delete is therefore the honest completion of the
 // move, and both outcomes are counted.
 func (b *Backlog) quarantineLocked(r record) {
+	b.quarantineAtLocked(0, r)
+}
+
+func (b *Backlog) quarantineAtLocked(idx int, r record) {
 	src := b.path(r)
 	dst := filepath.Join(b.cfg.Dir, "quarantine", fmt.Sprintf("%020d.json", r.Sequence))
 	if err := b.renameFile(src, dst); err != nil {
@@ -628,10 +670,14 @@ func (b *Backlog) quarantineLocked(r record) {
 			// retry path; surface it without classing it as a full disk.
 			b.recordPersistFailureLocked(fmt.Errorf("edgebacklog: quarantine move failed: %w", err))
 		}
-		b.queue = b.queue[1:]
+		if idx >= 0 && idx < len(b.queue) {
+			b.queue = append(b.queue[:idx], b.queue[idx+1:]...)
+		}
 		return
 	}
-	b.queue = b.queue[1:]
+	if idx >= 0 && idx < len(b.queue) {
+		b.queue = append(b.queue[:idx], b.queue[idx+1:]...)
+	}
 	b.quarantineSeqs = append(b.quarantineSeqs, r.Sequence)
 	sort.Slice(b.quarantineSeqs, func(i, j int) bool { return b.quarantineSeqs[i] < b.quarantineSeqs[j] })
 	b.quarantined = len(b.quarantineSeqs)
