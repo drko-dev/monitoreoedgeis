@@ -39,9 +39,12 @@ var (
 //     shared capacity and starve active cameras.
 //   - The first accepted probe (camera reactivated) clears the mark and makes
 //     the camera's remaining records due immediately, in order.
-//   - A record still answered with 423 after InactiveRetention is quarantined
-//     (reason camera_inactive_retention_expired) and counted in
+//   - InactiveRetention runs per camera from its first known 423, not per
+//     record. A record still answered with 423 once that window has passed is
+//     quarantined (reason camera_inactive_retention_expired) and counted in
 //     InactiveExpired; quarantine/ stays bounded as for any rejected record.
+//   - Idempotency is checked before the inactive refusal: re-submitting an
+//     event that is already pending is a no-op, never an InactiveDrop.
 const DefaultInactiveRetention = 7 * 24 * time.Hour
 
 // maxErrorBytes bounds every string this package records for an operator, the
@@ -408,12 +411,8 @@ func (b *Backlog) Enqueue(s Submission) error {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.inactiveCandidates != nil {
-		if _, isInactive := b.inactiveCandidates[s.Event.CandidateKey]; isInactive {
-			b.inactiveDrops++
-			return fmt.Errorf("%w: candidate %s", ErrCameraInactive, s.Event.CandidateKey)
-		}
-	}
+	// Idempotency first: re-submitting an event that is already pending is a
+	// no-op (or a conflict) whatever its camera's state, never a new drop.
 	for _, r := range b.queue {
 		if r.Submission.Event.EventUUID == s.Event.EventUUID {
 			if submissionsEquivalent(r.Submission, s) {
@@ -421,6 +420,10 @@ func (b *Backlog) Enqueue(s Submission) error {
 			}
 			return fmt.Errorf("%w: %s", ErrSubmissionConflict, s.Event.EventUUID)
 		}
+	}
+	if _, isInactive := b.inactiveCandidates[s.Event.CandidateKey]; isInactive {
+		b.inactiveDrops++
+		return fmt.Errorf("%w: candidate %s", ErrCameraInactive, s.Event.CandidateKey)
 	}
 	bytes := pendingBytes(b.queue) + submissionBytes(s)
 	if len(b.queue) >= b.cfg.MaxOperations || bytes > b.cfg.MaxBytes {
@@ -555,15 +558,22 @@ func (b *Backlog) ProcessOne(ctx context.Context, sender transport.LocalEventSen
 		r.NextAttempt = time.Now().Add(b.cfg.RetryMax)
 	}
 	if errors.Is(err, transport.ErrCameraInactive) {
+		// Retention is per camera: it runs from the first 423 known for the
+		// camera (inactiveCandidates is the source of truth), so later
+		// records of the same camera never open a fresh window.
 		now := time.Now()
-		if r.InactiveSince == nil {
-			r.InactiveSince = &now
-		}
 		key := r.Submission.Event.CandidateKey
 		if b.inactiveCandidates == nil {
 			b.inactiveCandidates = make(map[string]time.Time)
 		}
-		if _, ok := b.inactiveCandidates[key]; !ok {
+		if r.InactiveSince == nil {
+			since := now
+			if first, ok := b.inactiveCandidates[key]; ok {
+				since = first
+			}
+			r.InactiveSince = &since
+		}
+		if first, ok := b.inactiveCandidates[key]; !ok || r.InactiveSince.Before(first) {
 			b.inactiveCandidates[key] = *r.InactiveSince
 		}
 		if now.Sub(*r.InactiveSince) >= b.cfg.InactiveRetention {

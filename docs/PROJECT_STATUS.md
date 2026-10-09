@@ -13,15 +13,15 @@ Branch `fix/edge-event-backlog-reactivation-hito2`. The SaaS answers a local eve
 | Inactive (423 received) | **Retained** in `pending/`, re-probed every `RetryMax` (1 min). FIFO: later records of the camera wait behind the head. Other cameras are not blocked. | **Refused** with `ErrCameraInactive`; nothing is written | `inactive_candidates`, `inactive_drops` |
 | Inactive across an agent restart | The 423 mark (`inactive_since`) is persisted on the record and rebuilt on `Open` | Still refused | same, `recovered_operations` |
 | Reactivated (first probe accepted) | Mark cleared, all retained records of the camera made due immediately, in order | Accepted again | `inactive_candidates` loses the key |
-| Inactive longer than `InactiveRetention` (7 days) | Record quarantined, reason `camera_inactive_retention_expired` | Still refused | `quarantined`, `inactive_expired` |
+| Inactive longer than `InactiveRetention` (7 days, measured per camera from its first 423) | Record quarantined, reason `camera_inactive_retention_expired`; later records of the camera do not get a fresh window | Still refused | `quarantined`, `inactive_expired` |
 | SaaS rejects permanently (other 4xx) | Quarantined as before | Accepted | `quarantined` |
 
 Discard policy:
-- Events produced while a camera is marked inactive are discarded at the source and counted, not stored.
+- Events produced while a camera is marked inactive are discarded at the source and counted, not stored. A re-submission of an event that is already pending stays an idempotent no-op and is not counted.
 - The SaaS decides whether an event belongs to an active or an inactive period, and the Edge does not second-guess that decision.
 - Retained records cannot starve active cameras: they hold no new capacity and are retried only once per `RetryMax`.
 
-Covered by unit tests in `internal/edgebacklog`: restart persistence, probe-driven reactivation without an explicit call, retention expiry, and coexistence without head-of-line blocking.
+Covered by unit tests in `internal/edgebacklog`: restart persistence, probe-driven reactivation without an explicit call, per-camera retention expiry across several records, idempotent re-submission while inactive, and coexistence without head-of-line blocking.
 
 **Still needs physical validation on the TC70:**
 1. Deactivate camera 18 in the SaaS, confirm `423`, `inactive_candidates` and `inactive_drops`.

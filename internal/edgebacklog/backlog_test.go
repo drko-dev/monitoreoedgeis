@@ -649,3 +649,67 @@ func TestBacklogActiveAndInactiveCamerasCoexist(t *testing.T) {
 		t.Fatalf("InactiveDrops = %d, want 0 (no new cam-off submissions)", st.InactiveDrops)
 	}
 }
+
+func TestBacklogInactiveRetentionIsPerCameraNotPerRecord(t *testing.T) {
+	d := t.TempDir()
+	retention := 40 * time.Millisecond
+	b := openInactive(t, d, time.Millisecond, retention)
+	var quarantined []string
+	b.SetSyncCallbacks(nil, func(id, reason string) { quarantined = append(quarantined, id+":"+reason) })
+	enqueueFor(t, b, d, "a1", "cam-a")
+	enqueueFor(t, b, d, "a2", "cam-a")
+
+	// First 423 of the camera: only a1 is sent (FIFO), a2 has never been
+	// answered yet.
+	inactive := func() *sender { return &sender{errs: []error{transport.ErrCameraInactive}} }
+	b.ProcessOne(context.Background(), inactive(), "device", "token")
+	first := b.Status()
+	if first.BacklogCount != 2 || len(first.InactiveCandidates) != 1 {
+		t.Fatalf("after first 423: %+v, want both records retained and cam-a inactive", first)
+	}
+
+	// Past the retention measured from that first 423, a1 expires, and a2,
+	// on its own first 423, must inherit the camera's window instead of
+	// opening a new 40 ms one.
+	time.Sleep(retention + 10*time.Millisecond)
+	b.ProcessOne(context.Background(), inactive(), "device", "token")
+	b.ProcessOne(context.Background(), inactive(), "device", "token")
+	st := b.Status()
+	if st.BacklogCount != 0 || st.InactiveExpired != 2 || st.Quarantined != 2 {
+		t.Fatalf("status = %+v, want both records expired (backlog 0, inactive_expired 2)", st)
+	}
+	want := []string{"a1:camera_inactive_retention_expired", "a2:camera_inactive_retention_expired"}
+	if fmt.Sprint(quarantined) != fmt.Sprint(want) {
+		t.Fatalf("quarantined = %v, want %v", quarantined, want)
+	}
+}
+
+func TestBacklogInactiveCameraEnqueueStaysIdempotent(t *testing.T) {
+	d := t.TempDir()
+	b := openInactive(t, d, time.Hour, time.Hour)
+	a1 := submission(t, d, "a1")
+	a1.Event.CandidateKey = "cam-a"
+	if err := b.Enqueue(a1); err != nil {
+		t.Fatal(err)
+	}
+	b.ProcessOne(context.Background(), &sender{errs: []error{transport.ErrCameraInactive}}, "device", "token")
+
+	// Equivalent resubmission of the pending event: accepted as a no-op.
+	if err := b.Enqueue(a1); err != nil {
+		t.Fatalf("equivalent resubmission: err=%v, want nil", err)
+	}
+	// Same UUID, different content: still a conflict, not an inactive drop.
+	changed := a1
+	changed.Event.Class = "changed"
+	if err := b.Enqueue(changed); !errors.Is(err, ErrSubmissionConflict) {
+		t.Fatalf("conflicting resubmission: err=%v, want ErrSubmissionConflict", err)
+	}
+	if st := b.Status(); st.InactiveDrops != 0 || st.BacklogCount != 1 {
+		t.Fatalf("after resubmissions: %+v, want inactive_drops 0 and one pending record", st)
+	}
+	// A genuinely new event of the inactive camera is the only drop.
+	enqueueErr := b.Enqueue(func() Submission { s := submission(t, d, "a2"); s.Event.CandidateKey = "cam-a"; return s }())
+	if !errors.Is(enqueueErr, ErrCameraInactive) || b.Status().InactiveDrops != 1 {
+		t.Fatalf("new submission: err=%v drops=%d, want ErrCameraInactive and 1", enqueueErr, b.Status().InactiveDrops)
+	}
+}
