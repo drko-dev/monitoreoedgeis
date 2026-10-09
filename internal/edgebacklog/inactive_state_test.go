@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -144,5 +146,152 @@ func TestInactiveProbeCooldownOnlyConsumedWhenQueued(t *testing.T) {
 	}
 	if st := b.Status(); st.BacklogCount != 1 || st.InactiveDrops != 0 {
 		t.Fatalf("status = %+v, want only the probe pending, no inactive drops", st)
+	}
+}
+
+func readInactiveState(t *testing.T, d string) map[string]inactiveState {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(d, inactiveStateFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]inactiveState
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
+func TestInactiveStateDirectoryIsSyncedAfterRenameAndRemove(t *testing.T) {
+	d := t.TempDir()
+	b := openInactive(t, d, time.Hour, 24*time.Hour)
+	var ops []string
+	b.renameFile = func(oldp, newp string) error {
+		ops = append(ops, "rename:"+filepath.Base(newp))
+		return os.Rename(oldp, newp)
+	}
+	b.removeFile = func(name string) error {
+		ops = append(ops, "remove:"+filepath.Base(name))
+		return os.Remove(name)
+	}
+	b.syncDir = func(dir string) error {
+		ops = append(ops, "syncdir:"+dir)
+		return syncDirFS(dir)
+	}
+	enqueueFor(t, b, d, "a1", "cam-a")
+	b.ProcessOne(context.Background(), &sender{errs: []error{transport.ErrCameraInactive}}, "device", "token")
+	b.MarkCandidateActive("cam-a")
+
+	var got []string
+	for _, op := range ops {
+		if strings.Contains(op, inactiveStateFile) || strings.HasPrefix(op, "syncdir:") {
+			got = append(got, op)
+		}
+	}
+	want := []string{"rename:" + inactiveStateFile, "syncdir:" + d, "remove:" + inactiveStateFile, "syncdir:" + d}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("ops = %v, want %v (directory fsync after the rename and after the remove)", got, want)
+	}
+	if st := b.Status(); st.PersistErrors != 0 {
+		t.Fatalf("persist_errors = %d, want 0", st.PersistErrors)
+	}
+}
+
+func TestInactiveStateDirectorySyncFailureIsReported(t *testing.T) {
+	d := t.TempDir()
+	b := openInactive(t, d, time.Hour, 24*time.Hour)
+	b.syncDir = func(dir string) error {
+		return &os.PathError{Op: "fsync", Path: dir, Err: syscall.EIO}
+	}
+	enqueueFor(t, b, d, "a1", "cam-a")
+	b.ProcessOne(context.Background(), &sender{errs: []error{transport.ErrCameraInactive}}, "device", "token")
+	st := b.Status()
+	if st.PersistErrors != 1 || !strings.Contains(st.LastError, "fsync") {
+		t.Fatalf("after marking with failing dir sync: persist_errors=%d last_error=%q, want 1 and an fsync error", st.PersistErrors, st.LastError)
+	}
+	// The mark is still enforced in memory.
+	if len(st.InactiveCandidates) != 1 {
+		t.Fatalf("inactive_candidates = %v, want [cam-a]", st.InactiveCandidates)
+	}
+	// Reactivation removes the file; its directory sync failure is reported too.
+	b.MarkCandidateActive("cam-a")
+	if st := b.Status(); st.PersistErrors != 2 || len(st.InactiveCandidates) != 0 {
+		t.Fatalf("after reactivation with failing dir sync: %+v, want persist_errors 2 and no mark", st)
+	}
+}
+
+// seedCameras writes n marks cam-000..cam-(n-1); a lower index is an older
+// mark, and each has its own probe_at so corruption would be visible.
+func seedCameras(t *testing.T, d string, n int, base time.Time) map[string]inactiveState {
+	t.Helper()
+	state := make(map[string]inactiveState, n)
+	for i := 0; i < n; i++ {
+		state[fmt.Sprintf("cam-%03d", i)] = inactiveState{
+			Since:   base.Add(time.Duration(i) * time.Minute),
+			ProbeAt: base.Add(time.Duration(i)*time.Minute + 30*time.Second),
+		}
+	}
+	writeInactiveState(t, d, state)
+	return state
+}
+
+func TestInactiveStateCapEvictsOldestMarkAt257(t *testing.T) {
+	d := t.TempDir()
+	base := time.Now().Add(-48 * time.Hour).UTC().Truncate(time.Second)
+	seeded := seedCameras(t, d, maxInactiveCameras, base)
+	b := openInactive(t, d, time.Hour, 24*time.Hour)
+	if n := len(b.Status().InactiveCandidates); n != maxInactiveCameras {
+		t.Fatalf("after load: %d marks, want %d (256 fit, nothing evicted)", n, maxInactiveCameras)
+	}
+
+	// The 257th camera is learned through the real 423 path.
+	enqueueFor(t, b, d, "n1", "cam-new")
+	b.ProcessOne(context.Background(), &sender{errs: []error{transport.ErrCameraInactive}}, "device", "token")
+
+	st := b.Status()
+	if len(st.InactiveCandidates) != maxInactiveCameras {
+		t.Fatalf("memory: %d marks, want %d", len(st.InactiveCandidates), maxInactiveCameras)
+	}
+	onDisk := readInactiveState(t, d)
+	if len(onDisk) != maxInactiveCameras {
+		t.Fatalf("inactive.json: %d entries, want %d", len(onDisk), maxInactiveCameras)
+	}
+	if _, ok := onDisk["cam-000"]; ok {
+		t.Fatal("cam-000 (oldest mark) must be the one evicted")
+	}
+	if _, ok := onDisk["cam-new"]; !ok {
+		t.Fatal("cam-new must be kept")
+	}
+	for i := 1; i < maxInactiveCameras; i++ {
+		k := fmt.Sprintf("cam-%03d", i)
+		got, want := onDisk[k], seeded[k]
+		if !got.Since.Equal(want.Since) || !got.ProbeAt.Equal(want.ProbeAt) {
+			t.Fatalf("%s = %+v, want unchanged %+v", k, got, want)
+		}
+	}
+
+	// Known tradeoff: the evicted camera is no longer known inactive, so it
+	// admits events again (not probe-limited) until its next 423 re-marks it,
+	// which in turn evicts the next oldest mark.
+	for _, id := range []string{"e1", "e2"} {
+		if err := enqueueErr(t, b, d, id, "cam-000"); err != nil {
+			t.Fatalf("evicted camera event %s: %v, want accepted", id, err)
+		}
+	}
+}
+
+func TestInactiveStateCapAppliesOnLoad(t *testing.T) {
+	d := t.TempDir()
+	base := time.Now().Add(-48 * time.Hour).UTC().Truncate(time.Second)
+	seedCameras(t, d, maxInactiveCameras+44, base)
+	b := openInactive(t, d, time.Hour, 24*time.Hour)
+
+	marks := b.Status().InactiveCandidates
+	if len(marks) != maxInactiveCameras {
+		t.Fatalf("after loading 300 entries: %d marks, want %d", len(marks), maxInactiveCameras)
+	}
+	// Sorted keys: the 44 oldest (cam-000..cam-043) were dropped.
+	if marks[0] != "cam-044" || marks[len(marks)-1] != "cam-299" {
+		t.Fatalf("kept marks %s..%s, want cam-044..cam-299", marks[0], marks[len(marks)-1])
 	}
 }

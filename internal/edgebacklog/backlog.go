@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -199,6 +200,7 @@ type Backlog struct {
 	writeFile  func(name string, data []byte, perm os.FileMode) error
 	renameFile func(oldpath, newpath string) error
 	removeFile func(name string) error
+	syncDir    func(dir string) error
 
 	// onSynced/onQuarantined let a caller (the K7 EventStore, via
 	// internal/agent's wiring) keep its own SyncStatus in step with this
@@ -266,6 +268,7 @@ func Open(cfg Config) (*Backlog, error) {
 		writeFile:          writeFileSynced,
 		renameFile:         os.Rename,
 		removeFile:         os.Remove,
+		syncDir:            syncDirFS,
 		inactiveCandidates: make(map[string]time.Time),
 	}
 	if err := b.recover(); err != nil {
@@ -347,6 +350,13 @@ func (b *Backlog) recover() error {
 // a camera that is still inactive with nothing pending stays marked across a
 // restart. One entry per camera, removed when the camera is reactivated and
 // capped at maxInactiveCameras.
+//
+// Cap tradeoff: past the cap the mark with the oldest first 423 is evicted.
+// That camera is then treated as unknown: it admits events again (not
+// probe-limited) until its next 423 re-marks it, briefly using shared
+// capacity. The cap is far above the cameras one Edge serves, so it only
+// triggers on candidate-key churn (replaced cameras), whose stale marks are
+// exactly the oldest ones.
 const (
 	inactiveStateFile  = "inactive.json"
 	maxInactiveCameras = 256
@@ -386,7 +396,9 @@ func (b *Backlog) capInactiveLocked() {
 	for len(b.inactiveCandidates) > maxInactiveCameras {
 		oldestKey, oldest := "", time.Time{}
 		for k, since := range b.inactiveCandidates {
-			if oldestKey == "" || since.Before(oldest) {
+			// Oldest first mark; ties broken by key so the eviction is
+			// deterministic.
+			if oldestKey == "" || since.Before(oldest) || (since.Equal(oldest) && k < oldestKey) {
 				oldestKey, oldest = k, since
 			}
 		}
@@ -399,7 +411,7 @@ func (b *Backlog) persistInactiveLocked() {
 	b.capInactiveLocked()
 	path := filepath.Join(b.cfg.Dir, inactiveStateFile)
 	if len(b.inactiveCandidates) == 0 {
-		if err := b.removeFile(path); err != nil && !os.IsNotExist(err) {
+		if err := b.removeFileDurable(path); err != nil {
 			b.recordPersistFailureLocked(platform.WrapDiskError(err))
 		}
 		return
@@ -413,16 +425,52 @@ func (b *Backlog) persistInactiveLocked() {
 		b.recordPersistFailureLocked(err)
 		return
 	}
+	if err := b.replaceFileDurable(path, data); err != nil {
+		b.recordPersistFailureLocked(platform.WrapDiskError(err))
+	}
+}
+
+// replaceFileDurable atomically replaces path with data: tmp + fsync, rename,
+// then fsync of the parent directory so the rename itself survives a power
+// loss, not only the file contents.
+func (b *Backlog) replaceFileDurable(path string, data []byte) error {
 	tmp := path + ".tmp"
 	if err := b.writeFile(tmp, data, 0o600); err != nil {
 		_ = b.removeFile(tmp)
-		b.recordPersistFailureLocked(platform.WrapDiskError(err))
-		return
+		return err
 	}
 	if err := b.renameFile(tmp, path); err != nil {
 		_ = b.removeFile(tmp)
-		b.recordPersistFailureLocked(platform.WrapDiskError(err))
+		return err
 	}
+	return b.syncDir(filepath.Dir(path))
+}
+
+// removeFileDurable removes path and fsyncs its directory so the removal
+// survives a power loss. A missing file is not an error.
+func (b *Backlog) removeFileDurable(path string) error {
+	if err := b.removeFile(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return b.syncDir(filepath.Dir(path))
+}
+
+// syncDirFS fsyncs a directory so renames and removals in it are durable.
+// Windows cannot open a directory for Sync; NTFS journals the metadata change
+// itself, so there it is a no-op.
+func syncDirFS(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 // loadQuarantineLocked rebuilds the in-memory view of quarantine/ so the
