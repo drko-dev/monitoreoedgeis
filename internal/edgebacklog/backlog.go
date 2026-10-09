@@ -26,6 +26,7 @@ import (
 var (
 	ErrFull               = errors.New("edgebacklog: bounded backlog is full")
 	ErrSubmissionConflict = errors.New("edgebacklog: divergent submission for event")
+	ErrCameraInactive     = errors.New("edgebacklog: camera is administratively inactive in SaaS")
 )
 
 // maxErrorBytes bounds every string this package records for an operator, the
@@ -104,6 +105,11 @@ type Status struct {
 	// disk at Open. It is reported so an over-capacity spool (see
 	// OverCapacity) can be told apart from one that grew during this run.
 	RecoveredOperations int `json:"recovered_operations,omitempty"`
+	// InactiveCandidates reports candidate camera keys currently known to be administratively
+	// inactive in the SaaS (confirmed via HTTP 423).
+	InactiveCandidates []string `json:"inactive_candidates,omitempty"`
+	// InactiveDrops counts new submissions refused at Enqueue because the target camera is inactive.
+	InactiveDrops int64 `json:"inactive_drops,omitempty"`
 }
 
 type record struct {
@@ -125,6 +131,9 @@ type Backlog struct {
 	degraded    bool
 	quarantined int
 	drops       int64
+
+	inactiveCandidates map[string]time.Time
+	inactiveDrops      int64
 
 	persistErrors     int64
 	diskFull          bool
@@ -207,10 +216,11 @@ func Open(cfg Config) (*Backlog, error) {
 		return nil, err
 	}
 	b := &Backlog{
-		cfg:        cfg,
-		writeFile:  writeFileSynced,
-		renameFile: os.Rename,
-		removeFile: os.Remove,
+		cfg:                cfg,
+		writeFile:          writeFileSynced,
+		renameFile:         os.Rename,
+		removeFile:         os.Remove,
+		inactiveCandidates: make(map[string]time.Time),
 	}
 	if err := b.recover(); err != nil {
 		return nil, err
@@ -362,6 +372,12 @@ func (b *Backlog) Enqueue(s Submission) error {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.inactiveCandidates != nil {
+		if _, isInactive := b.inactiveCandidates[s.Event.CandidateKey]; isInactive {
+			b.inactiveDrops++
+			return fmt.Errorf("%w: candidate %s", ErrCameraInactive, s.Event.CandidateKey)
+		}
+	}
 	for _, r := range b.queue {
 		if r.Submission.Event.EventUUID == s.Event.EventUUID {
 			if submissionsEquivalent(r.Submission, s) {
@@ -450,6 +466,9 @@ func (b *Backlog) ProcessOne(ctx context.Context, sender transport.LocalEventSen
 	}
 
 	if err == nil {
+		if b.inactiveCandidates != nil {
+			delete(b.inactiveCandidates, r.Submission.Event.CandidateKey)
+		}
 		nowSuccess := time.Now().UTC()
 		b.lastSuccess = &nowSuccess
 		b.lastError = ""
@@ -499,6 +518,10 @@ func (b *Backlog) ProcessOne(ctx context.Context, sender transport.LocalEventSen
 		r.NextAttempt = time.Now().Add(b.cfg.RetryMax)
 	}
 	if errors.Is(err, transport.ErrCameraInactive) {
+		if b.inactiveCandidates == nil {
+			b.inactiveCandidates = make(map[string]time.Time)
+		}
+		b.inactiveCandidates[r.Submission.Event.CandidateKey] = time.Now()
 		r.NextAttempt = time.Now().Add(b.cfg.RetryMax)
 	}
 	b.queue[idx] = r
@@ -687,6 +710,14 @@ func (b *Backlog) quarantineAtLocked(idx int, r record) {
 func (b *Backlog) Status() Status {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	var inactiveKeys []string
+	if len(b.inactiveCandidates) > 0 {
+		inactiveKeys = make([]string, 0, len(b.inactiveCandidates))
+		for k := range b.inactiveCandidates {
+			inactiveKeys = append(inactiveKeys, k)
+		}
+		sort.Strings(inactiveKeys)
+	}
 	st := Status{
 		BacklogCount:        len(b.queue),
 		PendingBytes:        pendingBytes(b.queue),
@@ -700,6 +731,8 @@ func (b *Backlog) Status() Status {
 		DiskFull:            b.diskFull,
 		QuarantineEvicted:   b.quarantineEvicted,
 		RecoveredOperations: b.recoveredOps,
+		InactiveCandidates: inactiveKeys,
+		InactiveDrops:      b.inactiveDrops,
 	}
 	st.OverCapacity = st.BacklogCount > b.cfg.MaxOperations || st.PendingBytes > b.cfg.MaxBytes
 	if len(b.queue) > 0 {
@@ -709,11 +742,34 @@ func (b *Backlog) Status() Status {
 	return st
 }
 
+// MarkCandidateActive clears any cached inactive status for a camera candidate
+// and accelerates retry for any pending records belonging to it.
+func (b *Backlog) MarkCandidateActive(candidateKey string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.inactiveCandidates != nil {
+		delete(b.inactiveCandidates, candidateKey)
+	}
+	now := time.Now()
+	for i := range b.queue {
+		if b.queue[i].Submission.Event.CandidateKey == candidateKey {
+			b.queue[i].NextAttempt = now
+		}
+	}
+}
+
 // Drops returns the count of submissions dropped due to capacity bounds.
 func (b *Backlog) Drops() int64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.drops
+}
+
+// InactiveDrops returns the count of submissions dropped because the target camera is inactive.
+func (b *Backlog) InactiveDrops() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.inactiveDrops
 }
 func pendingBytes(q []record) int64 {
 	var n int64
