@@ -339,7 +339,7 @@ func TestBacklogWriteLocked_SurvivesLeftoverTmpFile(t *testing.T) {
 
 func TestBacklogCameraInactiveRetainsAndRecovers(t *testing.T) {
 	d := t.TempDir()
-	retryMax := 20 * time.Millisecond
+	retryMax := 500 * time.Millisecond
 	b := openWithConfig(t, d, 5*time.Millisecond, retryMax)
 
 	var syncedUUID string
