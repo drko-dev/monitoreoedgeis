@@ -747,7 +747,7 @@ func TestBacklogInactiveExpiredCameraReactivatesWithoutRestart(t *testing.T) {
 
 func TestBacklogInactiveExpiredCameraCannotRefillBacklog(t *testing.T) {
 	d := t.TempDir()
-	retryMax := 30 * time.Millisecond
+	retryMax := 300 * time.Millisecond // probe cooldown; wide enough for a loaded run
 	b := openInactive(t, d, retryMax, 20*time.Millisecond)
 	enqueueFor(t, b, d, "a1", "cam-a")
 	inactive := func() *sender { return &sender{errs: []error{transport.ErrCameraInactive}} }

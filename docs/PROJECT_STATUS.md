@@ -15,6 +15,7 @@ Branch `fix/edge-event-backlog-reactivation-hito2`. The SaaS answers a local eve
 | Reactivated (first probe accepted) | Mark cleared, all retained records of the camera made due immediately, in order | Accepted again | `inactive_candidates` loses the key |
 | Inactive longer than `InactiveRetention` (7 days, measured per camera from its first 423) | Record quarantined, reason `camera_inactive_retention_expired`; later records of the camera do not get a fresh window | Still refused | `quarantined`, `inactive_expired` |
 | Still marked inactive, but no pending record left (last one expired or quarantined) | None | **One** new submission is admitted as the probe, at most once per `RetryMax`; the rest are refused. The probe inherits the camera's `inactive_since`: accepted means reactivated and the mark is cleared; another 423 past the retention quarantines it at once and keeps the mark | `inactive_drops`, `inactive_expired`; at most one pending record for the camera |
+| Same, after an agent restart | None | Same as above: the mark and last probe time come back from `inactive.json` in the backlog dir (tmp + fsync + rename, then fsync of the directory; the removal is also followed by a directory fsync; failures count in `persist_errors`) (one entry per camera, capped at 256, deleted when the camera is reactivated); a refused probe (capacity or disk) does not consume the `RetryMax` cooldown | `inactive_candidates` |
 | SaaS rejects permanently (other 4xx) | Quarantined as before | Accepted | `quarantined` |
 
 Discard policy:
@@ -22,7 +23,9 @@ Discard policy:
 - The SaaS decides whether an event belongs to an active or an inactive period, and the Edge does not second-guess that decision.
 - Retained records cannot starve active cameras: they hold no new capacity and are retried only once per `RetryMax`.
 
-Covered by unit tests in `internal/edgebacklog`: restart persistence, probe-driven reactivation without an explicit call, per-camera retention expiry across several records, idempotent re-submission while inactive, coexistence without head-of-line blocking, reactivation after the last retained record expired (no restart), and an expired, still inactive camera unable to refill the backlog.
+Covered by unit tests in `internal/edgebacklog`: restart persistence, probe-driven reactivation without an explicit call, per-camera retention expiry across several records, idempotent re-submission while inactive, coexistence without head-of-line blocking, reactivation after the last retained record expired (no restart), and an expired, still inactive camera unable to refill the backlog, and the same two cases across a restart with nothing pending. Also: directory fsync after rename/remove and its failure surfaced in `persist_errors`; the 256-camera cap at 256/257 entries and on load.
+
+Known tradeoff of the 256-camera cap: past it the mark with the oldest first 423 is evicted (memory and `inactive.json` both stay at 256; the other entries and their `probe_at` are untouched). The evicted camera admits events again, without the one-probe limit, until its next 423 re-marks it. One Edge serves far fewer cameras, so in practice the cap only trims stale marks of replaced cameras. Possible refinement, not implemented: drop marks of candidate keys no longer configured on the Edge, which would make the cap unreachable without any eviction of a live camera.
 
 **Still needs physical validation on the TC70:**
 1. Deactivate camera 18 in the SaaS, confirm `423`, `inactive_candidates` and `inactive_drops`.
