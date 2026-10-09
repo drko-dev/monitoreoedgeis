@@ -42,7 +42,11 @@ var (
 //     new submission as the probe, at most once per RetryMax. It inherits the
 //     camera's InactiveSince, so a still-inactive camera holds at most one
 //     pending record and that probe is quarantined on its first 423 once the
-//     retention has passed; an accepted probe clears the mark.
+//     retention has passed; an accepted probe clears the mark. Only a probe
+//     that was really queued consumes that cooldown.
+//   - The marks and last probe times are also kept in inactive.json (one
+//     entry per camera, capped at maxInactiveCameras, removed on
+//     reactivation), so "inactive with nothing pending" survives a restart.
 //   - The first accepted probe (camera reactivated) clears the mark and makes
 //     the camera's remaining records due immediately, in order.
 //   - InactiveRetention runs per camera from its first known 423, not per
@@ -335,7 +339,90 @@ func (b *Backlog) recover() error {
 	}
 	sort.Slice(b.queue, func(i, j int) bool { return b.queue[i].Sequence < b.queue[j].Sequence })
 	b.recoveredOps = len(b.queue)
+	b.loadInactiveLocked()
 	return nil
+}
+
+// inactiveStateFile durably holds the inactive marks (and last probe time) so
+// a camera that is still inactive with nothing pending stays marked across a
+// restart. One entry per camera, removed when the camera is reactivated and
+// capped at maxInactiveCameras.
+const (
+	inactiveStateFile  = "inactive.json"
+	maxInactiveCameras = 256
+)
+
+type inactiveState struct {
+	Since   time.Time `json:"since"`
+	ProbeAt time.Time `json:"probe_at,omitempty"`
+}
+
+func (b *Backlog) loadInactiveLocked() {
+	data, err := os.ReadFile(filepath.Join(b.cfg.Dir, inactiveStateFile))
+	if err != nil {
+		return
+	}
+	var state map[string]inactiveState
+	if json.Unmarshal(data, &state) != nil {
+		return // corrupt: pending records with InactiveSince still re-mark their cameras
+	}
+	for key, st := range state {
+		if since, ok := b.inactiveCandidates[key]; !ok || st.Since.Before(since) {
+			b.inactiveCandidates[key] = st.Since
+		}
+		if !st.ProbeAt.IsZero() {
+			if b.inactiveProbeAt == nil {
+				b.inactiveProbeAt = make(map[string]time.Time)
+			}
+			b.inactiveProbeAt[key] = st.ProbeAt
+		}
+	}
+	b.capInactiveLocked()
+}
+
+// capInactiveLocked evicts the oldest marks beyond maxInactiveCameras, so
+// candidate keys that churn (replaced cameras) cannot grow the state forever.
+func (b *Backlog) capInactiveLocked() {
+	for len(b.inactiveCandidates) > maxInactiveCameras {
+		oldestKey, oldest := "", time.Time{}
+		for k, since := range b.inactiveCandidates {
+			if oldestKey == "" || since.Before(oldest) {
+				oldestKey, oldest = k, since
+			}
+		}
+		delete(b.inactiveCandidates, oldestKey)
+		delete(b.inactiveProbeAt, oldestKey)
+	}
+}
+
+func (b *Backlog) persistInactiveLocked() {
+	b.capInactiveLocked()
+	path := filepath.Join(b.cfg.Dir, inactiveStateFile)
+	if len(b.inactiveCandidates) == 0 {
+		if err := b.removeFile(path); err != nil && !os.IsNotExist(err) {
+			b.recordPersistFailureLocked(platform.WrapDiskError(err))
+		}
+		return
+	}
+	state := make(map[string]inactiveState, len(b.inactiveCandidates))
+	for k, since := range b.inactiveCandidates {
+		state[k] = inactiveState{Since: since, ProbeAt: b.inactiveProbeAt[k]}
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		b.recordPersistFailureLocked(err)
+		return
+	}
+	tmp := path + ".tmp"
+	if err := b.writeFile(tmp, data, 0o600); err != nil {
+		_ = b.removeFile(tmp)
+		b.recordPersistFailureLocked(platform.WrapDiskError(err))
+		return
+	}
+	if err := b.renameFile(tmp, path); err != nil {
+		_ = b.removeFile(tmp)
+		b.recordPersistFailureLocked(platform.WrapDiskError(err))
+	}
 }
 
 // loadQuarantineLocked rebuilds the in-memory view of quarantine/ so the
@@ -431,19 +518,15 @@ func (b *Backlog) Enqueue(s Submission) error {
 		}
 	}
 	var probeSince *time.Time
+	now := time.Now()
 	if since, isInactive := b.inactiveCandidates[s.Event.CandidateKey]; isInactive {
 		// A pending record of the camera is its probe; without one (all
 		// expired or quarantined) admit a single new submission as the probe,
 		// at most once per RetryMax, so a later reactivation is still seen.
-		now := time.Now()
 		if b.hasPendingLocked(s.Event.CandidateKey) || now.Before(b.inactiveProbeAt[s.Event.CandidateKey].Add(b.cfg.RetryMax)) {
 			b.inactiveDrops++
 			return fmt.Errorf("%w: candidate %s", ErrCameraInactive, s.Event.CandidateKey)
 		}
-		if b.inactiveProbeAt == nil {
-			b.inactiveProbeAt = make(map[string]time.Time)
-		}
-		b.inactiveProbeAt[s.Event.CandidateKey] = now
 		probeSince = &since
 	}
 	bytes := pendingBytes(b.queue) + submissionBytes(s)
@@ -466,6 +549,14 @@ func (b *Backlog) Enqueue(s Submission) error {
 	}
 	b.diskFull = false
 	b.queue = append(b.queue, r)
+	if probeSince != nil {
+		// Only a probe that was really queued consumes the RetryMax cooldown.
+		if b.inactiveProbeAt == nil {
+			b.inactiveProbeAt = make(map[string]time.Time)
+		}
+		b.inactiveProbeAt[s.Event.CandidateKey] = now
+		b.persistInactiveLocked()
+	}
 	return nil
 }
 
@@ -598,6 +689,7 @@ func (b *Backlog) ProcessOne(ctx context.Context, sender transport.LocalEventSen
 		}
 		if first, ok := b.inactiveCandidates[key]; !ok || r.InactiveSince.Before(first) {
 			b.inactiveCandidates[key] = *r.InactiveSince
+			b.persistInactiveLocked()
 		}
 		if now.Sub(*r.InactiveSince) >= b.cfg.InactiveRetention {
 			b.inactiveExpired++
@@ -847,8 +939,11 @@ func (b *Backlog) hasPendingLocked(candidateKey string) bool {
 }
 
 func (b *Backlog) markActiveLocked(candidateKey string) {
-	delete(b.inactiveCandidates, candidateKey)
-	delete(b.inactiveProbeAt, candidateKey)
+	if _, ok := b.inactiveCandidates[candidateKey]; ok {
+		delete(b.inactiveCandidates, candidateKey)
+		delete(b.inactiveProbeAt, candidateKey)
+		b.persistInactiveLocked()
+	}
 	now := time.Now()
 	for i := range b.queue {
 		r := &b.queue[i]
