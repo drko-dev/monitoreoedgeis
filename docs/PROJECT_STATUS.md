@@ -3,7 +3,35 @@
 > Answers one question: **"¿Dónde estamos parados ahora?"**
 > Git + the final Hito Z integration are the source of truth. Historical sections below are retained as implementation history and may describe the state that existed at those earlier hitos.
 
-## Current: Full Edge adaptive inference (stages 1–4)
+## Current: Hito 2 — local event backlog vs. inactive cameras
+
+Branch `fix/edge-event-backlog-reactivation-hito2`. The SaaS answers a local event for an administratively inactive camera with `423` / `X-Camera-Status: inactive` (`transport.ErrCameraInactive`). Policy in `internal/edgebacklog`:
+
+| Camera state (as seen by the Edge) | Pending records | New submissions (`Enqueue`) | Observable in `/status.local_event_backlog` |
+| --- | --- | --- | --- |
+| Active | Sent FIFO per camera; transient errors back off per record | Accepted (subject to `MaxOperations` / `MaxBytes`, else `drops`) | `backlog_count`, `drops` |
+| Inactive (423 received) | **Retained** in `pending/`, re-probed every `RetryMax` (1 min). FIFO: later records of the camera wait behind the head. Other cameras are not blocked. | **Refused** with `ErrCameraInactive`; nothing is written | `inactive_candidates`, `inactive_drops` |
+| Inactive across an agent restart | The 423 mark (`inactive_since`) is persisted on the record and rebuilt on `Open` | Still refused | same, `recovered_operations` |
+| Reactivated (first probe accepted) | Mark cleared, all retained records of the camera made due immediately, in order | Accepted again | `inactive_candidates` loses the key |
+| Inactive longer than `InactiveRetention` (7 days, measured per camera from its first 423) | Record quarantined, reason `camera_inactive_retention_expired`; later records of the camera do not get a fresh window | Still refused | `quarantined`, `inactive_expired` |
+| Still marked inactive, but no pending record left (last one expired or quarantined) | None | **One** new submission is admitted as the probe, at most once per `RetryMax`; the rest are refused. The probe inherits the camera's `inactive_since`: accepted means reactivated and the mark is cleared; another 423 past the retention quarantines it at once and keeps the mark | `inactive_drops`, `inactive_expired`; at most one pending record for the camera |
+| SaaS rejects permanently (other 4xx) | Quarantined as before | Accepted | `quarantined` |
+
+Discard policy:
+- Events produced while a camera is marked inactive are discarded at the source and counted, not stored. A re-submission of an event that is already pending stays an idempotent no-op and is not counted.
+- The SaaS decides whether an event belongs to an active or an inactive period, and the Edge does not second-guess that decision.
+- Retained records cannot starve active cameras: they hold no new capacity and are retried only once per `RetryMax`.
+
+Covered by unit tests in `internal/edgebacklog`: restart persistence, probe-driven reactivation without an explicit call, per-camera retention expiry across several records, idempotent re-submission while inactive, coexistence without head-of-line blocking, reactivation after the last retained record expired (no restart), and an expired, still inactive camera unable to refill the backlog.
+
+**Still needs physical validation on the TC70:**
+1. Deactivate camera 18 in the SaaS, confirm `423`, `inactive_candidates` and `inactive_drops`.
+2. Restart the agent while it is inactive.
+3. Reactivate it and confirm the retained records drain.
+
+This depends on the SaaS side of Hito 2 being deployed.
+
+## Full Edge adaptive inference (stages 1–4)
 
 | Stage | PR | Status |
 | --- | --- | --- |

@@ -26,7 +26,32 @@ import (
 var (
 	ErrFull               = errors.New("edgebacklog: bounded backlog is full")
 	ErrSubmissionConflict = errors.New("edgebacklog: divergent submission for event")
+	ErrCameraInactive     = errors.New("edgebacklog: camera is administratively inactive in SaaS")
 )
+
+// Inactive-camera policy (SaaS answers 423 / X-Camera-Status: inactive):
+//   - Records already pending for the camera are retained in pending/ (FIFO
+//     per camera) and re-probed every RetryMax; each probe is the
+//     reactivation detector. The 423 mark is persisted on the record, so it
+//     survives an agent restart.
+//   - New submissions for a camera marked inactive are refused at Enqueue
+//     and counted in InactiveDrops, so an inactive camera cannot fill the
+//     shared capacity and starve active cameras. The one exception keeps the
+//     mark from becoming permanent: when the camera has no pending record
+//     left (its last one expired or was quarantined), Enqueue admits a single
+//     new submission as the probe, at most once per RetryMax. It inherits the
+//     camera's InactiveSince, so a still-inactive camera holds at most one
+//     pending record and that probe is quarantined on its first 423 once the
+//     retention has passed; an accepted probe clears the mark.
+//   - The first accepted probe (camera reactivated) clears the mark and makes
+//     the camera's remaining records due immediately, in order.
+//   - InactiveRetention runs per camera from its first known 423, not per
+//     record. A record still answered with 423 once that window has passed is
+//     quarantined (reason camera_inactive_retention_expired) and counted in
+//     InactiveExpired; quarantine/ stays bounded as for any rejected record.
+//   - Idempotency is checked before the inactive refusal: re-submitting an
+//     event that is already pending is a no-op, never an InactiveDrop.
+const DefaultInactiveRetention = 7 * 24 * time.Hour
 
 // maxErrorBytes bounds every string this package records for an operator, the
 // same way rtsp.CameraStreamStatus.LastErrorSafe does. A persistence error
@@ -59,6 +84,11 @@ type Config struct {
 	MaxBytes      int64
 	RetryBase     time.Duration
 	RetryMax      time.Duration
+	// InactiveRetention bounds how long a record the SaaS keeps answering
+	// with 423 (camera inactive) is retained and re-probed. Past it the
+	// record is quarantined as camera_inactive_retention_expired. Zero
+	// means DefaultInactiveRetention.
+	InactiveRetention time.Duration
 }
 
 type Status struct {
@@ -104,6 +134,14 @@ type Status struct {
 	// disk at Open. It is reported so an over-capacity spool (see
 	// OverCapacity) can be told apart from one that grew during this run.
 	RecoveredOperations int `json:"recovered_operations,omitempty"`
+	// InactiveCandidates reports candidate camera keys currently known to be administratively
+	// inactive in the SaaS (confirmed via HTTP 423).
+	InactiveCandidates []string `json:"inactive_candidates,omitempty"`
+	// InactiveDrops counts new submissions refused at Enqueue because the target camera is inactive.
+	InactiveDrops int64 `json:"inactive_drops,omitempty"`
+	// InactiveExpired counts retained records quarantined because their
+	// camera stayed inactive past Config.InactiveRetention.
+	InactiveExpired int64 `json:"inactive_expired,omitempty"`
 }
 
 type record struct {
@@ -113,6 +151,9 @@ type record struct {
 	Submission  Submission `json:"submission"`
 	Attempts    int        `json:"attempts"`
 	NextAttempt time.Time  `json:"next_attempt,omitempty"`
+	// InactiveSince is when the SaaS first answered 423 for this record. It
+	// is persisted so the camera stays marked inactive across a restart.
+	InactiveSince *time.Time `json:"inactive_since,omitempty"`
 }
 
 type Backlog struct {
@@ -125,6 +166,13 @@ type Backlog struct {
 	degraded    bool
 	quarantined int
 	drops       int64
+
+	inactiveCandidates map[string]time.Time
+	inactiveDrops      int64
+	inactiveExpired    int64
+	// inactiveProbeAt is when Enqueue last admitted a probe for an inactive
+	// camera with nothing pending; in memory only (a restart allows one).
+	inactiveProbeAt map[string]time.Time
 
 	persistErrors     int64
 	diskFull          bool
@@ -200,6 +248,9 @@ func Open(cfg Config) (*Backlog, error) {
 	if cfg.RetryMax < cfg.RetryBase {
 		cfg.RetryMax = time.Minute
 	}
+	if cfg.InactiveRetention <= 0 {
+		cfg.InactiveRetention = DefaultInactiveRetention
+	}
 	if err := os.MkdirAll(filepath.Join(cfg.Dir, "pending"), 0o750); err != nil {
 		return nil, err
 	}
@@ -207,10 +258,11 @@ func Open(cfg Config) (*Backlog, error) {
 		return nil, err
 	}
 	b := &Backlog{
-		cfg:        cfg,
-		writeFile:  writeFileSynced,
-		renameFile: os.Rename,
-		removeFile: os.Remove,
+		cfg:                cfg,
+		writeFile:          writeFileSynced,
+		renameFile:         os.Rename,
+		removeFile:         os.Remove,
+		inactiveCandidates: make(map[string]time.Time),
 	}
 	if err := b.recover(); err != nil {
 		return nil, err
@@ -271,6 +323,12 @@ func (b *Backlog) recover() error {
 			continue
 		}
 		b.queue = append(b.queue, r)
+		if r.InactiveSince != nil {
+			key := r.Submission.Event.CandidateKey
+			if since, ok := b.inactiveCandidates[key]; !ok || r.InactiveSince.Before(since) {
+				b.inactiveCandidates[key] = *r.InactiveSince
+			}
+		}
 		if r.Sequence > b.counter {
 			b.counter = r.Sequence
 		}
@@ -362,6 +420,8 @@ func (b *Backlog) Enqueue(s Submission) error {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	// Idempotency first: re-submitting an event that is already pending is a
+	// no-op (or a conflict) whatever its camera's state, never a new drop.
 	for _, r := range b.queue {
 		if r.Submission.Event.EventUUID == s.Event.EventUUID {
 			if submissionsEquivalent(r.Submission, s) {
@@ -370,13 +430,31 @@ func (b *Backlog) Enqueue(s Submission) error {
 			return fmt.Errorf("%w: %s", ErrSubmissionConflict, s.Event.EventUUID)
 		}
 	}
+	var probeSince *time.Time
+	if since, isInactive := b.inactiveCandidates[s.Event.CandidateKey]; isInactive {
+		// A pending record of the camera is its probe; without one (all
+		// expired or quarantined) admit a single new submission as the probe,
+		// at most once per RetryMax, so a later reactivation is still seen.
+		now := time.Now()
+		if b.hasPendingLocked(s.Event.CandidateKey) || now.Before(b.inactiveProbeAt[s.Event.CandidateKey].Add(b.cfg.RetryMax)) {
+			b.inactiveDrops++
+			return fmt.Errorf("%w: candidate %s", ErrCameraInactive, s.Event.CandidateKey)
+		}
+		if b.inactiveProbeAt == nil {
+			b.inactiveProbeAt = make(map[string]time.Time)
+		}
+		b.inactiveProbeAt[s.Event.CandidateKey] = now
+		probeSince = &since
+	}
 	bytes := pendingBytes(b.queue) + submissionBytes(s)
 	if len(b.queue) >= b.cfg.MaxOperations || bytes > b.cfg.MaxBytes {
 		b.drops++
 		return ErrFull
 	}
 	b.counter++
-	r := record{Sequence: b.counter, CreatedAt: time.Now().UTC(), Stage: "metadata", Submission: s}
+	// A probe inherits the camera's window: still answered 423 past
+	// InactiveRetention, it is quarantined on its first attempt.
+	r := record{Sequence: b.counter, CreatedAt: time.Now().UTC(), Stage: "metadata", Submission: s, InactiveSince: probeSince}
 	if err := b.writeLocked(r); err != nil {
 		// The submission is refused, but the failure is also recorded so
 		// /status reports a full disk even when the caller only logs the
@@ -407,18 +485,55 @@ func validateEvidence(e *Evidence) error {
 
 func (b *Backlog) ProcessOne(ctx context.Context, sender transport.LocalEventSender, deviceID, credential string) bool {
 	b.mu.Lock()
-	if len(b.queue) == 0 || (!b.queue[0].NextAttempt.IsZero() && time.Now().Before(b.queue[0].NextAttempt)) {
+	if len(b.queue) == 0 {
 		b.mu.Unlock()
 		return false
 	}
-	r := b.queue[0]
+	now := time.Now()
+	targetIdx := -1
+	deferredKeys := make(map[string]struct{})
+	for i, item := range b.queue {
+		if !item.NextAttempt.IsZero() && now.Before(item.NextAttempt) {
+			deferredKeys[item.Submission.Event.CandidateKey] = struct{}{}
+			continue
+		}
+		if _, blocked := deferredKeys[item.Submission.Event.CandidateKey]; blocked {
+			// Maintain strict FIFO order for the same candidate camera
+			continue
+		}
+		targetIdx = i
+		break
+	}
+	if targetIdx == -1 {
+		b.mu.Unlock()
+		return false
+	}
+	r := b.queue[targetIdx]
 	b.mu.Unlock()
+
 	err := b.send(ctx, sender, deviceID, credential, r)
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	idx := -1
+	for i, item := range b.queue {
+		if item.Sequence == r.Sequence {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return true
+	}
+
 	if err == nil {
-		now := time.Now().UTC()
-		b.lastSuccess = &now
+		if _, marked := b.inactiveCandidates[r.Submission.Event.CandidateKey]; marked || r.InactiveSince != nil {
+			r.InactiveSince = nil
+			b.markActiveLocked(r.Submission.Event.CandidateKey)
+		}
+		nowSuccess := time.Now().UTC()
+		b.lastSuccess = &nowSuccess
 		b.lastError = ""
 		b.degraded = false
 		switch r.Stage {
@@ -427,34 +542,30 @@ func (b *Backlog) ProcessOne(ctx context.Context, sender transport.LocalEventSen
 		case "capture":
 			r.Stage = nextStage(r.Submission, "clip")
 		default:
-			b.removeLocked(r)
+			b.removeAtLocked(idx, r)
 			b.notifySynced(r)
 			return true
 		}
 		if r.Stage == "complete" {
-			b.removeLocked(r)
+			b.removeAtLocked(idx, r)
 			b.notifySynced(r)
 			return true
 		}
-		b.queue[0] = r
-		// A failed stage-advance write used to be discarded with `_ =`. The
-		// record stays in memory and the send itself succeeded, so the run
-		// continues — but on the next restart recover() would load the older
-		// stage from disk and re-upload a stage the SaaS already accepted.
-		// That is survivable (the SaaS is idempotent per stage) yet it must
-		// not be invisible, so it is counted and classified.
+		b.queue[idx] = r
 		b.persistLocked(r)
 		return true
 	}
+
 	b.lastError = safeError(err)
 	if errors.Is(err, transport.ErrInvalidRequest) || errors.Is(err, transport.ErrUnexpectedStatus) {
 		reason := b.lastError
-		b.quarantineLocked(r)
+		b.quarantineAtLocked(idx, r)
 		if b.onQuarantined != nil {
 			b.onQuarantined(r.Submission.Event.EventUUID, reason)
 		}
 		return true
 	}
+
 	r.Attempts++
 	delay := b.backoff(r.Attempts)
 	var rle *transport.RateLimitError
@@ -469,7 +580,36 @@ func (b *Backlog) ProcessOne(ctx context.Context, sender transport.LocalEventSen
 		b.degraded = true
 		r.NextAttempt = time.Now().Add(b.cfg.RetryMax)
 	}
-	b.queue[0] = r
+	if errors.Is(err, transport.ErrCameraInactive) {
+		// Retention is per camera: it runs from the first 423 known for the
+		// camera (inactiveCandidates is the source of truth), so later
+		// records of the same camera never open a fresh window.
+		now := time.Now()
+		key := r.Submission.Event.CandidateKey
+		if b.inactiveCandidates == nil {
+			b.inactiveCandidates = make(map[string]time.Time)
+		}
+		if r.InactiveSince == nil {
+			since := now
+			if first, ok := b.inactiveCandidates[key]; ok {
+				since = first
+			}
+			r.InactiveSince = &since
+		}
+		if first, ok := b.inactiveCandidates[key]; !ok || r.InactiveSince.Before(first) {
+			b.inactiveCandidates[key] = *r.InactiveSince
+		}
+		if now.Sub(*r.InactiveSince) >= b.cfg.InactiveRetention {
+			b.inactiveExpired++
+			b.quarantineAtLocked(idx, r)
+			if b.onQuarantined != nil {
+				b.onQuarantined(r.Submission.Event.EventUUID, "camera_inactive_retention_expired")
+			}
+			return true
+		}
+		r.NextAttempt = now.Add(b.cfg.RetryMax)
+	}
+	b.queue[idx] = r
 	b.persistLocked(r)
 	return true
 }
@@ -597,10 +737,16 @@ func (b *Backlog) recordPersistFailureLocked(err error) {
 // SaaS side is idempotent on event_uuid, so a duplicate is survivable — but
 // it must never be silent.
 func (b *Backlog) removeLocked(r record) {
+	b.removeAtLocked(0, r)
+}
+
+func (b *Backlog) removeAtLocked(idx int, r record) {
 	if err := b.removeFile(b.path(r)); err != nil && !os.IsNotExist(err) {
 		b.recordPersistFailureLocked(platform.WrapDiskError(err))
 	}
-	b.queue = b.queue[1:]
+	if idx >= 0 && idx < len(b.queue) {
+		b.queue = append(b.queue[:idx], b.queue[idx+1:]...)
+	}
 }
 
 func (b *Backlog) notifySynced(r record) {
@@ -618,6 +764,10 @@ func (b *Backlog) notifySynced(r record) {
 // forever. The fallback delete is therefore the honest completion of the
 // move, and both outcomes are counted.
 func (b *Backlog) quarantineLocked(r record) {
+	b.quarantineAtLocked(0, r)
+}
+
+func (b *Backlog) quarantineAtLocked(idx int, r record) {
 	src := b.path(r)
 	dst := filepath.Join(b.cfg.Dir, "quarantine", fmt.Sprintf("%020d.json", r.Sequence))
 	if err := b.renameFile(src, dst); err != nil {
@@ -628,10 +778,14 @@ func (b *Backlog) quarantineLocked(r record) {
 			// retry path; surface it without classing it as a full disk.
 			b.recordPersistFailureLocked(fmt.Errorf("edgebacklog: quarantine move failed: %w", err))
 		}
-		b.queue = b.queue[1:]
+		if idx >= 0 && idx < len(b.queue) {
+			b.queue = append(b.queue[:idx], b.queue[idx+1:]...)
+		}
 		return
 	}
-	b.queue = b.queue[1:]
+	if idx >= 0 && idx < len(b.queue) {
+		b.queue = append(b.queue[:idx], b.queue[idx+1:]...)
+	}
 	b.quarantineSeqs = append(b.quarantineSeqs, r.Sequence)
 	sort.Slice(b.quarantineSeqs, func(i, j int) bool { return b.quarantineSeqs[i] < b.quarantineSeqs[j] })
 	b.quarantined = len(b.quarantineSeqs)
@@ -641,6 +795,14 @@ func (b *Backlog) quarantineLocked(r record) {
 func (b *Backlog) Status() Status {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	var inactiveKeys []string
+	if len(b.inactiveCandidates) > 0 {
+		inactiveKeys = make([]string, 0, len(b.inactiveCandidates))
+		for k := range b.inactiveCandidates {
+			inactiveKeys = append(inactiveKeys, k)
+		}
+		sort.Strings(inactiveKeys)
+	}
 	st := Status{
 		BacklogCount:        len(b.queue),
 		PendingBytes:        pendingBytes(b.queue),
@@ -654,6 +816,9 @@ func (b *Backlog) Status() Status {
 		DiskFull:            b.diskFull,
 		QuarantineEvicted:   b.quarantineEvicted,
 		RecoveredOperations: b.recoveredOps,
+		InactiveCandidates:  inactiveKeys,
+		InactiveDrops:       b.inactiveDrops,
+		InactiveExpired:     b.inactiveExpired,
 	}
 	st.OverCapacity = st.BacklogCount > b.cfg.MaxOperations || st.PendingBytes > b.cfg.MaxBytes
 	if len(b.queue) > 0 {
@@ -663,11 +828,53 @@ func (b *Backlog) Status() Status {
 	return st
 }
 
+// MarkCandidateActive clears any cached inactive status for a camera candidate
+// and accelerates retry for any pending records belonging to it. ProcessOne
+// calls the same logic when a probe for an inactive camera is accepted.
+func (b *Backlog) MarkCandidateActive(candidateKey string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.markActiveLocked(candidateKey)
+}
+
+func (b *Backlog) hasPendingLocked(candidateKey string) bool {
+	for _, r := range b.queue {
+		if r.Submission.Event.CandidateKey == candidateKey {
+			return true
+		}
+	}
+	return false
+}
+
+func (b *Backlog) markActiveLocked(candidateKey string) {
+	delete(b.inactiveCandidates, candidateKey)
+	delete(b.inactiveProbeAt, candidateKey)
+	now := time.Now()
+	for i := range b.queue {
+		r := &b.queue[i]
+		if r.Submission.Event.CandidateKey != candidateKey {
+			continue
+		}
+		r.NextAttempt = now
+		if r.InactiveSince != nil {
+			r.InactiveSince = nil
+			b.persistLocked(*r)
+		}
+	}
+}
+
 // Drops returns the count of submissions dropped due to capacity bounds.
 func (b *Backlog) Drops() int64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.drops
+}
+
+// InactiveDrops returns the count of submissions dropped because the target camera is inactive.
+func (b *Backlog) InactiveDrops() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.inactiveDrops
 }
 func pendingBytes(q []record) int64 {
 	var n int64
