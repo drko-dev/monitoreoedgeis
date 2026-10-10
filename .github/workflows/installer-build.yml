@@ -108,6 +108,14 @@ jobs:
           $vi = (Get-Item $exe).VersionInfo
           $v = $vi.ProductVersion
           $fixed = "$($vi.FileMajorPart).$($vi.FileMinorPart).$($vi.FileBuildPart)"
+          if ($v -ne $env:VERSION -or $fixed -ne $env:VERSION) {
+            $vi | Format-List * | Out-String | Write-Host
+            $bytes = [IO.File]::ReadAllBytes($exe)
+            $text = [Text.Encoding]::Unicode.GetString($bytes)
+            foreach ($s in 'VS_VERSION_INFO', '040904b0', '000004b0', $env:VERSION) { Write-Host "contains '$s': $($text.Contains($s))" }
+            Get-ChildItem cmd/geocam-edge-ui -Filter *.syso | Format-Table Name, Length | Out-String | Write-Host
+            Get-Content cmd/geocam-edge-ui/wails.json | Write-Host
+          }
           if ($v -ne $env:VERSION) { Write-Error "ProductVersion is '$v', expected '$env:VERSION'"; exit 1 }
           if ($fixed -ne $env:VERSION) { Write-Error "FileVersion is '$fixed', expected '$env:VERSION'"; exit 1 }
           $p = Start-Process -FilePath $exe -PassThru
