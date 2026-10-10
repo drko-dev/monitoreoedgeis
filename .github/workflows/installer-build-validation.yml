@@ -1,106 +1,31 @@
 name: Installer Build Validation
 
-# UX-7: build-only CI for the Wails installer GUI, one job per target
-# platform, on native runners. Produces GitHub Actions artifacts for
-# inspection -- it never creates a GitHub Release and never touches signing
-# secrets, so it needs no external credentials.
-#
-# Design point: `pull_request`, so any change to the installer gets built
-# on all four platforms before merge, plus `workflow_dispatch` for a manual
-# on-demand run. A temporary `push: branches: [feature/ux-final-closure]`
-# trigger was used once, on this branch, to get real runner evidence for
-# all four platforms without opening a PR -- all four passed for real
-# (Windows amd64, Linux amd64, Linux arm64 native, macOS arm64; the Linux
-# jobs needed `-tags webkit2_41`, a real gap this run found and fixed, see
-# docs/product/UX7_CROSS_PLATFORM_RELEASE.md) -- and was then removed, per
-# this milestone's own instruction not to leave a temporary trigger in the
-# permanent design.
+# Runs the exact release build (installer-build.yml) and release assembly
+# checks on every pull request, stamped as version 0.0.<run number>, so a broken
+# platform, package or checksum is caught before anything is tagged. It never
+# creates a GitHub Release and needs no secrets. The packages are kept as
+# workflow artifacts for 7 days for manual inspection.
 on:
   pull_request:
   workflow_dispatch: {}
 
-env:
-  WAILS_VERSION: v2.16.0
+permissions:
+  contents: read
 
 jobs:
-  build-windows-amd64:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26.2'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: Build Wails app (windows/amd64)
-        working-directory: cmd/geocam-edge-ui
-        run: go run github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }} build -platform windows/amd64
-      - uses: actions/upload-artifact@v4
-        with:
-          name: installer-windows-amd64-test-build
-          path: cmd/geocam-edge-ui/build/bin/*
-          retention-days: 7
+  build:
+    uses: ./.github/workflows/installer-build.yml
+    with:
+      version: 0.0.${{ github.run_number }}
 
-  build-linux-amd64:
-    runs-on: ubuntu-latest
+  assemble:
+    needs: build
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/download-artifact@v4
         with:
-          go-version: '1.26.2'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: Install Linux GUI toolchain (gtk3/webkit2gtk)
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
-      - name: Build Wails app (linux/amd64)
-        working-directory: cmd/geocam-edge-ui
-        run: go run github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }} build -platform linux/amd64 -tags webkit2_41
-      - uses: actions/upload-artifact@v4
-        with:
-          name: installer-linux-amd64-test-build
-          path: cmd/geocam-edge-ui/build/bin/*
-          retention-days: 7
-
-  build-linux-arm64:
-    # Native ARM64 runner: Wails/CGO/webview cross-compilation from amd64 is
-    # not reliable enough to trust as a validated GUI artifact.
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26.2'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: Install Linux GUI toolchain (gtk3/webkit2gtk)
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
-      - name: Build Wails app (linux/arm64, native)
-        working-directory: cmd/geocam-edge-ui
-        run: go run github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }} build -platform linux/arm64 -tags webkit2_41
-      - uses: actions/upload-artifact@v4
-        with:
-          name: installer-linux-arm64-test-build
-          path: cmd/geocam-edge-ui/build/bin/*
-          retention-days: 7
-
-  build-macos-arm64:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26.2'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: Build Wails app (darwin/arm64)
-        working-directory: cmd/geocam-edge-ui
-        run: go run github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }} build -platform darwin/arm64
-      - uses: actions/upload-artifact@v4
-        with:
-          name: installer-macos-arm64-test-build
-          path: cmd/geocam-edge-ui/build/bin/*
-          retention-days: 7
+          pattern: installer-*
+          path: artifacts
+      - name: Cross-check the four packages and write SHA256SUMS.txt
+        run: ./deploy/installer/assemble-release.sh "0.0.${{ github.run_number }}" "${{ github.sha }}" artifacts dist

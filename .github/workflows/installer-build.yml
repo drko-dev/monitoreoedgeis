@@ -1,0 +1,178 @@
+name: Installer Build
+
+# Reusable: builds, packages and validates the Wails desktop installer GUI on
+# native runners for the four supported platforms, stamping every package
+# with the same version and commit. Called by installer-build-validation.yml
+# (pull requests, version 0.0.0) and installer-release.yml (installer-vX.Y.Z
+# tags). Never publishes anything and needs no secrets: builds are NOT
+# code-signed (macOS gets an ad-hoc signature only, no certificate).
+#
+# Each job uploads `installer-<platform>` containing the package and
+# BUILD_INFO-<platform>.txt (version, commit, asset, sha256), which
+# deploy/installer/assemble-release.sh cross-checks before anything ships.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: MAJOR.MINOR.PATCH stamped into every package
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  WAILS_VERSION: v2.16.0
+  VERSION: ${{ inputs.version }}
+  COMMIT: ${{ github.sha }}
+
+jobs:
+  build:
+    name: build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-amd64
+            runner: windows-latest
+            wails_platform: windows/amd64
+            tags: ''
+          - platform: macos-arm64
+            runner: macos-14
+            wails_platform: darwin/arm64
+            tags: ''
+          - platform: linux-amd64
+            runner: ubuntu-24.04
+            wails_platform: linux/amd64
+            tags: webkit2_41
+          # Native ARM64 runner: Wails/CGO/webview cross-compilation from
+          # amd64 is not reliable enough to trust as a validated GUI artifact.
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            wails_platform: linux/arm64
+            tags: webkit2_41
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.2'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate version
+        run: '[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version $VERSION is not MAJOR.MINOR.PATCH"; exit 1; }'
+
+      # Wails stamps info.productVersion into the Windows version resource
+      # and the macOS Info.plist (CFBundleShortVersionString/CFBundleVersion).
+      - name: Stamp version into wails.json
+        working-directory: cmd/geocam-edge-ui
+        run: |
+          node -e '
+            const fs = require("fs");
+            const cfg = JSON.parse(fs.readFileSync("wails.json", "utf8"));
+            cfg.info = { ...(cfg.info || {}), companyName: "GEO CAM", productName: "GEO CAM Edge Installer", productVersion: process.env.VERSION };
+            fs.writeFileSync("wails.json", JSON.stringify(cfg, null, 2));
+          '
+
+      - name: Install Linux GUI toolchain (gtk3/webkit2gtk, xvfb for the launch check)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev xvfb file
+
+      - name: Build Wails app (${{ matrix.wails_platform }})
+        working-directory: cmd/geocam-edge-ui
+        run: |
+          tags=()
+          [ -n "${{ matrix.tags }}" ] && tags=(-tags "${{ matrix.tags }}")
+          go run github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION} build -clean -platform ${{ matrix.wails_platform }} "${tags[@]}"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir -p out
+          cp cmd/geocam-edge-ui/build/bin/geocam-edge-ui.exe out/geocam-edge-installer-windows-amd64.exe
+          echo "ASSET=geocam-edge-installer-windows-amd64.exe" >> "$GITHUB_ENV"
+
+      - name: Validate version resource and launch (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "out/$env:ASSET"
+          # Fixed VS_FIXEDFILEINFO version (Explorer "File version") plus the
+          # ProductVersion and the version string in the en-US (0409) table; build/windows/info.json
+          # is committed because Wails' default neutral "0000" table is not
+          # shown by Explorer. .NET's VersionInfo.ProductVersion reads the
+          # winres string table as empty, so the string is checked in bytes.
+          $vi = (Get-Item $exe).VersionInfo
+          $fixed = "$($vi.FileVersionRaw.Major).$($vi.FileVersionRaw.Minor).$($vi.FileVersionRaw.Build)"
+          $product = "$($vi.ProductVersionRaw.Major).$($vi.ProductVersionRaw.Minor).$($vi.ProductVersionRaw.Build)"
+          if ($fixed -ne $env:VERSION) { Write-Error "FileVersion is '$fixed', expected '$env:VERSION'"; exit 1 }
+          if ($product -ne $env:VERSION) { Write-Error "ProductVersion is '$product', expected '$env:VERSION'"; exit 1 }
+          $text = [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($exe))
+          foreach ($s in '040904b0', "GEO CAM Edge Installer", $env:VERSION) {
+            if (-not $text.Contains($s)) { Write-Error "version resource lacks '$s'"; exit 1 }
+          }
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 15
+          if ($p.HasExited) { Write-Error "installer exited during launch check (code $($p.ExitCode))"; exit 1 }
+          taskkill /T /F /PID $p.Id | Out-Null
+          Write-Host "FileVersion $fixed, still running after 15s"
+
+      - name: Validate, ad-hoc sign, launch and package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          app=cmd/geocam-edge-ui/build/bin/geocam-edge-ui.app
+          v=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")
+          [ "$v" = "$VERSION" ] || { echo "::error::CFBundleShortVersionString is '$v', expected '$VERSION'"; exit 1; }
+          [ "$(lipo -archs "$app/Contents/MacOS/geocam-edge-ui")" = arm64 ] || { echo "::error::app binary is not arm64"; exit 1; }
+          # Ad-hoc signature (no certificate): Apple Silicon refuses to run
+          # code without any signature, and a sealed bundle avoids the
+          # "app is damaged" message on download.
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict "$app"
+          "$app/Contents/MacOS/geocam-edge-ui" &
+          pid=$!
+          sleep 15
+          kill -0 "$pid" || { echo "::error::installer exited during launch check"; exit 1; }
+          kill "$pid"
+          mkdir -p out
+          ditto -c -k --keepParent "$app" out/geocam-edge-installer-macos-arm64.zip
+          echo "ASSET=geocam-edge-installer-macos-arm64.zip" >> "$GITHUB_ENV"
+
+      - name: Validate, launch and package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          bin=cmd/geocam-edge-ui/build/bin/geocam-edge-ui
+          if ldd "$bin" | grep 'not found'; then echo "::error::unresolved shared libraries"; exit 1; fi
+          rc=0
+          xvfb-run -a timeout 15 "$bin" || rc=$?
+          [ "$rc" -eq 124 ] || { echo "::error::installer exited during launch check (code $rc)"; exit 1; }
+          dir="geocam-edge-installer-$VERSION-${{ matrix.platform }}"
+          mkdir -p "stage/$dir" out
+          cp "$bin" "stage/$dir/geocam-edge-ui"
+          cp deploy/installer/linux-README.txt "stage/$dir/README.txt"
+          echo "$VERSION" > "stage/$dir/VERSION"
+          tar -C stage -czf "out/geocam-edge-installer-${{ matrix.platform }}.tar.gz" "$dir"
+          echo "ASSET=geocam-edge-installer-${{ matrix.platform }}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Record build info
+        run: |
+          set -euo pipefail
+          cd out
+          if command -v sha256sum >/dev/null; then sum=$(sha256sum "$ASSET"); else sum=$(shasum -a 256 "$ASSET"); fi
+          printf 'version=%s\ncommit=%s\nasset=%s\nsha256=%s\n' "$VERSION" "$COMMIT" "$ASSET" "${sum%% *}" \
+            > "BUILD_INFO-${{ matrix.platform }}.txt"
+          cat "BUILD_INFO-${{ matrix.platform }}.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.platform }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 7

@@ -1,13 +1,22 @@
 # Releasing (Hito P)
 
-## Versioning
+Two independent release streams live in this repo, with separate tags:
+
+| Stream | Tag | Workflow | Contents |
+|---|---|---|---|
+| Linux appliance / daemon (OTA) | `vX.Y.Z` | `release.yml` | Signed appliance tarballs consumed by OTA |
+| Desktop installer GUI ("Release Stable") | `installer-vX.Y.Z` | `installer-release.yml` | Windows / macOS / Linux installer packages |
+
+## Linux appliance / daemon
+
+### Versioning
 
 Git tags are the source of truth: `vX.Y.Z` (semver, `v` prefix required).
 No separate `VERSION` file -- the tag itself is passed straight through as
 `internal/agent.Version` (see `Makefile`'s `VERSION` variable and
 `internal/agent/version.go`).
 
-## Cutting a release
+### Cutting a release
 
 ```
 git tag v0.2.0
@@ -41,8 +50,73 @@ unreadable key rejects every candidate release rather than accepting a
 checksum-only comparison. See `docs/security/ota.md` and
 `docs/security/update-trust.md`.
 
-**No release has been cut with this workflow yet** -- there is no `v1.0.0` tag.
-`docs/product/RELEASE_1_0_READINESS.md` records what must close before there is.
+Appliance releases (`v1.0.0`, `v1.1.0`, ...) are published with
+`make_latest: false`: OTA always downloads by explicit tag, and GitHub's
+"Latest" marker belongs to the desktop installer so its
+`/releases/latest/download/` links stay stable.
+
+## Desktop installer GUI -- "GEO CAM Edge vX.Y.Z — Release Stable"
+
+### Publishing a version
+
+From an up-to-date `main`, on the commit to release:
+
+```
+git checkout main && git pull --ff-only
+git tag -a installer-v1.2.0 -m "GEO CAM Edge v1.2.0"
+git push origin installer-v1.2.0
+```
+
+Nothing is published on push/merge; only an `installer-vX.Y.Z` tag starts
+`.github/workflows/installer-release.yml`, which:
+
+1. Checks the tag format, that the commit is on `main`, and that no published
+   release exists for the tag (published releases are never overwritten --
+   bump the version instead).
+2. Runs the test suite (same gates as `ci.yml`).
+3. Builds on native runners via `installer-build.yml`: Windows amd64, macOS
+   arm64, Linux amd64, Linux arm64, each stamped with the same version, then
+   checks the version (Windows version resource / macOS `Info.plist` /
+   Linux `VERSION`) and that the app launches and stays up for 15 s.
+4. `deploy/installer/assemble-release.sh` cross-checks that all four
+   packages exist, carry the same version and commit, still match the
+   checksum recorded at build time and have the right binary format and
+   architecture, then writes `SHA256SUMS.txt`.
+5. Creates a **draft** release titled `GEO CAM Edge vX.Y.Z — Release Stable`,
+   uploads the packages, re-downloads and verifies them, and only then
+   publishes it and marks it **Latest**.
+
+If any step fails nothing is published and the previous Latest release stays
+as it is. Re-running the failed workflow is safe: it resumes the draft left
+by the failed run instead of creating a second release.
+
+Every pull request runs the same build and assembly checks
+(`installer-build-validation.yml`, stamped `0.0.<run number>`), and keeps the packages
+as workflow artifacts for 7 days.
+
+### Downloads
+
+Asset names do not contain the version, so these links always point to the
+latest Release Stable:
+
+- `https://github.com/drko-dev/monitoreoedgeis/releases/latest`
+- `https://github.com/drko-dev/monitoreoedgeis/releases/latest/download/geocam-edge-installer-windows-amd64.exe`
+- `https://github.com/drko-dev/monitoreoedgeis/releases/latest/download/geocam-edge-installer-macos-arm64.zip`
+- `https://github.com/drko-dev/monitoreoedgeis/releases/latest/download/geocam-edge-installer-linux-amd64.tar.gz`
+- `https://github.com/drko-dev/monitoreoedgeis/releases/latest/download/geocam-edge-installer-linux-arm64.tar.gz`
+- `https://github.com/drko-dev/monitoreoedgeis/releases/latest/download/SHA256SUMS.txt`
+
+A specific version: `.../releases/download/installer-vX.Y.Z/<asset>`.
+
+### Unsigned builds
+
+The installer is **not code-signed** (no Windows certificate, no Apple
+Developer ID, no notarization; the macOS app carries only an ad-hoc
+signature). Windows SmartScreen may show "Windows protected your PC"
+(More info → Run anyway) and macOS may report that the app cannot be
+verified (System Settings → Privacy & Security → Open Anyway). Users should
+verify the SHA-256 against `SHA256SUMS.txt` first. This does not affect the
+appliance OTA trust chain, which stays Ed25519-signed and fail-closed.
 
 ## Out of scope (later hitos)
 
