@@ -102,27 +102,25 @@ jobs:
         shell: pwsh
         run: |
           $exe = Resolve-Path "out/$env:ASSET"
-          # build/windows/info.json is committed with the en-US (0409) string
-          # table: Wails' default neutral "0000" table is invisible to
-          # FileVersionInfo/Explorer.
+          # Fixed VS_FIXEDFILEINFO version (Explorer "File version") plus the
+          # ProductVersion and the version string in the en-US (0409) table; build/windows/info.json
+          # is committed because Wails' default neutral "0000" table is not
+          # shown by Explorer. .NET's VersionInfo.ProductVersion reads the
+          # winres string table as empty, so the string is checked in bytes.
           $vi = (Get-Item $exe).VersionInfo
-          $v = $vi.ProductVersion
-          $fixed = "$($vi.FileMajorPart).$($vi.FileMinorPart).$($vi.FileBuildPart)"
-          if ($v -ne $env:VERSION -or $fixed -ne $env:VERSION) {
-            $vi | Format-List * | Out-String | Write-Host
-            $bytes = [IO.File]::ReadAllBytes($exe)
-            $text = [Text.Encoding]::Unicode.GetString($bytes)
-            foreach ($s in 'VS_VERSION_INFO', '040904b0', '000004b0', $env:VERSION) { Write-Host "contains '$s': $($text.Contains($s))" }
-            Get-ChildItem cmd/geocam-edge-ui -Filter *.syso | Format-Table Name, Length | Out-String | Write-Host
-            Get-Content cmd/geocam-edge-ui/wails.json | Write-Host
-          }
-          if ($v -ne $env:VERSION) { Write-Error "ProductVersion is '$v', expected '$env:VERSION'"; exit 1 }
+          $fixed = "$($vi.FileVersionRaw.Major).$($vi.FileVersionRaw.Minor).$($vi.FileVersionRaw.Build)"
+          $product = "$($vi.ProductVersionRaw.Major).$($vi.ProductVersionRaw.Minor).$($vi.ProductVersionRaw.Build)"
           if ($fixed -ne $env:VERSION) { Write-Error "FileVersion is '$fixed', expected '$env:VERSION'"; exit 1 }
+          if ($product -ne $env:VERSION) { Write-Error "ProductVersion is '$product', expected '$env:VERSION'"; exit 1 }
+          $text = [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($exe))
+          foreach ($s in '040904b0', "GEO CAM Edge Installer", $env:VERSION) {
+            if (-not $text.Contains($s)) { Write-Error "version resource lacks '$s'"; exit 1 }
+          }
           $p = Start-Process -FilePath $exe -PassThru
           Start-Sleep -Seconds 15
           if ($p.HasExited) { Write-Error "installer exited during launch check (code $($p.ExitCode))"; exit 1 }
           taskkill /T /F /PID $p.Id | Out-Null
-          Write-Host "ProductVersion $v, still running after 15s"
+          Write-Host "FileVersion $fixed, still running after 15s"
 
       - name: Validate, ad-hoc sign, launch and package (macOS)
         if: runner.os == 'macOS'
