@@ -1,5 +1,11 @@
 # UX-7 — Cross-Platform Installer GUI Build & Release
 
+> **Superseded (2026-10-10):** the installer release no longer requires
+> Windows/Apple signing or notarization. Builds are published unsigned with
+> SHA-256 checksums as "GEO CAM Edge vX.Y.Z — Release Stable". The signing
+> sections below are historical; the current process is in
+> `docs/RELEASING.md` ("Desktop installer GUI").
+
 `UX7_BUILD_PIPELINE = COMPLETE`
 `UX7_WINDOWS_AMD64_BUILD = PASS` (real GitHub Actions run, `windows-latest`)
 `UX7_LINUX_AMD64_BUILD = PASS` (real GitHub Actions run, `ubuntu-latest`)

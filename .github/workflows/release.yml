@@ -88,3 +88,8 @@ jobs:
             dist/SHA256SUMS
             dist/SHA256SUMS.sig
           generate_release_notes: true
+          # OTA always downloads by explicit tag, never via "latest"; the
+          # Latest marker belongs to the desktop installer release
+          # (installer-release.yml) so its /releases/latest/download/ links
+          # stay stable.
+          make_latest: false
