@@ -102,8 +102,14 @@ jobs:
         shell: pwsh
         run: |
           $exe = Resolve-Path "out/$env:ASSET"
-          $v = (Get-Item $exe).VersionInfo.ProductVersion
+          # build/windows/info.json is committed with the en-US (0409) string
+          # table: Wails' default neutral "0000" table is invisible to
+          # FileVersionInfo/Explorer.
+          $vi = (Get-Item $exe).VersionInfo
+          $v = $vi.ProductVersion
+          $fixed = "$($vi.FileMajorPart).$($vi.FileMinorPart).$($vi.FileBuildPart)"
           if ($v -ne $env:VERSION) { Write-Error "ProductVersion is '$v', expected '$env:VERSION'"; exit 1 }
+          if ($fixed -ne $env:VERSION) { Write-Error "FileVersion is '$fixed', expected '$env:VERSION'"; exit 1 }
           $p = Start-Process -FilePath $exe -PassThru
           Start-Sleep -Seconds 15
           if ($p.HasExited) { Write-Error "installer exited during launch check (code $($p.ExitCode))"; exit 1 }

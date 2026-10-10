@@ -91,7 +91,7 @@ as it is. Re-running the failed workflow is safe: it resumes the draft left
 by the failed run instead of creating a second release.
 
 Every pull request runs the same build and assembly checks
-(`installer-build-validation.yml`, stamped `0.0.0`), and keeps the packages
+(`installer-build-validation.yml`, stamped `0.0.<run number>`), and keeps the packages
 as workflow artifacts for 7 days.
 
 ### Downloads

@@ -1,7 +1,7 @@
 name: Installer Build Validation
 
 # Runs the exact release build (installer-build.yml) and release assembly
-# checks on every pull request, stamped as version 0.0.0, so a broken
+# checks on every pull request, stamped as version 0.0.<run number>, so a broken
 # platform, package or checksum is caught before anything is tagged. It never
 # creates a GitHub Release and needs no secrets. The packages are kept as
 # workflow artifacts for 7 days for manual inspection.
@@ -16,7 +16,7 @@ jobs:
   build:
     uses: ./.github/workflows/installer-build.yml
     with:
-      version: 0.0.0
+      version: 0.0.${{ github.run_number }}
 
   assemble:
     needs: build
@@ -28,4 +28,4 @@ jobs:
           pattern: installer-*
           path: artifacts
       - name: Cross-check the four packages and write SHA256SUMS.txt
-        run: ./deploy/installer/assemble-release.sh 0.0.0 "${{ github.sha }}" artifacts dist
+        run: ./deploy/installer/assemble-release.sh "0.0.${{ github.run_number }}" "${{ github.sha }}" artifacts dist
