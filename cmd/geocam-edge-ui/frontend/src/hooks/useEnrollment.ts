@@ -1,6 +1,6 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { ClaimRequest, ClaimResult, SafeError, EnrollmentStatus } from '../types/installer';
-import { claimDevice } from '../services/api';
+import { claimDevice, fetchSaaSURL } from '../services/api';
 import { useI18n } from '../i18n/I18nContext';
 
 const CROCKFORD_CHARS = /^[0-9A-HJKMNP-TV-Z]+$/;
@@ -27,6 +27,16 @@ function validateCode(raw: string, t: ReturnType<typeof useI18n>['t']): string |
   return null;
 }
 
+/** Validate the SaaS server URL: absolute http(s) with a host, no credentials. */
+export function isValidSaaSURL(raw: string): boolean {
+  try {
+    const u = new URL(raw.trim());
+    return (u.protocol === 'http:' || u.protocol === 'https:') && !!u.hostname && !u.username && !u.password;
+  } catch {
+    return false;
+  }
+}
+
 /** Auto-format code as XXXX-XXXX while typing */
 export function formatCodeInput(value: string): string {
   const clean = value.toUpperCase().replace(/[^0-9A-Z]/g, '');
@@ -38,6 +48,18 @@ export function useEnrollment() {
   const { t } = useI18n();
   const [code, setCode] = useState('');
   const [deviceName, setDeviceName] = useState('');
+  const [saasUrl, setSaasUrl] = useState('');
+
+  // Prefill with the URL already configured on this host, if any.
+  useEffect(() => {
+    let active = true;
+    fetchSaaSURL().then((url) => {
+      if (active && url) setSaasUrl((current) => current || url);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
   const [status, setStatus] = useState<EnrollmentStatus>('IDLE');
   const [result, setResult] = useState<ClaimResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -63,11 +85,18 @@ export function useEnrollment() {
       return;
     }
 
+    if (!isValidSaaSURL(saasUrl)) {
+      setStatus('INVALID_SAAS_URL');
+      setErrorMessage(t('enrollment.validationServerUrl'));
+      return;
+    }
+
     // Call backend
     setStatus('CLAIMING');
     const req: ClaimRequest = {
       code: normalizeCode(code),
       device_name: deviceName || undefined,
+      saas_url: saasUrl.trim(),
     };
 
     try {
@@ -80,7 +109,7 @@ export function useEnrollment() {
       setStatus(errorCode as EnrollmentStatus);
       setErrorMessage(safe?.safe_message || t('enrollment.unexpectedError'));
     }
-  }, [code, deviceName, t]);
+  }, [code, deviceName, saasUrl, t]);
 
   const reset = useCallback(() => {
     setCode('');
@@ -93,13 +122,15 @@ export function useEnrollment() {
   return {
     code,
     deviceName,
+    saasUrl,
     status,
     result,
     errorMessage,
     setCode: handleCodeChange,
     setDeviceName,
+    setSaasUrl,
     submit,
     reset,
-    canSubmit: code.replace(/[-\s]/g, '').length === CODE_LENGTH && status !== 'CLAIMING',
+    canSubmit: code.replace(/[-\s]/g, '').length === CODE_LENGTH && saasUrl.trim() !== '' && status !== 'CLAIMING',
   };
 }

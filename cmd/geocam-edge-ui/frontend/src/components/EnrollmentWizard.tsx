@@ -15,6 +15,8 @@ const ERROR_LABEL_KEYS: Record<string, TranslationKey> = {
   SERVER_ERROR: 'enrollment.errorServerError',
   PERSISTENCE_ERROR: 'enrollment.errorPersistenceError',
   EDGE_ID_CONFLICT: 'enrollment.errorEdgeIdConflict',
+  INVALID_SAAS_URL: 'enrollment.errorInvalidServerUrl',
+  CONFIG_WRITE_FAILED: 'enrollment.errorPersistenceError',
 };
 
 export const EnrollmentWizard: React.FC<{ onComplete: () => void }> = ({ onComplete }) => {
@@ -22,11 +24,13 @@ export const EnrollmentWizard: React.FC<{ onComplete: () => void }> = ({ onCompl
   const {
     code,
     deviceName,
+    saasUrl,
     status,
     result,
     errorMessage,
     setCode,
     setDeviceName,
+    setSaasUrl,
     submit,
     reset,
     canSubmit,
@@ -76,6 +80,28 @@ export const EnrollmentWizard: React.FC<{ onComplete: () => void }> = ({ onCompl
       </p>
 
       <div className="enrollment-form">
+        <div className="form-group">
+          <label htmlFor="saas-url" className="form-label">
+            {t('enrollment.serverUrlLabel')} <span className="required" aria-label="required">*</span>
+          </label>
+          <input
+            id="saas-url"
+            type="url"
+            inputMode="url"
+            className={`form-input ${status === 'INVALID_SAAS_URL' ? 'input-error' : ''}`}
+            placeholder="https://geocam.example.com"
+            value={saasUrl}
+            onChange={(e) => setSaasUrl(e.target.value)}
+            disabled={isClaiming}
+            maxLength={2048}
+            autoComplete="url"
+            spellCheck={false}
+            aria-describedby="saas-url-help"
+            aria-invalid={status === 'INVALID_SAAS_URL'}
+          />
+          <small id="saas-url-help" className="form-help">{t('enrollment.serverUrlHelp')}</small>
+        </div>
+
         <div className="form-group">
           <label htmlFor="enrollment-code" className="form-label">
             {t('enrollment.codeLabel')} <span className="required" aria-label="required">*</span>

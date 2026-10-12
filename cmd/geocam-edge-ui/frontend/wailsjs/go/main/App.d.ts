@@ -20,6 +20,8 @@ export function GetInstallerState():Promise<installer.InstallerState>;
 
 export function GetProcessingModeOptions():Promise<Array<installer.ProcessingModeOption>>;
 
+export function GetSaaSURL():Promise<string>;
+
 export function GetSystemReport():Promise<installer.SystemReport>;
 
 export function PlanCameraOnboarding(arg1:installer.CameraOnboardingRequest):Promise<installer.CameraOnboardingPlan>;

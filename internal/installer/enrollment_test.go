@@ -49,6 +49,9 @@ func TestClaimDeviceSuccessAndAtomicPersistence(t *testing.T) {
 		t.Fatalf("MkdirTemp failed: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
+	configFile := filepath.Join(tempDir, "edge.env")
+	t.Setenv("GEOCAM_CONFIG_FILE", configFile)
+	t.Setenv("GEOCAM_SAAS_URL", "")
 
 	var receivedPayload installer.ClaimPayload
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -87,7 +90,7 @@ func TestClaimDeviceSuccessAndAtomicPersistence(t *testing.T) {
 	req := installer.ClaimRequest{
 		Code:       "k9x4-7mb2",
 		DeviceName: "test-device-01",
-		SaaSURL:    server.URL,
+		SaaSURL:    server.URL + "/",
 	}
 
 	result, err := svc.ClaimDevice(ctx, req)
@@ -149,6 +152,14 @@ func TestClaimDeviceSuccessAndAtomicPersistence(t *testing.T) {
 		t.Errorf("id.EdgeID = %q, want %q", id.EdgeID, result.EdgeID)
 	}
 
+	// Verify the server URL is persisted for the daemon, normalized.
+	if got := svc.GetSaaSURL(ctx); got != server.URL {
+		t.Errorf("GetSaaSURL() = %q, want %q", got, server.URL)
+	}
+	if raw, err := os.ReadFile(configFile); err != nil || !strings.Contains(string(raw), server.URL) {
+		t.Errorf("config file lacks GEOCAM_SAAS_URL=%s (err=%v)", server.URL, err)
+	}
+
 	// Verify installer state transition to ENROLLED
 	state, err := svc.GetInstallerState(ctx)
 	if err != nil {
@@ -165,6 +176,8 @@ func TestClaimDeviceErrors(t *testing.T) {
 		t.Fatalf("MkdirTemp failed: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
+	t.Setenv("GEOCAM_CONFIG_FILE", filepath.Join(tempDir, "edge.env"))
+	t.Setenv("GEOCAM_SAAS_URL", "")
 
 	statusCode := http.StatusUnauthorized
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -216,5 +229,45 @@ func TestClaimDeviceErrors(t *testing.T) {
 		if safeErr.Code != "RATE_LIMITED" {
 			t.Errorf("safeErr.Code = %q, want RATE_LIMITED", safeErr.Code)
 		}
+	}
+}
+
+func TestNormalizeSaaSURL(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+		ok    bool
+	}{
+		{"https://geocam.example.com", "https://geocam.example.com", true},
+		{"  https://geocam.example.com/ ", "https://geocam.example.com", true},
+		{"http://192.168.0.10:8000", "http://192.168.0.10:8000", true},
+		{"geocam.example.com", "", false},
+		{"ftp://geocam.example.com", "", false},
+		{"https://", "", false},
+		{"https://user:pass@geocam.example.com", "", false},
+		{"https://geocam.example.com/?x=1", "", false},
+	}
+	for _, tc := range cases {
+		got, ok := installer.NormalizeSaaSURL(tc.input)
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("NormalizeSaaSURL(%q) = (%q, %v), want (%q, %v)", tc.input, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestClaimDeviceRejectsInvalidSaaSURLWithoutPersisting(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "edge.env")
+	t.Setenv("GEOCAM_CONFIG_FILE", configFile)
+	t.Setenv("GEOCAM_SAAS_URL", "")
+
+	svc := installer.NewService(tempDir, configFile)
+	_, err := svc.ClaimDevice(context.Background(), installer.ClaimRequest{Code: "K9X4-7MB2", SaaSURL: "geocam.example.com"})
+	safeErr, ok := err.(*installer.SafeError)
+	if !ok || safeErr.Code != "INVALID_SAAS_URL" {
+		t.Fatalf("err = %v, want INVALID_SAAS_URL", err)
+	}
+	if _, statErr := os.Stat(configFile); !os.IsNotExist(statErr) {
+		t.Errorf("config file written on invalid URL (stat err=%v)", statErr)
 	}
 }

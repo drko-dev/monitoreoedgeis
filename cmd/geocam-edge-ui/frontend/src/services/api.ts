@@ -20,6 +20,7 @@ import {
   GetSystemReport,
   GetInstallerState,
   ClaimDevice,
+  GetSaaSURL,
   GetProcessingModeOptions,
   GetCurrentProcessingMode,
   PlanProcessingMode,
@@ -89,6 +90,16 @@ export async function fetchInstallerState(): Promise<InstallerState> {
     recoverable: true,
     next_allowed_actions: ['PROCEED_TO_ENROLLMENT', 'REFRESH'],
   };
+}
+
+// fetchSaaSURL returns the configured SaaS server URL, or '' when unset or
+// when running outside the Wails shell.
+export async function fetchSaaSURL(): Promise<string> {
+  try {
+    return (await GetSaaSURL()) || '';
+  } catch {
+    return '';
+  }
 }
 
 // claimDevice calls the Go facade to enroll the edge device with a one-time code

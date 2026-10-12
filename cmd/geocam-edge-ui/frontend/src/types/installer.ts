@@ -80,6 +80,8 @@ export type EnrollmentStatus =
   | 'NETWORK_ERROR'
   | 'SERVER_ERROR'
   | 'PERSISTENCE_ERROR'
+  | 'INVALID_SAAS_URL'
+  | 'CONFIG_WRITE_FAILED'
   | 'EDGE_ID_CONFLICT';
 
 // Processing mode (UX-3). Exactly three product modes; "gateway" is

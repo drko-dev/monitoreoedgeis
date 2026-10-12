@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"os"
+	"net/url"
 	"runtime"
 	"strconv"
 	"strings"
@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/agent"
+	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 )
@@ -208,6 +209,32 @@ func (p *SaaSEnrollmentProvider) Claim(ctx context.Context, saasURL string, payl
 	}
 }
 
+// NormalizeSaaSURL trims and validates a SaaS base URL entered by the operator.
+// It accepts only absolute http/https URLs with a host and drops trailing slashes.
+func NormalizeSaaSURL(raw string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", false
+	}
+	return strings.TrimRight(u.String(), "/"), true
+}
+
+// configuredSaaSURL returns GEOCAM_SAAS_URL from the environment or the
+// persistent config file, or "" when unset or unreadable.
+func configuredSaaSURL() string {
+	value, ok, err := config.PersistentValue("GEOCAM_SAAS_URL")
+	if err != nil || !ok {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+// GetSaaSURL returns the currently configured SaaS URL, used to prefill the
+// enrollment form. It is not a secret.
+func (s *Service) GetSaaSURL(ctx context.Context) string {
+	return configuredSaaSURL()
+}
+
 // ClaimDevice executes the end-to-end device enrollment wizard flow.
 func (s *Service) ClaimDevice(ctx context.Context, req ClaimRequest) (*ClaimResult, error) {
 	normCode := NormalizeEnrollmentCode(req.Code)
@@ -220,8 +247,28 @@ func (s *Service) ClaimDevice(ctx context.Context, req ClaimRequest) (*ClaimResu
 	}
 
 	saasURL := strings.TrimSpace(req.SaaSURL)
-	if saasURL == "" {
-		saasURL = os.Getenv("GEOCAM_SAAS_URL")
+	if saasURL != "" {
+		normalized, ok := NormalizeSaaSURL(saasURL)
+		if !ok {
+			return nil, &SafeError{
+				Code:        "INVALID_SAAS_URL",
+				SafeMessage: "Server URL must be an http:// or https:// address, e.g. https://geocam.example.com.",
+				Recoverable: true,
+			}
+		}
+		saasURL = normalized
+		// Persist before claiming so the daemon and later installer steps
+		// (camera onboarding) talk to the same server this Edge enrolls with.
+		if err := config.WritePersistentValues(map[string]string{"GEOCAM_SAAS_URL": saasURL}); err != nil {
+			return nil, &SafeError{
+				Code:        "CONFIG_WRITE_FAILED",
+				SafeMessage: "Failed to save the server URL. No change was made.",
+				Recoverable: true,
+				Details:     err.Error(),
+			}
+		}
+	} else {
+		saasURL = configuredSaaSURL()
 	}
 	if saasURL == "" {
 		saasURL = "http://127.0.0.1:8000"
