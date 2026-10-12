@@ -52,6 +52,7 @@ func TestClaimDeviceSuccessAndAtomicPersistence(t *testing.T) {
 	configFile := filepath.Join(tempDir, "edge.env")
 	t.Setenv("GEOCAM_CONFIG_FILE", configFile)
 	t.Setenv("GEOCAM_SAAS_URL", "")
+	t.Setenv("GEOCAM_DATA_DIR", "")
 
 	var receivedPayload installer.ClaimPayload
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -158,6 +159,9 @@ func TestClaimDeviceSuccessAndAtomicPersistence(t *testing.T) {
 	}
 	if raw, err := os.ReadFile(configFile); err != nil || !strings.Contains(string(raw), server.URL) {
 		t.Errorf("config file lacks GEOCAM_SAAS_URL=%s (err=%v)", server.URL, err)
+	}
+	if raw, err := os.ReadFile(configFile); err != nil || !strings.Contains(string(raw), "GEOCAM_DATA_DIR="+tempDir) {
+		t.Errorf("config file lacks GEOCAM_DATA_DIR=%s so the daemon would not find the identity (err=%v)", tempDir, err)
 	}
 
 	// Verify installer state transition to ENROLLED

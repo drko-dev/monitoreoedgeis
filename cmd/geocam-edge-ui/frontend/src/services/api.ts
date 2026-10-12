@@ -114,6 +114,19 @@ export async function claimDevice(req: ClaimRequest): Promise<ClaimResult> {
     if (err && typeof err === 'object' && 'code' in err) {
       throw err;
     }
+    // Wails rejects with the Go error string; ClaimDevice encodes SafeError as JSON.
+    if (typeof err === 'string') {
+      let parsed: unknown = null;
+      try {
+        parsed = JSON.parse(err);
+      } catch {
+        // not JSON: fall through to a generic server error carrying the message
+      }
+      if (parsed && typeof parsed === 'object' && 'code' in parsed) {
+        throw parsed;
+      }
+      throw { code: 'SERVER_ERROR', safe_message: err, recoverable: true };
+    }
     throw {
       code: 'NETWORK_ERROR',
       safe_message: 'Could not connect to SaaS server. Check your connection.',

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -246,6 +248,9 @@ func (s *Service) ClaimDevice(ctx context.Context, req ClaimRequest) (*ClaimResu
 		}
 	}
 
+	// Settings persisted before claiming so the daemon and later installer
+	// steps (camera onboarding) use the same server and identity directory.
+	updates := map[string]string{}
 	saasURL := strings.TrimSpace(req.SaaSURL)
 	if saasURL != "" {
 		normalized, ok := NormalizeSaaSURL(saasURL)
@@ -257,21 +262,33 @@ func (s *Service) ClaimDevice(ctx context.Context, req ClaimRequest) (*ClaimResu
 			}
 		}
 		saasURL = normalized
-		// Persist before claiming so the daemon and later installer steps
-		// (camera onboarding) talk to the same server this Edge enrolls with.
-		if err := config.WritePersistentValues(map[string]string{"GEOCAM_SAAS_URL": saasURL}); err != nil {
-			return nil, &SafeError{
-				Code:        "CONFIG_WRITE_FAILED",
-				SafeMessage: "Failed to save the server URL. No change was made.",
-				Recoverable: true,
-				Details:     err.Error(),
-			}
-		}
+		updates["GEOCAM_SAAS_URL"] = saasURL
 	} else {
 		saasURL = configuredSaaSURL()
 	}
 	if saasURL == "" {
 		saasURL = "http://127.0.0.1:8000"
+	}
+	if _, ok, err := config.PersistentValue("GEOCAM_DATA_DIR"); !ok && (err == nil || errors.Is(err, os.ErrNotExist)) {
+		updates["GEOCAM_DATA_DIR"] = s.DataDir
+	}
+	if len(updates) > 0 {
+		if err := config.WritePersistentValues(updates); err != nil {
+			return nil, &SafeError{
+				Code:        "CONFIG_WRITE_FAILED",
+				SafeMessage: "Failed to save the installer configuration. No change was made.",
+				Recoverable: true,
+				Details:     err.Error(),
+			}
+		}
+	}
+	if err := os.MkdirAll(s.DataDir, 0o700); err != nil {
+		return nil, &SafeError{
+			Code:        "IDENTITY_ERROR",
+			SafeMessage: "Failed to create the Edge data directory.",
+			Recoverable: false,
+			Details:     err.Error(),
+		}
 	}
 
 	// 1. Resolve or create persistent identity (stable UUID v4)
