@@ -139,6 +139,10 @@ jobs:
           echo "installer --version: $app_ver"
           echo "$app_ver" | grep -F "$VERSION" || { echo "::error::binary --version does not report $VERSION"; exit 1; }
           echo "$app_ver" | grep -F "$COMMIT" || { echo "::error::binary --version does not report $COMMIT"; exit 1; }
+          # Build companion daemon binary and bundle it inside Contents/MacOS
+          build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          ldflags="-X github.com/drko-dev/monitoreoedgeis/internal/agent.Version=${VERSION} -X github.com/drko-dev/monitoreoedgeis/internal/agent.Commit=${COMMIT} -X github.com/drko-dev/monitoreoedgeis/internal/agent.BuildDate=${build_date}"
+          go build -ldflags "${ldflags}" -o "$app/Contents/MacOS/geocam-edge" ./cmd/geocam-edge
           # Ad-hoc signature (no certificate): Apple Silicon refuses to run
           # code without any signature, and a sealed bundle avoids the
           # "app is damaged" message on download.
@@ -169,6 +173,9 @@ jobs:
           dir="geocam-edge-installer-$VERSION-${{ matrix.platform }}"
           mkdir -p "stage/$dir" out
           cp "$bin" "stage/$dir/geocam-edge-ui"
+          build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          ldflags="-X github.com/drko-dev/monitoreoedgeis/internal/agent.Version=${VERSION} -X github.com/drko-dev/monitoreoedgeis/internal/agent.Commit=${COMMIT} -X github.com/drko-dev/monitoreoedgeis/internal/agent.BuildDate=${build_date}"
+          go build -ldflags "${ldflags}" -o "stage/$dir/geocam-edge" ./cmd/geocam-edge
           cp deploy/installer/linux-README.txt "stage/$dir/README.txt"
           echo "$VERSION" > "stage/$dir/VERSION"
           tar -C stage -czf "out/geocam-edge-installer-${{ matrix.platform }}.tar.gz" "$dir"

@@ -89,3 +89,12 @@ export function TestCameraCredentials(arg1) {
 export function ValidateProcessingMode(arg1) {
   return window['go']['main']['App']['ValidateProcessingMode'](arg1);
 }
+
+export function GetCommissioningStatus() {
+  return window['go']['main']['App']['GetCommissioningStatus']();
+}
+
+export function CommissionDaemon() {
+  return window['go']['main']['App']['CommissionDaemon']();
+}
+

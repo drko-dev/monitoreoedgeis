@@ -721,3 +721,136 @@ body {
   max-width: none;
   margin-bottom: 1.25rem;
 }
+
+/* Review container and visual blocks */
+.review-card-container {
+  max-width: 820px;
+  margin: 0 auto;
+  text-align: left;
+}
+
+.review-block {
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 1.25rem;
+  margin-bottom: 1.25rem;
+}
+
+.review-block-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.review-grid-two-col {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem 1.5rem;
+}
+
+@media (max-width: 640px) {
+  .review-grid-two-col {
+    grid-template-columns: 1fr;
+  }
+}
+
+.review-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.review-item-label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.review-item-value {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.component-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.component-check-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.component-badge-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background-color: rgba(34, 197, 94, 0.16);
+  color: var(--success);
+  font-weight: 700;
+  font-size: 0.8rem;
+  flex-shrink: 0;
+}
+
+.review-actions-centered {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 1.25rem;
+  margin-top: 1.75rem;
+}
+
+/* Commissioning View */
+.commission-card-container {
+  max-width: 820px;
+  margin: 0 auto;
+  text-align: left;
+}
+
+.commission-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem 1.5rem;
+  margin-bottom: 1.25rem;
+}
+
+@media (max-width: 640px) {
+  .commission-status-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.commission-status-item {
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.25rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.commission-status-label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+

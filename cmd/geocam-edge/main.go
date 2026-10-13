@@ -228,8 +228,8 @@ func validatePersistentServiceInstall(options service.Options) error {
 	if err != nil {
 		return err
 	}
-	if cfg.Profile() != config.ProfileGateway {
-		return fmt.Errorf("camera service requires processing_mode=cloud and video_pipeline_enabled=true; effective profile is %s", cfg.Profile())
+	if cfg.Profile() != config.ProfileGateway && cfg.Profile() != config.ProfileHybrid && cfg.Profile() != config.ProfileFullEdge {
+		return fmt.Errorf("camera service requires video_pipeline_enabled=true and a valid processing profile (cloud, hybrid, or edge); effective profile is %s", cfg.Profile())
 	}
 	if cfg.EdgeID != "" {
 		return errors.New("GEOCAM_EDGE_ID override is forbidden for managed services; the persisted identity.json is authoritative")

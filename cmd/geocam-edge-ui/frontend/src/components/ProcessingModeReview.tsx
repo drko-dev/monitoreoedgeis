@@ -84,22 +84,57 @@ export const ProcessingModeReview: React.FC<ProcessingModeReviewProps> = ({
 
   const hasBlockers = Boolean(plan.blockers && plan.blockers.length > 0);
 
+  const translateComponent = (component: string): string => {
+    switch (component) {
+      case 'Local vision worker process':
+        return t('mode.compVisionWorker');
+      case 'Person detection model':
+        return t('mode.compPersonModel');
+      case 'Vehicle detection model':
+        return t('mode.compVehicleModel');
+      default:
+        return component;
+    }
+  };
+
+  const translateConfigKey = (key: string): string => {
+    switch (key) {
+      case 'GEOCAM_PROCESSING_MODE':
+        return t('mode.configKeyProcessingEngine');
+      case 'GEOCAM_VIDEO_PIPELINE_ENABLED':
+        return t('mode.configKeyVideoPipeline');
+      default:
+        return describeConfigKey(key);
+    }
+  };
+
   return (
-    <div className="card mode-selector-card">
-      <h3 className="card-title">{t('mode.reviewTitle')}</h3>
-      <dl className="advanced-grid mode-result-grid">
-        <dt>{t('mode.currentLabel')}</dt>
-        <dd>{MODE_LABELS[plan.current_mode] ?? plan.current_mode}</dd>
-        <dt>{t('mode.selectedLabel')}</dt>
-        <dd>{MODE_LABELS[plan.requested_mode]}</dd>
-      </dl>
+    <div className="card review-card-container">
+      <h3 className="card-title" style={{ textAlign: 'center', marginBottom: '1.5rem' }}>
+        {t('mode.reviewTitle')}
+      </h3>
+
+      {/* Block: Modo actual vs Modo seleccionado */}
+      <div className="review-block">
+        <div className="review-grid-two-col">
+          <div className="review-item">
+            <span className="review-item-label">{t('mode.currentLabel')}</span>
+            <span className="review-item-value">{MODE_LABELS[plan.current_mode] ?? plan.current_mode}</span>
+          </div>
+          <div className="review-item">
+            <span className="review-item-label">{t('mode.selectedLabel')}</span>
+            <span className="review-item-value" style={{ color: 'var(--accent-primary)' }}>
+              {MODE_LABELS[plan.requested_mode]}
+            </span>
+          </div>
+        </div>
+      </div>
 
       {hasBlockers && (
         <div
           className="error-alert"
           style={{
-            marginTop: '1rem',
-            marginBottom: '1rem',
+            marginBottom: '1.25rem',
             padding: '0.85rem 1rem',
             backgroundColor: 'rgba(239, 68, 68, 0.12)',
             border: '1px solid var(--danger)',
@@ -118,36 +153,54 @@ export const ProcessingModeReview: React.FC<ProcessingModeReviewProps> = ({
         </div>
       )}
 
+      {/* Block: Cambios de configuración */}
       {Object.keys(plan.config_changes).length > 0 && (
-        <>
-          <p className="card-header-row">{t('mode.changes')}</p>
-          <ul className="check-list">
+        <div className="review-block">
+          <h4 className="review-block-title">{t('mode.changes')}</h4>
+          <div className="review-grid-two-col">
             {Object.entries(plan.config_changes).map(([key, value]) => (
-              <li key={key} className="check-item">
-                <span className="check-label">{describeConfigKey(key)}</span>
-                <span className="check-value">{value}</span>
-              </li>
+              <div key={key} className="review-item">
+                <span className="review-item-label">{translateConfigKey(key)}</span>
+                <span className="review-item-value">{value}</span>
+              </div>
             ))}
-          </ul>
-        </>
+          </div>
+        </div>
       )}
+
+      {/* Block: Componentes requeridos */}
       {plan.components_required && plan.components_required.length > 0 && (
-        <>
-          <p className="card-header-row">{t('mode.componentsRequired')}</p>
-          <ul className="check-list">
+        <div className="review-block">
+          <h4 className="review-block-title">{t('mode.componentsRequired')}</h4>
+          <ul className="component-checklist">
             {plan.components_required.map((c) => (
-              <li key={c} className="check-item">
-                <span className="check-label">{c}</span>
+              <li key={c} className="component-check-item">
+                <span className="component-badge-check" aria-hidden="true">✓</span>
+                <span>{translateComponent(c)}</span>
               </li>
             ))}
           </ul>
-        </>
+        </div>
       )}
+
       {plan.warnings && plan.warnings.length > 0 && (
-        <p className="mode-card-reason">{plan.warnings.join(' ')}</p>
+        <p className="mode-card-reason" style={{ marginBottom: '1rem' }}>{plan.warnings.join(' ')}</p>
       )}
-      <p className="state-message">{t('mode.restartRequiredLine', { value: plan.restart_required ? t('mode.yes') : t('mode.no') })}</p>
-      <div className="actions-bar">
+
+      {/* Block: Reinicio requerido */}
+      <div className="review-block" style={{ padding: '0.85rem 1.25rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span className="review-item-label" style={{ fontSize: '0.85rem' }}>
+            {t('mode.restartRequiredLine', { value: '' }).replace(':', '').trim()}
+          </span>
+          <span className={`badge ${plan.restart_required ? 'badge-warning' : 'badge-neutral'}`}>
+            {plan.restart_required ? t('mode.yes') : t('mode.no')}
+          </span>
+        </div>
+      </div>
+
+      {/* Actions: Centered buttons */}
+      <div className="review-actions-centered">
         <Button variant="secondary" onClick={onBack} disabled={applying}>
           {t('mode.back')}
         </Button>
@@ -163,3 +216,4 @@ export const ProcessingModeReview: React.FC<ProcessingModeReviewProps> = ({
     </div>
   );
 };
+

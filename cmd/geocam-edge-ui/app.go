@@ -184,3 +184,16 @@ func (a *App) ApplyCameraOnboarding(req installer.CameraOnboardingRequest) (*ins
 func (a *App) CancelCameraOnboarding(operationID int64) error {
 	return a.installer.CancelCameraOnboarding(a.ctx, operationID)
 }
+
+// GetCommissioningStatus inspects all lifecycle, daemon service, HTTP health, and SaaS sync layers.
+func (a *App) GetCommissioningStatus() (*installer.CommissioningStatus, error) {
+	res, err := a.installer.GetCommissioningStatus(a.ctx)
+	return res, structuredError(err)
+}
+
+// CommissionDaemon executes the multi-step verified activation and commissioning flow.
+func (a *App) CommissionDaemon() (*installer.CommissionResult, error) {
+	res, err := a.installer.CommissionDaemon(a.ctx)
+	return res, structuredError(err)
+}
+

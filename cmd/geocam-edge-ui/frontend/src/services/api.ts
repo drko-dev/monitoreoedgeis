@@ -40,8 +40,10 @@ import {
   ApplyCameraOnboarding,
   CancelCameraOnboarding,
   TestSaaSConnection,
+  GetCommissioningStatus,
+  CommissionDaemon,
 } from '../../wailsjs/go/main/App';
-import { ServerCheckResult } from '../types/installer';
+import { ServerCheckResult, CommissioningStatus, CommissionResult } from '../types/installer';
 
 // fetchSystemReport calls the Go facade via Wails binding
 export async function fetchSystemReport(): Promise<SystemReport> {
@@ -547,4 +549,59 @@ export async function selectAndImportModel(modelName: string): Promise<VisionRun
 
   return fetchVisionRuntimeStatus();
 }
+
+// fetchCommissioningStatus queries the full commissioning state
+export async function fetchCommissioningStatus(): Promise<CommissioningStatus> {
+  try {
+    const status = await GetCommissioningStatus();
+    if (status && typeof status === 'object') {
+      return status as unknown as CommissioningStatus;
+    }
+  } catch (err: unknown) {
+    if (err && typeof err === 'object' && 'safe_message' in err) {
+      throw err;
+    }
+  }
+  return {
+    daemon_installed: false,
+    service_registered: false,
+    daemon_running: false,
+    healthz_ok: false,
+    readyz_ok: false,
+    operational_state: 'UNKNOWN',
+    operational_ok: false,
+    saas_sync_ok: false,
+    heartbeat_state: 'idle',
+    processing_mode: '',
+    effective_profile: '',
+    vision_worker_ready: false,
+    camera_count: 0,
+    overall_ready: false,
+    safe_message: 'No se pudo obtener el estado de commissioning.',
+  };
+}
+
+// commissionDaemon triggers the activation and service installation flow
+export async function commissionDaemon(): Promise<CommissionResult> {
+  try {
+    const res = await CommissionDaemon();
+    if (res && typeof res === 'object') {
+      return res as unknown as CommissionResult;
+    }
+  } catch (err: unknown) {
+    if (err && typeof err === 'object' && 'safe_message' in err) {
+      throw err;
+    }
+    throw {
+      code: 'COMMISSIONING_FAILED',
+      safe_message: err instanceof Error ? err.message : String(err),
+      recoverable: true,
+    };
+  }
+  return {
+    outcome: 'FAILED',
+    safe_message: 'Fallo inesperado al activar el daemon.',
+  };
+}
+
 

@@ -273,3 +273,31 @@ export interface CameraOnboardingApplyResult {
   sync_observed: boolean;
 }
 
+export interface CommissioningStatus {
+  daemon_installed: boolean;
+  service_registered: boolean;
+  daemon_running: boolean;
+  healthz_ok: boolean;
+  readyz_ok: boolean;
+  operational_state: string;
+  operational_ok: boolean;
+  saas_sync_ok: boolean;
+  heartbeat_state: string;
+  processing_mode: string;
+  effective_profile: string;
+  vision_worker_ready: boolean;
+  camera_count: number;
+  overall_ready: boolean;
+  safe_message: string;
+}
+
+export type CommissionOutcome = 'SUCCESS' | 'ACTION_REQUIRED' | 'FAILED';
+
+export interface CommissionResult {
+  outcome: CommissionOutcome;
+  status?: CommissioningStatus;
+  safe_message: string;
+  details?: string[];
+}
+
+
