@@ -3,6 +3,22 @@
 > Answers one question: **"¿Dónde estamos parados ahora?"**
 > Git + the final Hito Z integration are the source of truth. Historical sections below are retained as implementation history and may describe the state that existed at those earlier hitos.
 
+## Desktop Installer Releases
+
+### installer-v1.1.3 — PUBLICADO (Release Stable)
+- **Tag:** `installer-v1.1.3`
+- **Main Commit SHA:** `95748393ef13581baaf42456124fa58eb1743979`
+- **Workflow:** `installer-release.yml` (Run ID: `38335353710`, Status: `SUCCESS`, `isDraft: false`)
+- **macOS Asset:** `geocam-edge-installer-macos-arm64.zip`
+- **macOS SHA-256:** `9d8f7aebe3de4b7708073b9f999129bead50b96fa58e02348098f740c0d4d553`
+- **Direct Download:** `https://github.com/drko-dev/monitoreoedgeis/releases/download/installer-v1.1.3/geocam-edge-installer-macos-arm64.zip`
+- **Fixes incluidos:**
+  1. **Detección estructurada de FFmpeg en macOS:** `DependencyResolver` resuelve bajo el PATH reducido de Finder (`/usr/bin:/bin:/usr/sbin:/sbin`) inspeccionando `/opt/homebrew/bin` y `/usr/local/bin`, validando ejecución y parsing de `-version` para ffmpeg y ffprobe.
+  2. **Aprovisionamiento seguro en UI:** Banner en sección de procesamiento y SystemCard con estado real; acción `[ Instalar FFmpeg ]` ejecutando Homebrew directamente (`brew install ffmpeg`) sin invocación de shell (`sh -c`, `bash -c`, `curl | sh` prohibidos) y persistencia en `GEOCAM_VIDEO_FFMPEG_PATH`. Validación estricta de SHA-256 en descargas gestionadas.
+  3. **Inyección de metadatos de versión:** `-ldflags` inyectados en el workflow de Wails estampando `agent.Version`, `Commit` y `BuildDate`. Soporte del flag `--version` directo en CLI. Verificación de versión coincidente en CI.
+  4. **Bloqueo estricto en UI:** Deshabilitación de 'Continuar' cuando el modo seleccionado tiene `capability === 'UNAVAILABLE'`; deshabilitación de 'Aplicar' en `ProcessingModeReview` ante la presencia de `plan.blockers`.
+  5. **Preservación de fixes v1.1.2:** Configuración y persistencia de URL del SaaS/VPS, preservación de `RawQuery` en RTSP devuelto por ONVIF, sin fallback silencioso a localhost.
+
 ## Current: Hito 2 — local event backlog vs. inactive cameras
 
 Branch `fix/edge-event-backlog-reactivation-hito2`. The SaaS answers a local event for an administratively inactive camera with `423` / `X-Camera-Status: inactive` (`transport.ErrCameraInactive`). Policy in `internal/edgebacklog`:
