@@ -50,7 +50,7 @@ type Service struct {
 // NewService creates a configured installer service instance.
 func NewService(dataDir, configFilePath string) *Service {
 	if dataDir == "" {
-		dataDir = config.DefaultDataDir
+		dataDir = defaultInstallerDataDir()
 	}
 	return &Service{
 		DataDir:        dataDir,
@@ -61,6 +61,22 @@ func NewService(dataDir, configFilePath string) *Service {
 		},
 		EnrollmentProvider: NewSaaSEnrollmentProvider(nil),
 	}
+}
+
+// defaultInstallerDataDir returns the configured GEOCAM_DATA_DIR or, when it
+// is unset, a platform default the desktop installer can write to without
+// privileges. /var/lib does not exist or is root-owned on macOS, so there the
+// per-user Application Support directory is used instead.
+func defaultInstallerDataDir() string {
+	if value, ok, err := config.PersistentValue("GEOCAM_DATA_DIR"); err == nil && ok && strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	if runtime.GOOS == "darwin" {
+		if dir, err := os.UserConfigDir(); err == nil {
+			return filepath.Join(dir, "geocam-edge", "data")
+		}
+	}
+	return config.DefaultDataDir
 }
 
 // GetSystemReport returns non-sensitive host, environment, and Edge runtime properties.

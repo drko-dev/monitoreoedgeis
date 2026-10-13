@@ -300,13 +300,45 @@ func TestParseTarget_StripsUserinfo(t *testing.T) {
 	}
 }
 
+func TestParseTarget_PreservesQuery(t *testing.T) {
+	addr, path, err := ParseTarget("rtsp://10.0.0.20:554/stream?channel=1&subtype=0")
+	if err != nil {
+		t.Fatalf("ParseTarget: %v", err)
+	}
+	if addr != "10.0.0.20:554" {
+		t.Errorf("unexpected addr: got %q, want %q", addr, "10.0.0.20:554")
+	}
+	if path != "/stream?channel=1&subtype=0" {
+		t.Errorf("unexpected path: got %q, want %q", path, "/stream?channel=1&subtype=0")
+	}
+}
+
+func TestParseTarget_StripsUserinfoAndPreservesQuery(t *testing.T) {
+	addr, path, err := ParseTarget("rtsp://admin:secret@10.0.0.20:554/cam/realmonitor?channel=1&subtype=0")
+	if err != nil {
+		t.Fatalf("ParseTarget: %v", err)
+	}
+	if addr != "10.0.0.20:554" {
+		t.Errorf("unexpected addr: got %q, want %q", addr, "10.0.0.20:554")
+	}
+	if path != "/cam/realmonitor?channel=1&subtype=0" {
+		t.Errorf("unexpected path: got %q, want %q", path, "/cam/realmonitor?channel=1&subtype=0")
+	}
+	if strings.Contains(addr+path, "secret") || strings.Contains(addr+path, "admin") {
+		t.Fatalf("userinfo leaked into parsed target: addr=%s path=%s", addr, path)
+	}
+}
+
 func TestParseTarget_DefaultPort(t *testing.T) {
-	addr, _, err := ParseTarget("rtsp://192.168.0.6/stream1")
+	addr, path, err := ParseTarget("rtsp://192.168.0.6/stream1")
 	if err != nil {
 		t.Fatalf("ParseTarget: %v", err)
 	}
 	if addr != "192.168.0.6:554" {
 		t.Errorf("expected default RTSP port 554, got %s", addr)
+	}
+	if path != "/stream1" {
+		t.Errorf("expected path /stream1, got %s", path)
 	}
 }
 

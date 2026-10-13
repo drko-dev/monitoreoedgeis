@@ -38,6 +38,14 @@ export function GetProcessingModeOptions() {
   return window['go']['main']['App']['GetProcessingModeOptions']();
 }
 
+export function GetSaaSURL() {
+  return window['go']['main']['App']['GetSaaSURL']();
+}
+
+export function TestSaaSConnection(arg1) {
+  return window['go']['main']['App']['TestSaaSConnection'](arg1);
+}
+
 export function GetSystemReport() {
   return window['go']['main']['App']['GetSystemReport']();
 }

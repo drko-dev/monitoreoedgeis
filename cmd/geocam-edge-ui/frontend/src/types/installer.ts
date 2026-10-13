@@ -80,7 +80,17 @@ export type EnrollmentStatus =
   | 'NETWORK_ERROR'
   | 'SERVER_ERROR'
   | 'PERSISTENCE_ERROR'
+  | 'INVALID_SAAS_URL'
+  | 'SAAS_URL_REQUIRED'
+  | 'CONFIG_WRITE_FAILED'
   | 'EDGE_ID_CONFLICT';
+
+export interface ServerCheckResult {
+  accessible: boolean;
+  status: 'OK' | 'INVALID_URL' | 'INVALID_TLS' | 'UNREACHABLE';
+  message: string;
+  http_status?: number;
+}
 
 // Processing mode (UX-3). Exactly three product modes; "gateway" is
 // deliberately not a fourth mode here -- see

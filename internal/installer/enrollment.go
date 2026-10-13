@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime"
 	"strconv"
@@ -15,6 +19,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/agent"
+	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/credentials"
 	"github.com/drko-dev/monitoreoedgeis/internal/identity"
 )
@@ -208,6 +213,137 @@ func (p *SaaSEnrollmentProvider) Claim(ctx context.Context, saasURL string, payl
 	}
 }
 
+// isLoopbackHost reports whether host (or host:port) refers to localhost or loopback IP.
+func isLoopbackHost(hostport string) bool {
+	h := hostport
+	if host, _, err := net.SplitHostPort(hostport); err == nil {
+		h = host
+	}
+	h = strings.ToLower(strings.TrimSpace(h))
+	if h == "localhost" || h == "127.0.0.1" || h == "0.0.0.0" || h == "::1" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
+}
+
+// NormalizeSaaSURL trims and validates a SaaS base URL entered by the operator.
+// In production it accepts only https:// URLs with a non-loopback host.
+// In development (GEOCAM_ALLOW_INSECURE_HTTP=true), http:// and loopback addresses
+// are permitted.
+func NormalizeSaaSURL(raw string) (string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", false
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", false
+	}
+	allowInsecure, _, _ := config.PersistentValue("GEOCAM_ALLOW_INSECURE_HTTP")
+	insecureAllowed := allowInsecure == "true" || strings.ToLower(os.Getenv("GEOCAM_ALLOW_INSECURE_HTTP")) == "true"
+
+	if u.Scheme != "https" {
+		if u.Scheme != "http" || !insecureAllowed {
+			return "", false
+		}
+	}
+	if !insecureAllowed && isLoopbackHost(u.Host) {
+		return "", false
+	}
+	return strings.TrimRight(u.String(), "/"), true
+}
+
+// configuredSaaSURL returns GEOCAM_SAAS_URL from the environment or the
+// persistent config file, or "" when unset or unreadable.
+func configuredSaaSURL() string {
+	value, ok, err := config.PersistentValue("GEOCAM_SAAS_URL")
+	if err != nil || !ok {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+// GetSaaSURL returns the currently configured SaaS URL, used to prefill the
+// enrollment form. It is not a secret.
+func (s *Service) GetSaaSURL(ctx context.Context) string {
+	return configuredSaaSURL()
+}
+
+// ServerCheckResult represents the outcome of checking connectivity to a GEO CAM server.
+type ServerCheckResult struct {
+	Accessible bool   `json:"accessible"`
+	Status     string `json:"status"` // "OK", "INVALID_URL", "INVALID_TLS", "UNREACHABLE"
+	Message    string `json:"message"`
+	HTTPStatus int    `json:"http_status,omitempty"`
+}
+
+// TestSaaSConnection verifies reachability and responsiveness of the configured GEO CAM server.
+func (s *Service) TestSaaSConnection(ctx context.Context, rawURL string) (*ServerCheckResult, error) {
+	normalized, ok := NormalizeSaaSURL(rawURL)
+	if !ok {
+		return &ServerCheckResult{
+			Accessible: false,
+			Status:     "INVALID_URL",
+			Message:    "Invalid server URL. Must be an https:// address (or http:// if development mode is enabled).",
+		}, nil
+	}
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+	if p, ok := s.EnrollmentProvider.(*SaaSEnrollmentProvider); ok && p != nil && p.httpClient != nil {
+		client = p.httpClient
+	}
+	// Try /api/health first as it is a standard healthcheck endpoint
+	checkURL := normalized + "/api/health"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, checkURL, nil)
+	if err != nil {
+		return &ServerCheckResult{
+			Accessible: false,
+			Status:     "INVALID_URL",
+			Message:    err.Error(),
+		}, nil
+	}
+	req.Header.Set("User-Agent", "geocam-edge-installer/"+agent.Version)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			if strings.Contains(urlErr.Error(), "certificate") || strings.Contains(urlErr.Error(), "tls") {
+				return &ServerCheckResult{
+					Accessible: false,
+					Status:     "INVALID_TLS",
+					Message:    "TLS / SSL certificate error: " + urlErr.Error(),
+				}, nil
+			}
+		}
+		return &ServerCheckResult{
+			Accessible: false,
+			Status:     "UNREACHABLE",
+			Message:    "Unable to connect to server: " + err.Error(),
+		}, nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 500 {
+		return &ServerCheckResult{
+			Accessible: true,
+			Status:     "OK",
+			Message:    "Server accessible.",
+			HTTPStatus: resp.StatusCode,
+		}, nil
+	}
+
+	return &ServerCheckResult{
+		Accessible: false,
+		Status:     "UNREACHABLE",
+		Message:    fmt.Sprintf("Server returned status %d", resp.StatusCode),
+		HTTPStatus: resp.StatusCode,
+	}, nil
+}
+
 // ClaimDevice executes the end-to-end device enrollment wizard flow.
 func (s *Service) ClaimDevice(ctx context.Context, req ClaimRequest) (*ClaimResult, error) {
 	normCode := NormalizeEnrollmentCode(req.Code)
@@ -219,12 +355,62 @@ func (s *Service) ClaimDevice(ctx context.Context, req ClaimRequest) (*ClaimResu
 		}
 	}
 
+	// Settings persisted before claiming so the daemon and later installer
+	// steps (camera onboarding) use the same server and identity directory.
+	updates := map[string]string{}
 	saasURL := strings.TrimSpace(req.SaaSURL)
-	if saasURL == "" {
-		saasURL = os.Getenv("GEOCAM_SAAS_URL")
+	if saasURL != "" {
+		normalized, ok := NormalizeSaaSURL(saasURL)
+		if !ok {
+			return nil, &SafeError{
+				Code:        "INVALID_SAAS_URL",
+				SafeMessage: "Server URL must be a valid https:// address (or http:// if development mode is enabled).",
+				Recoverable: true,
+			}
+		}
+		saasURL = normalized
+		updates["GEOCAM_SAAS_URL"] = saasURL
+	} else {
+		saasURL = configuredSaaSURL()
+		if saasURL != "" {
+			normalized, ok := NormalizeSaaSURL(saasURL)
+			if !ok {
+				return nil, &SafeError{
+					Code:        "INVALID_SAAS_URL",
+					SafeMessage: "Server URL must be a valid https:// address (or http:// if development mode is enabled).",
+					Recoverable: true,
+				}
+			}
+			saasURL = normalized
+		}
 	}
 	if saasURL == "" {
-		saasURL = "http://127.0.0.1:8000"
+		return nil, &SafeError{
+			Code:        "SAAS_URL_REQUIRED",
+			SafeMessage: "Configure the GEO CAM server URL before enrolling.",
+			Recoverable: true,
+		}
+	}
+	if _, ok, err := config.PersistentValue("GEOCAM_DATA_DIR"); !ok && (err == nil || errors.Is(err, os.ErrNotExist)) {
+		updates["GEOCAM_DATA_DIR"] = s.DataDir
+	}
+	if len(updates) > 0 {
+		if err := config.WritePersistentValues(updates); err != nil {
+			return nil, &SafeError{
+				Code:        "CONFIG_WRITE_FAILED",
+				SafeMessage: "Failed to save the installer configuration. No change was made.",
+				Recoverable: true,
+				Details:     err.Error(),
+			}
+		}
+	}
+	if err := os.MkdirAll(s.DataDir, 0o700); err != nil {
+		return nil, &SafeError{
+			Code:        "IDENTITY_ERROR",
+			SafeMessage: "Failed to create the Edge data directory.",
+			Recoverable: false,
+			Details:     err.Error(),
+		}
 	}
 
 	// 1. Resolve or create persistent identity (stable UUID v4)

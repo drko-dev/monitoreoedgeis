@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/installer"
 )
@@ -36,9 +38,35 @@ func (a *App) GetInstallerState() (*installer.InstallerState, error) {
 	return a.installer.GetInstallerState(a.ctx)
 }
 
+// GetSaaSURL returns the configured SaaS server URL to prefill the enrollment form.
+func (a *App) GetSaaSURL() string {
+	return a.installer.GetSaaSURL(a.ctx)
+}
+
+// TestSaaSConnection tests connectivity to a GEO CAM SaaS server.
+func (a *App) TestSaaSConnection(rawURL string) (*installer.ServerCheckResult, error) {
+	return a.installer.TestSaaSConnection(a.ctx, rawURL)
+}
+
 // ClaimDevice executes the secure one-time enrollment flow.
 func (a *App) ClaimDevice(req installer.ClaimRequest) (*installer.ClaimResult, error) {
-	return a.installer.ClaimDevice(a.ctx, req)
+	res, err := a.installer.ClaimDevice(a.ctx, req)
+	return res, structuredError(err)
+}
+
+// structuredError encodes an installer.SafeError as JSON. Wails rejects the
+// frontend promise with err.Error() only, so without this the UI cannot tell
+// an invalid code from a local failure and shows every error as a network one.
+func structuredError(err error) error {
+	var safe *installer.SafeError
+	if !errors.As(err, &safe) {
+		return err
+	}
+	b, jsonErr := json.Marshal(safe)
+	if jsonErr != nil {
+		return err
+	}
+	return errors.New(string(b))
 }
 
 // GetProcessingModeOptions returns the three selectable processing modes

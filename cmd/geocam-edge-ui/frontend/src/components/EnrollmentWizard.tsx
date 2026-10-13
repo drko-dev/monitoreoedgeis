@@ -1,10 +1,12 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useEnrollment } from '../hooks/useEnrollment';
 import { Button } from './Button';
 import { HelpLink } from './HelpLink';
 import { useI18n } from '../i18n/I18nContext';
 import { TranslationKey } from '../i18n/translations';
 import { docsLinks } from '../config/docsLinks';
+import { checkSaaSConnection } from '../services/api';
+import { ServerCheckResult } from '../types/installer';
 
 const ERROR_LABEL_KEYS: Record<string, TranslationKey> = {
   INVALID_CODE: 'enrollment.errorInvalidCode',
@@ -15,6 +17,9 @@ const ERROR_LABEL_KEYS: Record<string, TranslationKey> = {
   SERVER_ERROR: 'enrollment.errorServerError',
   PERSISTENCE_ERROR: 'enrollment.errorPersistenceError',
   EDGE_ID_CONFLICT: 'enrollment.errorEdgeIdConflict',
+  INVALID_SAAS_URL: 'enrollment.errorInvalidServerUrl',
+  SAAS_URL_REQUIRED: 'enrollment.errorInvalidServerUrl',
+  CONFIG_WRITE_FAILED: 'enrollment.errorPersistenceError',
 };
 
 export const EnrollmentWizard: React.FC<{ onComplete: () => void }> = ({ onComplete }) => {
@@ -22,15 +27,34 @@ export const EnrollmentWizard: React.FC<{ onComplete: () => void }> = ({ onCompl
   const {
     code,
     deviceName,
+    saasUrl,
     status,
     result,
     errorMessage,
     setCode,
     setDeviceName,
+    setSaasUrl,
     submit,
     reset,
     canSubmit,
   } = useEnrollment();
+
+  const [testingServer, setTestingServer] = useState(false);
+  const [testResult, setTestResult] = useState<ServerCheckResult | null>(null);
+
+  const handleTestServer = async () => {
+    if (!saasUrl.trim() || testingServer) return;
+    setTestingServer(true);
+    setTestResult(null);
+    try {
+      const res = await checkSaaSConnection(saasUrl.trim());
+      setTestResult(res);
+    } catch {
+      setTestResult({ accessible: false, status: 'UNREACHABLE', message: 'Could not connect' });
+    } finally {
+      setTestingServer(false);
+    }
+  };
 
   const isClaiming = status === 'CLAIMING';
   const isSuccess = status === 'SUCCESS';
@@ -76,6 +100,28 @@ export const EnrollmentWizard: React.FC<{ onComplete: () => void }> = ({ onCompl
       </p>
 
       <div className="enrollment-form">
+        <div className="form-group">
+          <label htmlFor="saas-url" className="form-label">
+            {t('enrollment.serverUrlLabel')} <span className="required" aria-label="required">*</span>
+          </label>
+          <input
+            id="saas-url"
+            type="url"
+            inputMode="url"
+            className={`form-input ${status === 'INVALID_SAAS_URL' ? 'input-error' : ''}`}
+            placeholder="https://geocam.example.com"
+            value={saasUrl}
+            onChange={(e) => setSaasUrl(e.target.value)}
+            disabled={isClaiming}
+            maxLength={2048}
+            autoComplete="url"
+            spellCheck={false}
+            aria-describedby="saas-url-help"
+            aria-invalid={status === 'INVALID_SAAS_URL'}
+          />
+          <small id="saas-url-help" className="form-help">{t('enrollment.serverUrlHelp')}</small>
+        </div>
+
         <div className="form-group">
           <label htmlFor="enrollment-code" className="form-label">
             {t('enrollment.codeLabel')} <span className="required" aria-label="required">*</span>
@@ -131,7 +177,31 @@ export const EnrollmentWizard: React.FC<{ onComplete: () => void }> = ({ onCompl
           </div>
         )}
 
-        <div className="enrollment-actions">
+        <div className="enrollment-actions" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={handleTestServer}
+              disabled={!saasUrl.trim() || isClaiming || testingServer}
+              loading={testingServer}
+            >
+              {testingServer ? t('enrollment.testingServer') : t('enrollment.testServer')}
+            </Button>
+            {testResult && (
+              <span
+                style={{
+                  marginLeft: '0.75rem',
+                  fontSize: '0.875rem',
+                  color: testResult.accessible ? 'var(--success, #10b981)' : 'var(--danger, #ef4444)',
+                }}
+              >
+                {testResult.accessible
+                  ? `✓ ${t('enrollment.serverAccessible')}`
+                  : `✗ ${testResult.status === 'INVALID_TLS' ? t('enrollment.serverInvalidTls') : t('enrollment.serverUnreachable')}`}
+              </span>
+            )}
+          </div>
           <Button
             variant="primary"
             onClick={submit}

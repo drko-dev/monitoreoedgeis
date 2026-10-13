@@ -66,7 +66,11 @@ func ParseTarget(rawURL string) (addr, path string, err error) {
 	if port == "" {
 		port = "554"
 	}
-	return net.JoinHostPort(host, port), u.EscapedPath(), nil
+	path = u.EscapedPath()
+	if u.RawQuery != "" {
+		path += "?" + u.RawQuery
+	}
+	return net.JoinHostPort(host, port), path, nil
 }
 
 // TestDescribe performs a one-shot RTSP DESCRIBE against addr ("host:port")

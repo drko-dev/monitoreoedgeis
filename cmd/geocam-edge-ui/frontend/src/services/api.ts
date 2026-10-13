@@ -20,6 +20,7 @@ import {
   GetSystemReport,
   GetInstallerState,
   ClaimDevice,
+  GetSaaSURL,
   GetProcessingModeOptions,
   GetCurrentProcessingMode,
   PlanProcessingMode,
@@ -30,7 +31,9 @@ import {
   PlanCameraOnboarding,
   ApplyCameraOnboarding,
   CancelCameraOnboarding,
+  TestSaaSConnection,
 } from '../../wailsjs/go/main/App';
+import { ServerCheckResult } from '../types/installer';
 
 // fetchSystemReport calls the Go facade via Wails binding
 export async function fetchSystemReport(): Promise<SystemReport> {
@@ -91,6 +94,33 @@ export async function fetchInstallerState(): Promise<InstallerState> {
   };
 }
 
+// fetchSaaSURL returns the configured SaaS server URL, or '' when unset or
+// when running outside the Wails shell.
+export async function fetchSaaSURL(): Promise<string> {
+  try {
+    return (await GetSaaSURL()) || '';
+  } catch {
+    return '';
+  }
+}
+
+// checkSaaSConnection tests reachability and responsiveness of the target SaaS server
+export async function checkSaaSConnection(url: string): Promise<ServerCheckResult> {
+  try {
+    const res = await TestSaaSConnection(url);
+    if (res && typeof res === 'object') {
+      return res as ServerCheckResult;
+    }
+    return { accessible: false, status: 'UNREACHABLE', message: 'No response from test runner' };
+  } catch (err: unknown) {
+    return {
+      accessible: false,
+      status: 'UNREACHABLE',
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 // claimDevice calls the Go facade to enroll the edge device with a one-time code
 export async function claimDevice(req: ClaimRequest): Promise<ClaimResult> {
   try {
@@ -102,6 +132,19 @@ export async function claimDevice(req: ClaimRequest): Promise<ClaimResult> {
     // Re-throw structured SafeError from Go facade
     if (err && typeof err === 'object' && 'code' in err) {
       throw err;
+    }
+    // Wails rejects with the Go error string; ClaimDevice encodes SafeError as JSON.
+    if (typeof err === 'string') {
+      let parsed: unknown = null;
+      try {
+        parsed = JSON.parse(err);
+      } catch {
+        // not JSON: fall through to a generic server error carrying the message
+      }
+      if (parsed && typeof parsed === 'object' && 'code' in parsed) {
+        throw parsed;
+      }
+      throw { code: 'SERVER_ERROR', safe_message: err, recoverable: true };
     }
     throw {
       code: 'NETWORK_ERROR',

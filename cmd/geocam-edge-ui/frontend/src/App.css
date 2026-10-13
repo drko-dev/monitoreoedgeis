@@ -537,6 +537,11 @@ body {
   color: var(--text-muted);
 }
 
+.form-help {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
 .form-input {
   padding: 0.625rem 0.875rem;
   font-size: 1rem;
