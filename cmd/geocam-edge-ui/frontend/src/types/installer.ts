@@ -81,21 +81,23 @@ export interface VisionRuntimeStatus {
 }
 
 export type FullEdgePreparationState =
-  | 'initial'
-  | 'runtime_pack_detected'
-  | 'preparation_pending'
-  | 'verifying_integrity'
-  | 'installing_dependencies'
-  | 'preparing_worker'
-  | 'verifying_media'
-  | 'validating_model'
-  | 'runtime_ready'
-  | 'recoverable_error'
-  | 'blocked_error'
-  | 'cancelled'
-  | 'recovery_pending'
-  | 'recovering'
-  | 'recovered';
+  | 'NOT_PREPARED'
+  | 'CHECKING'
+  | 'PREPARING'
+  | 'VERIFYING'
+  | 'READY'
+  | 'RECOVERY_REQUIRED'
+  | 'FAILED'
+  | 'CANCELLED';
+
+export type ComponentStatus = 'PENDING' | 'IN_PROGRESS' | 'READY' | 'FAILED';
+
+export interface ComponentProgressItem {
+  key: string;
+  name: string;
+  status: ComponentStatus;
+  detail?: string;
+}
 
 export interface RuntimeCertification {
   certification_id: string;
@@ -128,6 +130,7 @@ export interface FullEdgePreparationSnapshot {
   error_code?: string;
   safe_message?: string;
   diagnostics_available: boolean;
+  components?: ComponentProgressItem[];
   certification?: RuntimeCertification;
 }
 

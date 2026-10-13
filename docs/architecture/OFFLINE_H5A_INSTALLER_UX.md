@@ -1,64 +1,91 @@
-# Offline H5A — Full Edge Installer UX Contract
+# Offline H5A — Full Edge Installer UX & Preparation State Contract
 
 ## Scope and status
 
-H5A adds an opt-in desktop UI and a typed Go/Wails boundary for a future hermetic Full Edge preparation executor. It does not provision a Runtime Pack, install dependencies, launch a Vision Worker, or certify a runtime. The default adapter is deliberately unavailable and reports `PREPARATION_NOT_INTEGRATED`; no successful state is simulated. H5A is not H5 complete and does not establish `RUNTIME_READY`.
+H5A implements the desktop installer user interface and backend preparation state contract for Full Edge offline provisioning. It establishes a typed Go/Wails boundary and a clear, non-technical operator interface for the "Preparar Full Edge" action.
 
-## Current installer seam
+H5A does **not** declare H5 complete, `RUNTIME_READY`, or `INFERENCE_READY`. It does not provision a live Runtime Pack, execute pip/curl/docker/brew commands, launch the Vision Worker, or connect to cameras. Production builds use the fail-closed `UnavailableFullEdgePreparation` adapter until H4/H6 dependencies are merged.
 
-The desktop app is a Wails bridge in `cmd/geocam-edge-ui/app.go`, with React UI under `cmd/geocam-edge-ui/frontend`. Existing `GetVisionRuntimeStatus` / `PrepareVisionRuntime` and `GetFFmpegStatus` / `InstallFFmpeg` remain the legacy path and can inspect/use host Python, pip, or platform package management. The H5A adapter is separate and does not call those methods.
+## Installer seam & architecture
 
-The new preparation panel is visible only when Full Edge is selected. Existing host-based setup controls are moved under the application's Advanced Details state and explicitly labeled as legacy and not offline-certified. They remain available for backward compatibility; they are not the normal H5A action.
+The desktop installer is a Wails bridge in `cmd/geocam-edge-ui/app.go`, with a React frontend under `cmd/geocam-edge-ui/frontend`.
+- Legacy setup paths (`GetVisionRuntimeStatus`, `PrepareVisionRuntime`, `GetFFmpegStatus`, `InstallFFmpeg`) remain intact for backward compatibility under an expandable "Detalles avanzados" section, clearly labeled as uncertified legacy host setup.
+- The new Full Edge preparation panel is visible when the operator selects Full Edge processing mode. It communicates exclusively through the typed `installer.FullEdgePreparationAPI` interface without shelling out to package managers or network tools.
 
-## UI/backend boundary
+## Backend preparation state contract
 
-`installer.FullEdgePreparationAPI` defines `Status`, `Start`, `Cancel`, `Diagnostic`, and `Recover`. The Wails bridge forwards those calls. The default `UnavailableFullEdgePreparation` returns a blocked status, rejects actions, and explains that no provisioning was attempted. H3/H4/H6 executors are not linked.
+The lifecycle is modeled by an explicit 8-state machine:
 
-The React service is a thin typed bridge. It falls back to the same blocked state when Wails bindings are unavailable (for example, browser preview). No frontend mock can report READY. The local hook prevents duplicate clicks within the view; the eventual backend must serialize across all callers/processes and implement idempotency for request IDs.
-
-## States and expected transitions
-
-| State | Meaning | User action |
+| State | Meaning | User action / Availability |
 | --- | --- | --- |
-| `initial` | No pack state has been resolved | None until backend detects a pack |
-| `runtime_pack_detected` | Pack is present and eligible for verification | Start preparation |
-| `preparation_pending` | Operation accepted | Wait / cancel only if backend permits |
-| `verifying_integrity` | Pack manifest and artifact hashes are checked | Wait |
-| `installing_dependencies` | Bundled dependencies are installed | Wait / safe cancellation only |
-| `preparing_worker` | Bundled worker is prepared | Wait |
-| `verifying_media` | Bundled FFmpeg/FFprobe are verified | Wait |
-| `validating_model` | Model authorization and integrity are checked | Wait |
-| `runtime_ready` | All backend certification gates passed | Read-only final status |
-| `recoverable_error` | Retry is explicitly safe | Retry only when backend says `retryable` |
-| `blocked_error` | Hard prerequisite or safety gate failed | Diagnostics; no retry unless a new backend status allows it |
-| `cancelled` | Operation cancelled; prior runtime must remain intact | Retry only if backend returns safe eligibility |
-| `recovery_pending` / `recovering` / `recovered` | Previous installation requires/restores recovery | Recover only when backend says `recovery_available` |
+| `NOT_PREPARED` | Runtime Pack not yet prepared or inspected | "Preparar Full Edge" available if pack detected |
+| `CHECKING` | Active inspection of environment, pack manifests, and prerequisites | Wait; cancellation allowed |
+| `PREPARING` | Active hermetic unpacking, wheelhouse installation, and worker setup | Wait; safe cancellation allowed |
+| `VERIFYING` | Active integrity validation, media checks, model authorization, and smoke test | Wait; safe cancellation allowed |
+| `READY` | Terminal state backed by complete, valid backend `RuntimeCertification` | Read-only certified status |
+| `RECOVERY_REQUIRED` | Previous interrupted run left an un-reconciled backup or required recovery | "Recuperar runtime anterior" available |
+| `FAILED` | Preparation failed (recoverable error or blocked prerequisite) | "Reintentar" if retryable; diagnostic available |
+| `CANCELLED` | User cancelled operation; prior runtime preserved intact | "Reintentar" available |
 
-Legal transitions are encoded by `CanTransitionPreparation`. A backend integration must persist operation identity and recovery status so restart/relaunch cannot silently convert partial preparation to READY.
+### State transitions
+
+Allowed transitions are strictly enforced by `CanTransitionPreparation`:
+- `NOT_PREPARED` → `CHECKING`, `PREPARING`, `FAILED`
+- `CHECKING` → `NOT_PREPARED`, `PREPARING`, `VERIFYING`, `READY`, `RECOVERY_REQUIRED`, `FAILED`, `CANCELLED`
+- `PREPARING` → `VERIFYING`, `FAILED`, `CANCELLED`, `RECOVERY_REQUIRED`
+- `VERIFYING` → `READY`, `FAILED`, `CANCELLED`, `RECOVERY_REQUIRED`
+- `READY` → `CHECKING` (on explicit operator re-check only)
+- `RECOVERY_REQUIRED` → `PREPARING`, `FAILED`
+- `FAILED` → `CHECKING`, `PREPARING` (retry), `RECOVERY_REQUIRED`
+- `CANCELLED` → `CHECKING`, `PREPARING`, `NOT_PREPARED`, `RECOVERY_REQUIRED`
+
+Direct illegal transitions (e.g. `NOT_PREPARED` → `READY`, `FAILED` → `READY`, `READY` → `PREPARING`) fail closed and are rejected.
+
+## Per-component progress reporting
+
+In addition to overall progress (0–100%), the contract reports real-time health across six runtime subsystems:
+1. **Python**: Python 3.11 Standalone (macOS arm64).
+2. **Wheelhouse**: Hermetic binary wheels (PyTorch, Torchvision, Ultralytics, Pillow).
+3. **Worker**: Vision Worker package & IPC interface.
+4. **FFmpeg**: Bundled static FFmpeg binary.
+5. **FFprobe**: Bundled static FFprobe binary.
+6. **Modelos autorizados**: Detection models (license authorization & weights integrity).
+
+Each component reports a `ComponentStatus`:
+- `PENDING`
+- `IN_PROGRESS`
+- `READY`
+- `FAILED`
 
 ## Readiness gates
 
-The Go contract and UI require `runtime_ready`, 100% progress, and a backend certification with non-empty certificate/runtime/model versions, valid SHA-256 values for both manifests, verified platform/evidence, runtime pack, dependencies, worker, FFmpeg, FFprobe, model authorization/integrity, successful inference smoke test, and certification timestamp. Python/dependency presence alone is insufficient. H5A's unavailable adapter never returns certification.
+The `READY` state is strictly gated by `CertifiedReady()`:
+1. Snapshot state must be `READY`.
+2. Overall progress must be exactly 100%.
+3. Every reported component must report `READY`.
+4. Backend `RuntimeCertification` must be non-nil and pass all 16 cryptographic and operational validations:
+   - Non-empty `CertificationID`, `RuntimePackVersion`, `Platform`, `ModelPackVersion`.
+   - Valid 64-character SHA-256 digests for `RuntimeManifestSHA256` and `ModelManifestSHA256`.
+   - `EvidenceLevel == "verified"`.
+   - `RuntimePackVerified == true`, `DependenciesVerified == true`, `VisionWorkerReady == true`.
+   - `FFmpegVerified == true`, `FFprobeVerified == true`.
+   - `ModelAuthorized == true` (strictly rejects unauthorized models / missing license approvals).
+   - `ModelIntegrityVerified == true`.
+   - `InferenceSmokeTestPassed == true`.
+   - Non-zero `CertifiedAt` timestamp.
 
-The final backend implementation must additionally validate each snapshot before publishing it and bind certification to the exact Runtime Pack, worker and model-pack compatibility versions. This UI contract is not a substitute for backend certification or H7 physical/offline certification.
+Readiness cannot be simulated by the UI, inferred from Python/dependencies presence alone, or triggered by a client timer.
 
-## Errors and diagnostics
+## Concurrency, idempotency & safety
 
-The UI maps known codes to localized, operator-safe messages for hash mismatch, missing dependency, insufficient disk, unsupported architecture, pending model license approval, unauthorized model, cancellation, and recovery pending. Unknown errors use a generic message. The diagnostic area is expandable; displayed text is bounded and redacts common host paths and secret-like values, and stack-trace-shaped text is replaced. The backend must still emit structured, sanitized diagnostics and must never send credentials, full environment values, or stack traces.
+- **In-process single-flight**: `PreparationStartGate` uses a mutex to serialize concurrent callers. Subsequent `Start` calls with the *same* `requestID` succeed idempotently; calls with a *different* `requestID` while an operation is active are rejected with `ErrPreparationInProgress`.
+- **Cancellation**: Safe cancellation is allowed only while preparation is active (`CHECKING`, `PREPARING`, `VERIFYING`). It preserves the existing runtime and reverts to `CANCELLED`.
+- **Recovery**: Interrupted executions that leave pending backups trigger `RECOVERY_REQUIRED`, enabling non-destructive restoration via `Recover`.
+- **Diagnostics sanitization**: Technical diagnostics redact absolute host filesystem paths (`[PATH]`), secret keywords (`[REDACTED]`), and stack trace patterns, preventing accidental leakage in non-technical UI views.
 
-Retry and cancellation availability come only from backend flags and state. Recovery does not delete backups; a future executor owns verified atomic replacement and rollback. H5A does not implement filesystem mutations.
+## Compatibility & dependencies
 
-## Compatibility and dependencies
-
-The new flow is opt-in and does not alter enrollment, current processing mode, daemon operation, or existing legacy APIs. Legacy setup is preserved behind Advanced Details and is explicitly not an offline-certified route.
-
-- H3: Runtime Pack / offline dependency artifacts and integrity contract remain unmerged; no H3 integration is performed here.
-- H4: bundled Vision Worker and FFmpeg/FFprobe integration remains pending.
-- H6: model authorization/version compatibility and related certification gates remain pending.
-- H7: offline/physical certification is separate; H5A cannot certify production readiness.
-
-## Tests and verification scope
-
-Go tests cover state validation, certification gates, allowed transitions, unavailable adapter behavior, and the local single-flight/idempotency helper. Frontend unit tests cover readiness gating, action eligibility, cancellation/recovery state checks, bounded progress/error mapping, and diagnostic redaction. These tests use no cameras or external services and do not execute real provisioning.
-
-Pending H5B: connect a real backend executor only after H3/H4/H6 contracts are integrated; add end-to-end UI/backend tests for all state transitions, persistence, process interruption, rollback, and offline behavior; regenerate Wails bindings using the pinned Wails toolchain; then run the Runtime Pack and H7 certification suite.
+- H1–H3 contracts (RuntimeManifest, EmbeddedPython, Wheelhouse) are reused as merged.
+- H4 (bundled FFmpeg and Vision Worker) is pending integration.
+- H6 (model authorization, version compatibility, atomic upgrade/rollback) is pending integration.
+- H7 (offline certification and physical validation harness) is pending integration.

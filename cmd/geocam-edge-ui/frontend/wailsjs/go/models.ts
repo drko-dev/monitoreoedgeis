@@ -558,6 +558,25 @@ export namespace installer {
 	    }
 	}
 
+	export class ComponentProgressItem {
+	    key: string;
+	    name: string;
+	    status: string;
+	    detail?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new ComponentProgressItem(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.key = source["key"];
+	        this.name = source["name"];
+	        this.status = source["status"];
+	        this.detail = source["detail"];
+	    }
+	}
+
 	export class FullEdgePreparationSnapshot {
 	    state: string;
 	    stage: string;
@@ -570,6 +589,7 @@ export namespace installer {
 	    error_code: string;
 	    safe_message: string;
 	    diagnostics_available: boolean;
+	    components?: ComponentProgressItem[];
 	    certification?: RuntimeCertification;
 
 	    static createFrom(source: any = {}) {
@@ -589,6 +609,7 @@ export namespace installer {
 	        this.error_code = source["error_code"];
 	        this.safe_message = source["safe_message"];
 	        this.diagnostics_available = source["diagnostics_available"];
+	        this.components = this.convertValues(source["components"], ComponentProgressItem);
 	        this.certification = this.convertValues(source["certification"], RuntimeCertification);
 	    }
 

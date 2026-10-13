@@ -10,25 +10,78 @@ import (
 	"time"
 )
 
+// FullEdgePreparationState represents the high-level preparation state machine
+// for the Full Edge offline runtime contract.
 type FullEdgePreparationState string
 
 const (
-	PreparationInitial                FullEdgePreparationState = "initial"
-	PreparationPackDetected           FullEdgePreparationState = "runtime_pack_detected"
-	PreparationPending                FullEdgePreparationState = "preparation_pending"
-	PreparationVerifyingIntegrity     FullEdgePreparationState = "verifying_integrity"
-	PreparationInstallingDependencies FullEdgePreparationState = "installing_dependencies"
-	PreparationPreparingWorker        FullEdgePreparationState = "preparing_worker"
-	PreparationVerifyingMedia         FullEdgePreparationState = "verifying_media"
-	PreparationValidatingModel        FullEdgePreparationState = "validating_model"
-	PreparationRuntimeReady           FullEdgePreparationState = "runtime_ready"
-	PreparationRecoverableError       FullEdgePreparationState = "recoverable_error"
-	PreparationBlockedError           FullEdgePreparationState = "blocked_error"
-	PreparationCancelled              FullEdgePreparationState = "cancelled"
-	PreparationRecoveryPending        FullEdgePreparationState = "recovery_pending"
-	PreparationRecovering             FullEdgePreparationState = "recovering"
-	PreparationRecovered              FullEdgePreparationState = "recovered"
+	StateNotPrepared      FullEdgePreparationState = "NOT_PREPARED"
+	StateChecking         FullEdgePreparationState = "CHECKING"
+	StatePreparing        FullEdgePreparationState = "PREPARING"
+	StateVerifying        FullEdgePreparationState = "VERIFYING"
+	StateReady            FullEdgePreparationState = "READY"
+	StateRecoveryRequired FullEdgePreparationState = "RECOVERY_REQUIRED"
+	StateFailed           FullEdgePreparationState = "FAILED"
+	StateCancelled        FullEdgePreparationState = "CANCELLED"
 )
+
+// Standard preparation state constants
+const (
+	PreparationNotPrepared      = StateNotPrepared
+	PreparationChecking         = StateChecking
+	PreparationPreparing        = StatePreparing
+	PreparationVerifying        = StateVerifying
+	PreparationReady            = StateReady
+	PreparationRecoveryRequired = StateRecoveryRequired
+	PreparationFailed           = StateFailed
+	PreparationCancelled        = StateCancelled
+
+	// Deprecated lowercase aliases mapped to canonical states
+	PreparationInitial                = StateNotPrepared
+	PreparationPackDetected           = StateNotPrepared
+	PreparationPending                = StateChecking
+	PreparationVerifyingIntegrity     = StateVerifying
+	PreparationInstallingDependencies = StatePreparing
+	PreparationPreparingWorker        = StatePreparing
+	PreparationVerifyingMedia         = StateVerifying
+	PreparationValidatingModel        = StateVerifying
+	PreparationRuntimeReady           = StateReady
+	PreparationRecoverableError       = StateFailed
+	PreparationBlockedError           = StateFailed
+	PreparationRecoveryPending        = StateRecoveryRequired
+	PreparationRecovering             = StatePreparing
+	PreparationRecovered              = StateNotPrepared
+)
+
+// ComponentStatus represents the health and readiness of an individual runtime subsystem.
+type ComponentStatus string
+
+const (
+	ComponentStatusPending    ComponentStatus = "PENDING"
+	ComponentStatusInProgress ComponentStatus = "IN_PROGRESS"
+	ComponentStatusReady      ComponentStatus = "READY"
+	ComponentStatusFailed     ComponentStatus = "FAILED"
+)
+
+// ComponentProgressItem reports progress for each required runtime subsystem.
+type ComponentProgressItem struct {
+	Key    string          `json:"key"`    // "python", "wheelhouse", "worker", "ffmpeg", "ffprobe", "authorized_models"
+	Name   string          `json:"name"`   // "Python", "Wheelhouse", "Vision Worker", "FFmpeg", "FFprobe", "Modelos autorizados"
+	Status ComponentStatus `json:"status"` // "PENDING", "IN_PROGRESS", "READY", "FAILED"
+	Detail string          `json:"detail,omitempty"`
+}
+
+// DefaultComponentProgress returns the initial pending progress list for all 6 required components.
+func DefaultComponentProgress() []ComponentProgressItem {
+	return []ComponentProgressItem{
+		{Key: "python", Name: "Python", Status: ComponentStatusPending},
+		{Key: "wheelhouse", Name: "Wheelhouse", Status: ComponentStatusPending},
+		{Key: "worker", Name: "Vision Worker", Status: ComponentStatusPending},
+		{Key: "ffmpeg", Name: "FFmpeg", Status: ComponentStatusPending},
+		{Key: "ffprobe", Name: "FFprobe", Status: ComponentStatusPending},
+		{Key: "authorized_models", Name: "Modelos autorizados", Status: ComponentStatusPending},
+	}
+}
 
 var (
 	ErrPreparationInProgress = errors.New("Full Edge preparation is already in progress")
@@ -91,11 +144,23 @@ type FullEdgePreparationSnapshot struct {
 	ErrorCode            string                   `json:"error_code,omitempty"`
 	SafeMessage          string                   `json:"safe_message,omitempty"`
 	DiagnosticsAvailable bool                     `json:"diagnostics_available"`
+	Components           []ComponentProgressItem  `json:"components,omitempty"`
 	Certification        *RuntimeCertification    `json:"certification,omitempty"`
 }
 
 func (s FullEdgePreparationSnapshot) CertifiedReady() bool {
-	return s.State == PreparationRuntimeReady && s.ProgressPercent == 100 && s.Certification.Valid()
+	if s.State != StateReady || s.ProgressPercent != 100 || !s.Certification.Valid() {
+		return false
+	}
+	// Verify that all 6 required components are marked READY
+	if len(s.Components) > 0 {
+		for _, comp := range s.Components {
+			if comp.Status != ComponentStatusReady {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func ValidateFullEdgePreparationSnapshot(s FullEdgePreparationSnapshot) error {
@@ -105,29 +170,27 @@ func ValidateFullEdgePreparationSnapshot(s FullEdgePreparationSnapshot) error {
 	if s.ProgressPercent < 0 || s.ProgressPercent > 100 {
 		return errors.New("Full Edge preparation progress must be between 0 and 100")
 	}
-	if s.State == PreparationRuntimeReady && !s.CertifiedReady() {
-		return errors.New("runtime_ready requires complete backend certification")
+	if s.State == StateReady && !s.CertifiedReady() {
+		return errors.New("READY requires complete backend certification and all components READY")
 	}
-	if s.State != PreparationRuntimeReady && s.Certification != nil && s.Certification.Valid() {
+	if s.State != StateReady && s.Certification != nil && s.Certification.Valid() {
 		return errors.New("complete certification cannot accompany a non-ready state")
 	}
-	if s.CanStart && s.State != PreparationPackDetected && !(s.State == PreparationRecoverableError && s.Retryable) {
-		return errors.New("preparation can start only when a pack is detected or a retry is safe")
+	if s.CanStart && s.State != StateNotPrepared && !(s.State == StateFailed && s.Retryable) && s.State != StateCancelled {
+		return errors.New("preparation can start only when NOT_PREPARED, CANCELLED, or safe retry on FAILED")
 	}
 	if s.CancellationAllowed && !PreparationIsActive(s.State) {
 		return errors.New("cancellation is allowed only while preparation is active")
 	}
-	if s.RecoveryAvailable && s.State != PreparationRecoveryPending {
-		return errors.New("recovery is available only when recovery is pending")
+	if s.RecoveryAvailable && s.State != StateRecoveryRequired {
+		return errors.New("recovery is available only when recovery is required")
 	}
 	return nil
 }
 
 func PreparationIsActive(state FullEdgePreparationState) bool {
 	switch state {
-	case PreparationPending, PreparationVerifyingIntegrity, PreparationInstallingDependencies,
-		PreparationPreparingWorker, PreparationVerifyingMedia, PreparationValidatingModel,
-		PreparationRecovering:
+	case StateChecking, StatePreparing, StateVerifying:
 		return true
 	default:
 		return false
@@ -136,11 +199,8 @@ func PreparationIsActive(state FullEdgePreparationState) bool {
 
 func knownPreparationState(state FullEdgePreparationState) bool {
 	switch state {
-	case PreparationInitial, PreparationPackDetected, PreparationPending, PreparationVerifyingIntegrity,
-		PreparationInstallingDependencies, PreparationPreparingWorker, PreparationVerifyingMedia,
-		PreparationValidatingModel, PreparationRuntimeReady, PreparationRecoverableError,
-		PreparationBlockedError, PreparationCancelled, PreparationRecoveryPending,
-		PreparationRecovering, PreparationRecovered:
+	case StateNotPrepared, StateChecking, StatePreparing, StateVerifying,
+		StateReady, StateRecoveryRequired, StateFailed, StateCancelled:
 		return true
 	default:
 		return false
@@ -149,19 +209,50 @@ func knownPreparationState(state FullEdgePreparationState) bool {
 
 func CanTransitionPreparation(from, to FullEdgePreparationState) bool {
 	allowed := map[FullEdgePreparationState]map[FullEdgePreparationState]bool{
-		PreparationInitial:                {PreparationPackDetected: true, PreparationBlockedError: true},
-		PreparationPackDetected:           {PreparationPending: true, PreparationBlockedError: true},
-		PreparationPending:                {PreparationVerifyingIntegrity: true, PreparationRecoverableError: true, PreparationBlockedError: true, PreparationCancelled: true},
-		PreparationVerifyingIntegrity:     {PreparationInstallingDependencies: true, PreparationPreparingWorker: true, PreparationRecoverableError: true, PreparationBlockedError: true, PreparationCancelled: true},
-		PreparationInstallingDependencies: {PreparationPreparingWorker: true, PreparationRecoverableError: true, PreparationBlockedError: true, PreparationCancelled: true},
-		PreparationPreparingWorker:        {PreparationVerifyingMedia: true, PreparationRecoverableError: true, PreparationBlockedError: true, PreparationCancelled: true},
-		PreparationVerifyingMedia:         {PreparationValidatingModel: true, PreparationRecoverableError: true, PreparationBlockedError: true, PreparationCancelled: true},
-		PreparationValidatingModel:        {PreparationRuntimeReady: true, PreparationRecoverableError: true, PreparationBlockedError: true, PreparationCancelled: true},
-		PreparationRecoverableError:       {PreparationPending: true, PreparationRecoveryPending: true, PreparationBlockedError: true},
-		PreparationCancelled:              {PreparationPending: true, PreparationRecoveryPending: true},
-		PreparationRecoveryPending:        {PreparationRecovering: true, PreparationBlockedError: true},
-		PreparationRecovering:             {PreparationRecovered: true, PreparationRecoverableError: true, PreparationBlockedError: true},
-		PreparationRecovered:              {PreparationPackDetected: true, PreparationPending: true},
+		StateNotPrepared: {
+			StateChecking:  true,
+			StatePreparing: true,
+			StateFailed:    true,
+		},
+		StateChecking: {
+			StateNotPrepared:      true,
+			StatePreparing:        true,
+			StateVerifying:        true,
+			StateReady:            true,
+			StateRecoveryRequired: true,
+			StateFailed:           true,
+			StateCancelled:        true,
+		},
+		StatePreparing: {
+			StateVerifying:        true,
+			StateFailed:           true,
+			StateCancelled:        true,
+			StateRecoveryRequired: true,
+		},
+		StateVerifying: {
+			StateReady:            true,
+			StateFailed:           true,
+			StateCancelled:        true,
+			StateRecoveryRequired: true,
+		},
+		StateReady: {
+			StateChecking: true,
+		},
+		StateRecoveryRequired: {
+			StatePreparing: true,
+			StateFailed:    true,
+		},
+		StateFailed: {
+			StateChecking:         true,
+			StatePreparing:        true,
+			StateRecoveryRequired: true,
+		},
+		StateCancelled: {
+			StateChecking:         true,
+			StatePreparing:        true,
+			StateNotPrepared:      true,
+			StateRecoveryRequired: true,
+		},
 	}
 	return allowed[from][to]
 }
@@ -212,8 +303,11 @@ func (UnavailableFullEdgePreparation) Diagnostic(context.Context, string) (FullE
 		Code:    "PREPARATION_NOT_INTEGRATED",
 		Summary: "Offline Full Edge preparation is not available in this build; no provisioning was attempted.",
 		Checks: []PreparationCheckResult{
-			{Name: "Runtime Pack executor", Status: "not_integrated"},
-			{Name: "H3/H4/H6 preparation adapters", Status: "pending"},
+			{Name: "Python hermetic runtime", Status: "not_provisioned"},
+			{Name: "Wheelhouse dependencies", Status: "not_installed"},
+			{Name: "Vision Worker bundle", Status: "not_wired"},
+			{Name: "FFmpeg/FFprobe binaries", Status: "not_bundled"},
+			{Name: "Authorized models", Status: "unlicensed_or_pending"},
 		},
 	}, nil
 }
@@ -224,7 +318,7 @@ func (UnavailableFullEdgePreparation) Recover(context.Context, string) (FullEdge
 
 func unavailablePreparationSnapshot() FullEdgePreparationSnapshot {
 	return FullEdgePreparationSnapshot{
-		State:                PreparationBlockedError,
+		State:                StateFailed,
 		ProgressPercent:      0,
 		CanStart:             false,
 		Retryable:            false,
@@ -233,6 +327,7 @@ func unavailablePreparationSnapshot() FullEdgePreparationSnapshot {
 		ErrorCode:            "PREPARATION_NOT_INTEGRATED",
 		SafeMessage:          "Offline Full Edge preparation is not integrated in this build. No files or services were changed.",
 		DiagnosticsAvailable: true,
+		Components:           DefaultComponentProgress(),
 	}
 }
 

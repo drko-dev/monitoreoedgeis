@@ -12,7 +12,7 @@ import type {
 import { isFullEdgePreparationSnapshot } from '../utils/fullEdgePreparation';
 
 const unavailableSnapshot: FullEdgePreparationSnapshot = {
-  state: 'blocked_error',
+  state: 'FAILED',
   progress_percent: 0,
   can_start: false,
   retryable: false,
@@ -21,6 +21,14 @@ const unavailableSnapshot: FullEdgePreparationSnapshot = {
   error_code: 'PREPARATION_NOT_INTEGRATED',
   safe_message: 'Offline Full Edge preparation is not integrated in this build.',
   diagnostics_available: true,
+  components: [
+    { key: 'python', name: 'Python', status: 'PENDING' },
+    { key: 'wheelhouse', name: 'Wheelhouse', status: 'PENDING' },
+    { key: 'worker', name: 'Vision Worker', status: 'PENDING' },
+    { key: 'ffmpeg', name: 'FFmpeg', status: 'PENDING' },
+    { key: 'ffprobe', name: 'FFprobe', status: 'PENDING' },
+    { key: 'authorized_models', name: 'Modelos autorizados', status: 'PENDING' },
+  ],
 };
 
 export async function fetchFullEdgePreparationStatus(): Promise<FullEdgePreparationSnapshot> {

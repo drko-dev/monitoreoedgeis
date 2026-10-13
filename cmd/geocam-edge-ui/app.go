@@ -97,11 +97,12 @@ func validatedPreparationSnapshot(snapshot installer.FullEdgePreparationSnapshot
 	}
 	if installer.ValidateFullEdgePreparationSnapshot(snapshot) != nil {
 		return installer.FullEdgePreparationSnapshot{
-			State:                installer.PreparationBlockedError,
+			State:                installer.StateFailed,
 			ProgressPercent:      0,
 			ErrorCode:            "INVALID_PREPARATION_STATUS",
 			SafeMessage:          "Full Edge preparation status failed validation.",
 			DiagnosticsAvailable: true,
+			Components:           installer.DefaultComponentProgress(),
 		}, nil
 	}
 	return snapshot, nil

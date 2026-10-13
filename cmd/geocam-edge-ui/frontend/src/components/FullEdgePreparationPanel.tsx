@@ -12,7 +12,7 @@ interface FullEdgePreparationPanelProps {
 
 function stateLabelKey(snapshot: FullEdgePreparationSnapshot | null, ready: boolean): TranslationKey {
   if (!snapshot) return 'preparation.state.loading';
-  if (snapshot.state === 'runtime_ready' && !ready) return 'preparation.state.invalidCertification';
+  if (snapshot.state === 'READY' && !ready) return 'preparation.state.invalidCertification';
   return `preparation.state.${snapshot.state}` as TranslationKey;
 }
 
@@ -69,7 +69,33 @@ export const FullEdgePreparationPanel: React.FC<FullEdgePreparationPanelProps> =
         </div>
       )}
 
-      {snapshot && snapshot.state !== 'initial' && snapshot.state !== 'blocked_error' && (
+      {snapshot && snapshot.components && snapshot.components.length > 0 && (
+        <div className="full-edge-preparation-components">
+          <h4 className="full-edge-components-title">{t('preparation.componentsTitle')}</h4>
+          <ul className="full-edge-components-list">
+            {snapshot.components.map((comp) => {
+              const compNameKey = `preparation.component.${comp.key}` as TranslationKey;
+              const compStatusKey = `preparation.componentStatus.${comp.status}` as TranslationKey;
+              const badgeVariant =
+                comp.status === 'READY'
+                  ? 'badge-success'
+                  : comp.status === 'FAILED'
+                  ? 'badge-danger'
+                  : comp.status === 'IN_PROGRESS'
+                  ? 'badge-warning'
+                  : 'badge-neutral';
+              return (
+                <li key={comp.key} className="component-item">
+                  <span className="component-name">{t(compNameKey) || comp.name}</span>
+                  <span className={`badge ${badgeVariant}`}>{t(compStatusKey)}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+
+      {snapshot && snapshot.state !== 'NOT_PREPARED' && snapshot.state !== 'FAILED' && (
         <div className="full-edge-preparation-progress">
           <div className="full-edge-preparation-progress-label">
             <span>{t('preparation.currentStage', { stage: t(stageLabelKey(snapshot.state)) })}</span>
@@ -93,7 +119,7 @@ export const FullEdgePreparationPanel: React.FC<FullEdgePreparationPanelProps> =
           loading={busy && !snapshot?.cancellation_allowed}
           disabled={loading || busy || !snapshot?.can_start}
         >
-          {snapshot?.state === 'recoverable_error' ? t('preparation.retry') : t('preparation.prepare')}
+          {snapshot?.state === 'FAILED' && snapshot?.retryable ? t('preparation.retry') : t('preparation.prepare')}
         </Button>
         {snapshot?.cancellation_allowed && (
           <Button variant="secondary" onClick={() => void cancel()} disabled={busy}>
