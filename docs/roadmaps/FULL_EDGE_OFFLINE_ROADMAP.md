@@ -36,7 +36,7 @@ This document establishes the official engineering roadmap to transition GEO CAM
 
 ---
 
-### Hito H0 — Baseline y Arquitectura (Current)
+### Hito H0 — Baseline y Arquitectura (COMPLETADO — PR #137)
 
 - **Objetivo:** Auditar todos los componentes existentes, formalizar el diseño técnico del Runtime Pack versionado, evaluar y decidir la estrategia de packaging para macOS arm64, y establecer el roadmap ejecutable.
 - **Dependencias:** PRs #263, #264 y #136 mergeados en `main`.
@@ -52,36 +52,58 @@ This document establishes the official engineering roadmap to transition GEO CAM
   - Contratos de compatibilidad e integridad definidos.
   - Roadmap H0–H9 documentado con criterios verificables.
   - Cero cambios de código funcional en este hito.
-  - PR documental creado.
+  - PR documental creado y mergeado (#137).
 - **Riesgos:** Supuestos erróneos sobre la portabilidad de venvs entre hosts de macOS.
 - **Bloqueos:** Ninguno.
-- **Entregable:** PR de documentación (`docs/full-edge-offline-h0`).
-- **Estado inicial verificable:** `main @ 999874e5f63d389127e13cc096d66e8e58eec251`.
+- **Entregable:** PR de documentación (`docs/full-edge-offline-h0`, PR #137 MERGED en `911a0e8c62a9d7e33059de33501977e5551f9bf6`).
 
 ---
 
-### Hito H1 — Runtime Pack Specification y Manifest
+### Hito H1 — Runtime Pack Specification y Manifest (COMPLETADO — Branch feat/full-edge-runtime-manifest)
 
 - **Objetivo:** Definir e implementar el modelo de datos formal en Go y JSON para el `runtime-manifest.json`, integrando verificación criptográfica SHA-256 estricta.
-- **Dependencias:** H0 aprobado y mergeado.
+- **Dependencias:** H0 aprobado y mergeado (#137).
 - **Archivos/Componentes involucrados:**
   - `internal/installer/runtime_manifest.go`
   - `internal/installer/assets/runtime-manifest.json`
   - `internal/installer/runtime_manifest_test.go`
-- **Implementación esperada:**
-  - Structs `RuntimeManifest`, `PythonSpec`, `DependencySpec`, `BinarySpec`.
-  - Parser y validador de integridad `ValidateRuntimeManifest(path string) (*RuntimeManifest, error)`.
-  - Verificación de hashes SHA-256 y tamaño exacto en bytes de cada archivo listado.
-- **Tests obligatorios:**
-  - Parsing de manifiesto válido.
-  - Detección de manifiesto corrupto, campos faltantes o hashes inválidos.
-  - Compatibilidad de versiones de Go con tipos embebidos.
+- **Implementación completada:**
+  - Modelos Go: `RuntimeManifest`, `PythonSpec`, `WorkerSpec`, `BinarySpec`, `DependencySpec`, `CompatibilitySpec`, `ArtifactsValidationReport`, `ArtifactValidationResult`.
+  - Parsers y validadores: `ParseRuntimeManifest`, `LoadRuntimeManifest`, `LoadEmbeddedRuntimeManifest`, `ValidateRuntimeManifest`.
+  - Verificación exhaustiva: `ValidateSchema()`, `ValidateCompatibility()`, `ValidateArtifacts()`, `ValidateArtifactsWithProgress()`.
+  - Reglas de seguridad: resolución canónica de la raíz y de cada componente (`filepath.EvalSymlinks`), confinamiento físico sin comparación de prefijos de strings (`isPathConfined`), preservación de symlinks internos legítimos, rechazo de symlinks rotos/cíclicos/escapes (tanto hojas como directorios padre), deduplicación y normalización de sintaxis de rutas (`canonicalizeManifestPath`), prevención de operadores de versiones abiertas (`>=, <=, ~, ^, *`) y streaming de SHA-256 (`hashFileSHA256`).
+- **Tests obligatorios (suite table-driven y seguridad de symlinks ejecutados con -race):**
+  1. Manifiesto válido (synthetic fixture).
+  2. JSON corrupto / malformado.
+  3. Schema_version desconocido / no soportado.
+  4. Campo obligatorio faltante (missing required fields).
+  5. Hash SHA-256 inválido (no-hex, longitud incorrecta).
+  6. Tamaño incorrecto (spec <= 0 y mismatch físico).
+  7. Archivo físico ausente (`ErrArtifactMissing`).
+  8. Archivo truncado (`ErrArtifactCorrupted`).
+  9. Archivo modificado / hash mismatch (`ErrArtifactCorrupted`).
+  10. Arquitectura incompatible (`arm64` vs `amd64`).
+  11. ABI / plataforma incompatible (`darwin` vs `linux`).
+  12. Versiones malformadas o rangos abiertos (`ultralytics>=8.3`).
+  13. Rutas absolutas (`/bin/python`).
+  14. Path traversal (`../../etc/passwd`).
+  15. Duplicados (binary names, dependency filenames, relative paths).
+  16. Seguridad de symlinks:
+      - Symlink de hoja que escapa (`TestRuntimeManifest_Case16_LeafSymlinkEscape`).
+      - Symlink de directorio padre que escapa (`TestRuntimeManifest_ParentSymlinkEscape`).
+      - Symlinks internos legítimos confinados (`TestRuntimeManifest_ValidInternalSymlinks`).
+      - Symlinks rotos en hoja y directorio padre (`TestRuntimeManifest_BrokenSymlink`).
+      - Ciclos de symlinks en hojas y directorios (`TestRuntimeManifest_CyclicSymlink`).
+      - Semántica de raíz como symlink válida/rota/cíclica (`TestRuntimeManifest_SymlinkRoot`).
+      - Normalización de rutas duplicadas (`TestRuntimeManifest_DuplicateNormalizedPaths`).
+  17. Archivo grande validado mediante streaming.
+  18. Manifiesto con entradas en distinto orden.
 - **Criterios de aceptación (DONE):**
   - Esquema JSON documentado y embebido en Go.
-  - 100% de tests unitarios aprobados.
-- **Riesgos:** Discrepancias entre las versiones de dependencias del manifiesto y los wheels reales.
+  - 100% de tests unitarios aprobados (`go test -race ./internal/installer/...`).
+- **Riesgos:** Mitigado TOCTOU mediante especificación de staging en 0700 y rename atómico para H6.
 - **Bloqueos:** Ninguno.
-- **Entregable:** Paquete `internal/installer` extendido con soporte de manifiesto.
+- **Entregable:** Branch `feat/full-edge-runtime-manifest` con suite de tests y manifiesto base.
 
 ---
 

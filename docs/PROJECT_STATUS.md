@@ -5,17 +5,28 @@
 
 ## Current Active Initiative: Full Edge Self-Contained Offline Runtime
 
-### Hito OFFLINE-H0: Baseline y Arquitectura (Current)
-- **Branch:** `docs/full-edge-offline-h0`
-- **Base:** `main @ 999874e5f63d389127e13cc096d66e8e58eec251`
-- **Objective:** Definición de la arquitectura técnica y el roadmap ejecutable para un Full Edge 100% self-contained y offline en el instalador de escritorio, priorizando macOS Apple Silicon (arm64, M1–M4).
-- **Decisión de Packaging:** Python Standalone hermético (3.11.x) + Wheelhouse offline con pins exactos (`--no-index --find-links`) + FFmpeg estático bundled. Se descarta la copia cruda de venv (shebangs y paths absolutos frágiles) y la dependencia de Python de sistema o Homebrew (que en máquinas limpias dispara diálogo de Xcode CLT o falla si solo existe Python 3.14).
-- **Integridad y Resiliencia:** Ciclo de 4 estados (`VALID`, `MISSING`, `CORRUPTED`, `INCOMPATIBLE`), extracción en directorio staging `.tmp`, verificación SHA-256 de cada archivo contra `runtime-manifest.json`, swap atómico (`os.Rename`) y rollback automático.
-- **Licensing Gate:** `MODEL_REDISTRIBUTION_APPROVED=false` estrictamente mantenido. El runtime offline técnico queda desacoplado de la publicación de pesos comerciales (`RUNTIME_OFFLINE_READY=true`, `MODEL_PACK_RELEASE_BLOCKED=true`).
+### Hito OFFLINE-H1: Runtime Pack Specification & Manifest (Current)
+- **Branch:** `feat/full-edge-runtime-manifest`
+- **Base:** `main @ 911a0e8c62a9d7e33059de33501977e5551f9bf6` (después del merge de H0 en PR #137)
+- **Objective:** Definición e implementación del modelo formal de datos en Go y JSON para el `runtime-manifest.json`, integrando verificación criptográfica SHA-256 estricta, compatibilidad de plataforma y suite de tests table-driven de 18 escenarios adversariales.
+- **Implementación:**
+  - `internal/installer/runtime_manifest.go`: Contrato de runtime manifest, tipado estricto, validadores (`ValidateSchema`, `ValidateCompatibility`, `ValidateArtifactsWithProgress`), resolución canónica de la raíz y de cada componente (`filepath.EvalSymlinks`), confinamiento físico sin comparación de prefijos de strings (`isPathConfined`), preservación de symlinks internos legítimos, rechazo de symlinks rotos/cíclicos/escapes (tanto hojas como directorios padre), deduplicación y normalización de sintaxis de rutas (`canonicalizeManifestPath`), prevención de operadores de versiones abiertas (`>=, <=, ~, ^, *`) y streaming de SHA-256 (`hashFileSHA256`).
+  - `internal/installer/types.go`: Implementación de `Unwrap() error` y campo `Err error` en `SafeError` para interoperabilidad idiomática con `errors.Is`.
+  - `internal/installer/assets/runtime-manifest.json`: Fixture y especificación inicial versionada para `darwin/arm64`.
+  - `internal/installer/runtime_manifest_test.go`: Suite de tests table-driven y suites especializadas de symlink security (escapes de padre, escapes de hoja, symlinks internos válidos, rotos, cíclicos, root symlink, duplicados normalizados) aprobadas bajo `-race`.
+- **Garantías TOCTOU (Milestone H6):** Documentado explícitamente que la validación en tiempo de inspección no elimina por sí sola condiciones de carrera TOCTOU concurrentes; la garantía fuerte de activación se alcanzará en H6 mediante staging en directorio aislado `0700` y swap atómico con `os.Rename`.
+- **Known Technical Debt (Monitoreado):**
+  - `internal/heartbeat/saas_outage_test.go`: `TestW5_TransientFailuresBackOffInsteadOfHammering` tiene potencial de flakiness por contención de scheduling debido a `fakeSaaS` inicializando en `modeOK` antes de `setMode(modeUnavailable)` con `recordingClock`. Registrado como deuda técnica conocida sin modificar la suite de heartbeat en este hito.
+- **Licensing Gate:** `MODEL_REDISTRIBUTION_APPROVED=false` estrictamente mantenido (`RUNTIME_OFFLINE_READY=true`, `MODEL_PACK_RELEASE_BLOCKED=true`).
 - **Documentos de Referencia:**
   - Arquitectura detallada: `docs/architecture/FULL_EDGE_SELF_CONTAINED.md`
   - Roadmap maestro H0–H9: `docs/roadmaps/FULL_EDGE_OFFLINE_ROADMAP.md`
   - Estado de simplificación: `docs/architecture/GEO_CAM_SIMPLIFICATION_STATUS.md`
+
+### Hito OFFLINE-H0: Baseline y Arquitectura (MERGED)
+- **PR:** #137 (Merged en `911a0e8c62a9d7e33059de33501977e5551f9bf6`)
+- **Resumen:** Auditoría de componentes existentes, justificación técnica del packaging (Python Standalone + Pinned Wheelhouse Bootstrap para macOS arm64) y formalización del roadmap H0–H9.
+
 
 ## Desktop Installer Releases
 
