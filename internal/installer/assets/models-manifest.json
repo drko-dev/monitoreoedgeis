@@ -1,0 +1,29 @@
+{
+  "pack_version": "1.0.0",
+  "worker_compatibility": ">=1.0.0",
+  "runtime_compatibility": {
+    "python": ">=3.9,<3.13",
+    "torch": ">=2.0.0",
+    "ultralytics": ">=8.0.0"
+  },
+  "models": [
+    {
+      "name": "yolo11s-pose.pt",
+      "filename": "yolo11s-pose.pt",
+      "version": "11s-pose",
+      "purpose": "pose_estimation",
+      "min_size_bytes": 10000000,
+      "expected_size_bytes": 19688560,
+      "sha256": "43950efd914d79ba4a2ff40994f79496aa260a9f5d378ee091c667ce19d45863"
+    },
+    {
+      "name": "yolo11n.pt",
+      "filename": "yolo11n.pt",
+      "version": "11n",
+      "purpose": "object_detection",
+      "min_size_bytes": 3000000,
+      "expected_size_bytes": 5613764,
+      "sha256": "0ebbc80d4a7680d14987a577cd21342b65ecfd94632bd9a8da63ae6417644ee1"
+    }
+  ]
+}

@@ -126,3 +126,85 @@ func errorDetail(body []byte) string {
 	}
 	return string(body)
 }
+
+// DiscoveredCameraReport is one camera discovered on the local LAN.
+type DiscoveredCameraReport struct {
+	CandidateKey  string `json:"candidate_key"`
+	Manufacturer  string `json:"manufacturer,omitempty"`
+	Model         string `json:"model,omitempty"`
+	StreamURI     string `json:"stream_uri,omitempty"`
+	Endpoint      string `json:"endpoint,omitempty"`
+	ChannelNumber int    `json:"channel_number,omitempty"`
+	HardwareID    string `json:"hardware_id,omitempty"`
+}
+
+type discoveredBatchRequest struct {
+	Cameras []DiscoveredCameraReport `json:"cameras"`
+}
+
+// CameraReconciliationResult reports the outcome of reconciling a discovered camera.
+type CameraReconciliationResult struct {
+	Result    string `json:"result"`
+	Action    string `json:"action"`
+	CameraID  int64  `json:"camera_id"`
+	BindingID int64  `json:"binding_id"`
+	Status    string `json:"status"`
+	Error     string `json:"error,omitempty"`
+}
+
+type reconciliationEnvelope struct {
+	Reconciliation CameraReconciliationResult `json:"reconciliation"`
+}
+
+type batchReconciliationEnvelope struct {
+	Reconciliations []CameraReconciliationResult `json:"reconciliations"`
+}
+
+// ReconcileCamera reports a discovered camera to the SaaS to reconcile IP/DHCP changes or status.
+func (c *Client) ReconcileCamera(ctx context.Context, deviceID, credential string, req DiscoveredCameraReport) (*CameraReconciliationResult, error) {
+	path := fmt.Sprintf("%s/reconcile", CameraOnboardingPath)
+	status, header, body, err := c.do(ctx, http.MethodPost, path, deviceID, credential, req)
+	if err != nil {
+		return nil, err
+	}
+	switch status {
+	case http.StatusOK:
+		var env reconciliationEnvelope
+		if jsonErr := json.Unmarshal(body, &env); jsonErr != nil {
+			return nil, fmt.Errorf("%w: decoding reconciliation response: %v", ErrUnexpectedStatus, jsonErr)
+		}
+		return &env.Reconciliation, nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return nil, fmt.Errorf("%w (status %d)", ErrUnauthorized, status)
+	case http.StatusTooManyRequests:
+		return nil, &RateLimitError{RetryAfter: parseRetryAfter(header)}
+	case http.StatusNotFound:
+		return nil, fmt.Errorf("camera candidate not found for reconciliation: %s", errorDetail(body))
+	default:
+		return nil, fmt.Errorf("%w: status %d, %s", ErrUnexpectedStatus, status, errorDetail(body))
+	}
+}
+
+// ReportDiscoveredBatch sends a batch of discovered cameras to the SaaS.
+func (c *Client) ReportDiscoveredBatch(ctx context.Context, deviceID, credential string, cameras []DiscoveredCameraReport) ([]CameraReconciliationResult, error) {
+	path := fmt.Sprintf("%s/discovered/batch", CameraOnboardingPath)
+	req := discoveredBatchRequest{Cameras: cameras}
+	status, header, body, err := c.do(ctx, http.MethodPost, path, deviceID, credential, req)
+	if err != nil {
+		return nil, err
+	}
+	switch status {
+	case http.StatusOK:
+		var env batchReconciliationEnvelope
+		if jsonErr := json.Unmarshal(body, &env); jsonErr != nil {
+			return nil, fmt.Errorf("%w: decoding batch reconciliation response: %v", ErrUnexpectedStatus, jsonErr)
+		}
+		return env.Reconciliations, nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return nil, fmt.Errorf("%w (status %d)", ErrUnauthorized, status)
+	case http.StatusTooManyRequests:
+		return nil, &RateLimitError{RetryAfter: parseRetryAfter(header)}
+	default:
+		return nil, fmt.Errorf("%w: status %d, %s", ErrUnexpectedStatus, status, errorDetail(body))
+	}
+}

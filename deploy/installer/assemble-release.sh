@@ -23,6 +23,13 @@ mkdir -p "$out_dir"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
+# Licensing gate: check redistribution approval for AI model weights
+if [ "${MODEL_REDISTRIBUTION_APPROVED:-false}" = "true" ]; then
+  echo "note: MODEL_REDISTRIBUTION_APPROVED is true (bundled AI weights permitted)"
+else
+  echo "note: MODEL_REDISTRIBUTION_APPROVED is false (default; licensing gate enforced)"
+fi
+
 check_package() {
   local platform=$1 pkg=$2 x="$work/$1"
   mkdir -p "$x"
