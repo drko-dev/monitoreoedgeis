@@ -281,8 +281,14 @@ func TestVisionRuntimeProvisionerSuccess(t *testing.T) {
 	t.Setenv(config.ConfigFileEnv, configPath)
 
 	res := NewVisionRuntimeResolver(dataDir)
+	res.stat = func(name string) (os.FileInfo, error) {
+		if name == "/usr/bin/python3" {
+			return mockFileInfo{name: "python3", isDir: false}, nil
+		}
+		return os.Stat(name)
+	}
 	res.lookPath = func(file string) (string, error) {
-		if file == "python3" {
+		if file == "python3" || file == "/usr/bin/python3" {
 			return "/usr/bin/python3", nil
 		}
 		return "", errors.New("not found")
