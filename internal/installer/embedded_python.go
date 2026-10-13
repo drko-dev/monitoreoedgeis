@@ -47,6 +47,16 @@ const (
 	ErrCodePythonSecurityBrokenSymlink = "SECURITY_BROKEN_SYMLINK"
 )
 
+// Lifecycle readiness tiers.
+// PYTHON_EXECUTABLE certifies that the standalone Python 3.11 interpreter and its distribution
+// are verified and runnable without host dependencies. It explicitly does NOT imply RUNTIME_READY
+// or INFERENCE_READY, which require offline wheelhouse dependencies and model weights from later milestones.
+const (
+	StatePythonExecutable = "PYTHON_EXECUTABLE"
+	StateRuntimeReady     = "RUNTIME_READY"
+	StateInferenceReady   = "INFERENCE_READY"
+)
+
 // PythonRuntimeInfo captures verified interpreter metadata.
 type PythonRuntimeInfo struct {
 	Version    string `json:"version"`
@@ -122,6 +132,13 @@ func (m *EmbeddedPythonManager) BinaryPath() string {
 	}
 	rel := canonicalizeManifestPath(m.manifest.Python.RelativeBinaryPath)
 	return filepath.Join(m.rootDir, filepath.FromSlash(rel))
+}
+
+// ReadinessState returns the current lifecycle readiness state.
+// Validating EmbeddedPythonManager certifies StatePythonExecutable,
+// but explicitly does NOT grant StateRuntimeReady or StateInferenceReady.
+func (m *EmbeddedPythonManager) ReadinessState() string {
+	return StatePythonExecutable
 }
 
 // Validate checks the physical existence, symlink confinement, size, SHA-256 hash,
@@ -367,6 +384,31 @@ func (m *EmbeddedPythonManager) Validate() error {
 		}
 	}
 
+	// Dynamic library verification on macOS
+	if m.manifest.Platform == PlatformDarwin || runtime.GOOS == PlatformDarwin {
+		dylibPath := filepath.Join(canonicalRoot, "python", "lib", "libpython3.11.dylib")
+		dylibStat, err := os.Stat(dylibPath)
+		if err != nil || !dylibStat.Mode().IsRegular() {
+			return &SafeError{
+				Code: ErrCodePythonStdlibIncomplete,
+				SafeMessage: fmt.Sprintf("distribución de Python incompleta: falta biblioteca dinámica libpython3.11.dylib (%s)",
+					dylibPath),
+				Recoverable: false,
+				Err:         ErrArtifactCorrupted,
+			}
+		}
+		if m.manifest.Architecture == ArchArm64 {
+			if err := ValidateMachODylib(dylibPath); err != nil {
+				return &SafeError{
+					Code:        ErrCodePythonArchIncompatible,
+					SafeMessage: fmt.Sprintf("biblioteca libpython3.11.dylib no es Mach-O arm64 válida: %v", err),
+					Recoverable: false,
+					Err:         err,
+				}
+			}
+		}
+	}
+
 	// Completeness verification: standard library directory must exist
 	stdlibDir := filepath.Join(canonicalRoot, "python", "lib", "python3.11")
 	stdlibStat, err := os.Stat(stdlibDir)
@@ -375,6 +417,30 @@ func (m *EmbeddedPythonManager) Validate() error {
 			Code: ErrCodePythonStdlibIncomplete,
 			SafeMessage: fmt.Sprintf("distribución de Python incompleta: falta el directorio de biblioteca estándar (%s)",
 				stdlibDir),
+			Recoverable: false,
+			Err:         ErrArtifactCorrupted,
+		}
+	}
+
+	// Verify essential module os.py exists
+	osPyPath := filepath.Join(stdlibDir, "os.py")
+	if osPyStat, err := os.Stat(osPyPath); err != nil || !osPyStat.Mode().IsRegular() {
+		return &SafeError{
+			Code: ErrCodePythonStdlibIncomplete,
+			SafeMessage: fmt.Sprintf("distribución de Python incompleta: falta módulo os.py (%s)",
+				osPyPath),
+			Recoverable: false,
+			Err:         ErrArtifactCorrupted,
+		}
+	}
+
+	// Verify native dynamic extensions directory lib-dynload exists
+	dynloadDir := filepath.Join(stdlibDir, "lib-dynload")
+	if dynloadStat, err := os.Stat(dynloadDir); err != nil || !dynloadStat.IsDir() {
+		return &SafeError{
+			Code: ErrCodePythonStdlibIncomplete,
+			SafeMessage: fmt.Sprintf("distribución de Python incompleta: falta directorio lib-dynload (%s)",
+				dynloadDir),
 			Recoverable: false,
 			Err:         ErrArtifactCorrupted,
 		}
@@ -392,6 +458,33 @@ func (m *EmbeddedPythonManager) Validate() error {
 		}
 	}
 
+	return nil
+}
+
+// ValidateMachODylib verifies that the file at path is a Mach-O 64-bit arm64 dynamic library.
+func ValidateMachODylib(path string) error {
+	f, err := macho.Open(path)
+	if err != nil {
+		fat, fatErr := macho.OpenFat(path)
+		if fatErr == nil {
+			defer fat.Close()
+			for _, arch := range fat.Arches {
+				if arch.Cpu == macho.CpuArm64 && arch.Type == macho.TypeDylib {
+					return nil
+				}
+			}
+			return fmt.Errorf("%w: universal binary does not contain arm64 dylib slice", ErrManifestIncompatible)
+		}
+		return fmt.Errorf("%w: binary is not a valid Mach-O dylib (%v)", ErrManifestIncompatible, err)
+	}
+	defer f.Close()
+
+	if f.Type != macho.TypeDylib {
+		return fmt.Errorf("%w: Mach-O file type %v is not a dylib (type %v)", ErrManifestIncompatible, f.Type, macho.TypeDylib)
+	}
+	if f.Cpu != macho.CpuArm64 {
+		return fmt.Errorf("%w: Mach-O CPU type %v is not arm64 (0x%x)", ErrManifestIncompatible, f.Cpu, macho.CpuArm64)
+	}
 	return nil
 }
 

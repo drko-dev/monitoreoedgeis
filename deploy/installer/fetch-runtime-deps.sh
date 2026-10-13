@@ -5,17 +5,22 @@
 # Usage:
 #   fetch-runtime-deps.sh [--target-dir <dir>] [--platform <darwin-arm64>] [--verify-only]
 #
-# Constraints:
+# Security & Reliability Guarantees:
 #   - Pinned exact release (no 'latest').
-#   - Fails closed on SHA-256 checksum mismatch.
-#   - Verifies Mach-O 64-bit arm64 architecture.
-#   - Extracts safely into temporary directory with path confinement checks.
-#   - Atomically updates target directory.
+#   - Fails closed on SHA-256 checksum mismatch BEFORE extraction.
+#   - Secure archive extraction prevents path traversal, absolute paths, and symlink/hardlink escapes.
+#   - Staging occurs strictly in the same filesystem as destination ($TARGET_DIR/.python.tmp.$$).
+#   - Existing valid runtime is NEVER touched until new distribution is 100% verified.
+#   - Atomic directory swap with automatic rollback protection.
+#   - Verification covers complete distribution: executable, dylib, and standard library.
 set -euo pipefail
 
 TARGET_DIR="runtime"
 PLATFORM="darwin-arm64"
 VERIFY_ONLY="false"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -72,11 +77,17 @@ calc_sha256() {
   fi
 }
 
-verify_target_binary() {
+# Verifies physical existence and cryptographic integrity of the entire distribution
+verify_target_distribution() {
   local root="$1"
   local bin="$root/$EXPECTED_BINARY_REL"
   local symlink="$root/python/bin/python3"
+  local dylib="$root/python/lib/libpython3.11.dylib"
+  local stdlib="$root/python/lib/python3.11"
+  local os_mod="$root/python/lib/python3.11/os.py"
+  local dynload="$root/python/lib/python3.11/lib-dynload"
 
+  # 1. Main executable binary
   [ -f "$bin" ] || return 1
   [ -x "$bin" ] || return 1
 
@@ -88,36 +99,60 @@ verify_target_binary() {
   actual_hash=$(calc_sha256 "$bin")
   [ "$actual_hash" = "$EXPECTED_BINARY_SHA256" ] || return 1
 
-  # Ensure symlink python3 exists and resolves to python3.11
+  # 2. Symlink python3 pointing to python3.11
   [ -e "$symlink" ] || return 1
 
-  # Check Mach-O architecture if on macOS
+  # 3. Mach-O architecture on macOS
   if [ "$(uname -s)" = "Darwin" ]; then
     file -b "$bin" | grep -q 'Mach-O 64-bit.*arm64' || return 1
+    # 4. Dynamic library
+    [ -f "$dylib" ] || return 1
+    file -b "$dylib" | grep -q 'Mach-O 64-bit.*arm64' || return 1
   fi
+
+  # 5. Standard library completeness
+  [ -d "$stdlib" ] || return 1
+  [ -f "$os_mod" ] || return 1
+  [ -d "$dynload" ] || return 1
 
   return 0
 }
 
 # If verify-only requested
 if [ "$VERIFY_ONLY" = "true" ]; then
-  if verify_target_binary "$TARGET_DIR"; then
-    echo "ok: target binary $TARGET_DIR/$EXPECTED_BINARY_REL is valid"
+  if verify_target_distribution "$TARGET_DIR"; then
+    echo "ok: target distribution $TARGET_DIR is valid"
     exit 0
   else
-    fail "verify-only failed: $TARGET_DIR does not contain valid Python standalone runtime"
+    fail "verify-only failed: $TARGET_DIR does not contain valid Python standalone distribution"
   fi
 fi
 
 # Check if target is already valid
-if verify_target_binary "$TARGET_DIR"; then
+if verify_target_distribution "$TARGET_DIR"; then
   echo "ok: $TARGET_DIR already contains verified Python $PYTHON_VERSION standalone"
   exit 0
 fi
 
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+# Ensure TARGET_DIR exists so staging occurs on the exact SAME filesystem
+mkdir -p "$TARGET_DIR"
 
+# Sibling staging paths on the exact SAME filesystem
+staging_tmp="$TARGET_DIR/.python.tmp.$$"
+backup_old="$TARGET_DIR/.python.old.$$"
+
+cleanup() {
+  rm -rf "$staging_tmp"
+  if [ -d "$backup_old" ]; then
+    rm -rf "$backup_old"
+  fi
+  if [ -n "${work:-}" ] && [ -d "$work" ]; then
+    rm -rf "$work"
+  fi
+}
+trap cleanup EXIT INT TERM
+
+work=$(mktemp -d)
 archive_path="$work/$ARCHIVE_NAME"
 
 echo "Downloading Python $PYTHON_VERSION Standalone for $PLATFORM..."
@@ -129,7 +164,7 @@ else
   fail "Neither curl nor wget available to fetch runtime dependency"
 fi
 
-# Verify archive size and checksum
+# 1. Pre-extraction cryptographic verification
 echo "Verifying archive cryptographic integrity..."
 archive_size=$(wc -c < "$archive_path" | tr -d ' ')
 [ "$archive_size" -eq "$EXPECTED_ARCHIVE_SIZE" ] || fail "Archive size mismatch: got $archive_size, expected $EXPECTED_ARCHIVE_SIZE"
@@ -137,38 +172,54 @@ archive_size=$(wc -c < "$archive_path" | tr -d ' ')
 archive_hash=$(calc_sha256 "$archive_path")
 [ "$archive_hash" = "$EXPECTED_ARCHIVE_SHA256" ] || fail "Archive SHA-256 mismatch: got $archive_hash, expected $EXPECTED_ARCHIVE_SHA256"
 
-# Safe extraction into staging dir
-staging="$work/extracted"
-mkdir -p "$staging"
+# 2. Secure extraction directly into isolated staging directory on the same filesystem
+mkdir -p "$staging_tmp"
+echo "Extracting runtime archive securely..."
 
-echo "Extracting runtime archive..."
-tar -xzf "$archive_path" -C "$staging"
-
-# Confinement check: verify no files escaped staging
-staged_python="$staging/python"
-[ -d "$staged_python" ] || fail "Extracted archive does not contain 'python' directory"
-
-# Ensure execution permissions on bin
-chmod -R +x "$staged_python/bin"
-
-# Verify staged binary
-if ! verify_target_binary "$staging"; then
-  fail "Verification of extracted binary failed in staging"
+if command -v go >/dev/null 2>&1; then
+  go run "$REPO_ROOT/cmd/runtime-extractor" \
+    --archive "$archive_path" \
+    --target "$staging_tmp" \
+    --expected-sha256 "$EXPECTED_ARCHIVE_SHA256" \
+    --stage=false
+else
+  fail "Go compiler required to execute secure runtime-extractor"
 fi
 
-# Atomic install to target directory
-mkdir -p "$TARGET_DIR"
+# Ensure execution permissions on bin
+staged_python="$staging_tmp/python"
+[ -d "$staged_python" ] || fail "Extracted archive does not contain 'python' directory"
+chmod -R +x "$staged_python/bin"
+
+# 3. Full distribution verification on staged directory BEFORE touching target
+echo "Verifying complete staged Python distribution..."
+if ! verify_target_distribution "$staging_tmp"; then
+  fail "Verification of staged Python distribution failed; target runtime was NOT modified"
+fi
+
+# 4. Atomic activation on the SAME filesystem with rollback protection
 target_python="$TARGET_DIR/python"
 
 if [ -d "$target_python" ]; then
-  backup_dir="$work/python_backup"
-  mv "$target_python" "$backup_dir"
+  # Previous runtime exists: rename to backup, swap in staged, remove backup
+  mv "$target_python" "$backup_old"
+  if ! mv "$staged_python" "$target_python"; then
+    # Atomic rollback!
+    mv "$backup_old" "$target_python"
+    fail "Atomic rename failed; rolled back to previous valid Python runtime"
+  fi
+  rm -rf "$backup_old"
+else
+  # Fresh installation: direct atomic rename
+  mv "$staged_python" "$target_python"
 fi
 
-mv "$staged_python" "$target_python"
+# Clean up staging directory
+rm -rf "$staging_tmp"
 
-if verify_target_binary "$TARGET_DIR"; then
-  echo "SUCCESS: Hermetic Python $PYTHON_VERSION Standalone staged in $TARGET_DIR/python"
+# 5. Final verification of activated distribution
+if verify_target_distribution "$TARGET_DIR"; then
+  echo "SUCCESS: Hermetic Python $PYTHON_VERSION Standalone safely activated in $TARGET_DIR/python"
 else
-  fail "Failed to verify Python binary in final target location: $TARGET_DIR"
+  fail "Final verification failed in $TARGET_DIR/python"
 fi

@@ -144,12 +144,16 @@ This document establishes the official engineering roadmap to transition GEO CAM
   19. Rutas con espacios.
   20. Validación repetida e idempotente.
   - Test de integración física: ejecución de intérprete CPython 3.11.9 real en Apple Silicon (`TestEmbeddedPython_RealPythonExecution`).
+  - Suite adversarial de empaquetado y extracción segura (12 escenarios en `secure_extractor_test.go`): path traversal, rutas absolutas, symlinks que escapan, hardlinks externos/peligrosos, mismatch de hash pre-extracción, cleanup ante extracción interrumpida, rollback ante fallo de swap, preservación de runtime previo válido, staging garantizado en el mismo filesystem, verificación completa de distribución (dylib + stdlib), y validación física real.
 - **Criterios de aceptación (DONE):**
   - El intérprete embebido ejecuta y reporta versión 3.11.9 sin intervención del sistema host.
-  - 100% de tests unitarios y de integración aprobados bajo `go test -count=1 -race ./internal/installer/...`.
-- **Riesgos:** Mitigado aislamiento mediante flags `-I` y filtrado estricto de variables. Mitigado TOCTOU mediante especificación de staging en 0700 y rename atómico para H6.
+  - Extractor seguro implementado en Go (`cmd/runtime-extractor` y `internal/installer/secure_extractor.go`) reemplaza `tar -xzf` con validación previa de entradas, límites contra tar-bombs y staging en el mismo filesystem con rollback atómico.
+  - `runtime-manifest.json` marcado explícitamente como `template` para componentes no construidos (H3–H5).
+  - Estado formal `PYTHON_EXECUTABLE` no implica `RUNTIME_READY` o `INFERENCE_READY`.
+  - 100% de tests unitarios, de integración y adversariales aprobados bajo `go test -count=1 -race ./internal/installer/...`.
+- **Riesgos:** Mitigado aislamiento mediante flags `-I` y filtrado estricto de variables. Mitigado TOCTOU mediante staging en directorio oculto del mismo filesystem y rename atómico con rollback.
 - **Bloqueos:** Ninguno.
-- **Entregable:** Branch `feat/full-edge-embedded-python` con `EmbeddedPythonManager`, script de fetch y tests.
+- **Entregable:** Branch `feat/full-edge-embedded-python` con `EmbeddedPythonManager`, extractor seguro, script de fetch endurecido y suites de tests.
 
 ---
 

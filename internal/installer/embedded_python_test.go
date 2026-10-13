@@ -50,6 +50,26 @@ func createSyntheticMachOX86_64(size int64) []byte {
 	return buf
 }
 
+// Helper to create a synthetic Mach-O arm64 dylib header with given size.
+func createSyntheticMachODylibArm64(size int64) []byte {
+	header := []byte{
+		0xcf, 0xfa, 0xed, 0xfe, // magic: 0xfeedfacf (MH_MAGIC_64 little endian)
+		0x0c, 0x00, 0x00, 0x01, // cputype: 0x0100000c (CpuArm64 little endian)
+		0x00, 0x00, 0x00, 0x00, // cpusubtype: 0
+		0x06, 0x00, 0x00, 0x00, // filetype: 6 (MH_DYLIB)
+		0x00, 0x00, 0x00, 0x00, // ncmds: 0
+		0x00, 0x00, 0x00, 0x00, // sizeofcmds: 0
+		0x00, 0x00, 0x00, 0x00, // flags: 0
+		0x00, 0x00, 0x00, 0x00, // reserved: 0
+	}
+	if int64(len(header)) >= size {
+		return header[:size]
+	}
+	buf := make([]byte, size)
+	copy(buf, header)
+	return buf
+}
+
 // setupSyntheticPythonPack initializes a temporary directory with a synthetic Python runtime pack.
 func setupSyntheticPythonPack(t *testing.T, binContent []byte, binPerm os.FileMode, createStdlib bool) (string, *RuntimeManifest) {
 	t.Helper()
@@ -68,12 +88,24 @@ func setupSyntheticPythonPack(t *testing.T, binContent []byte, binPerm os.FileMo
 	}
 
 	if createStdlib {
-		stdlibDir := filepath.Join(tmpDir, "python", "lib", "python3.11")
+		libDir := filepath.Join(tmpDir, "python", "lib")
+		if err := os.MkdirAll(libDir, 0o755); err != nil {
+			t.Fatalf("failed to create lib dir: %v", err)
+		}
+		dylibContent := createSyntheticMachODylibArm64(128)
+		if err := os.WriteFile(filepath.Join(libDir, "libpython3.11.dylib"), dylibContent, 0o644); err != nil {
+			t.Fatalf("failed to write dylib: %v", err)
+		}
+
+		stdlibDir := filepath.Join(libDir, "python3.11")
 		if err := os.MkdirAll(stdlibDir, 0o755); err != nil {
 			t.Fatalf("failed to create stdlib dir: %v", err)
 		}
 		if err := os.WriteFile(filepath.Join(stdlibDir, "os.py"), []byte("# synthetic os module\n"), 0o644); err != nil {
 			t.Fatalf("failed to write stdlib file: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Join(stdlibDir, "lib-dynload"), 0o755); err != nil {
+			t.Fatalf("failed to create lib-dynload dir: %v", err)
 		}
 	}
 
@@ -641,9 +673,13 @@ func TestEmbeddedPython_Case19_PathWithSpaces(t *testing.T) {
 		t.Fatalf("failed to write bin: %v", err)
 	}
 
-	stdlibDir := filepath.Join(spaceDir, "python", "lib", "python3.11")
+	libDir := filepath.Join(spaceDir, "python", "lib")
+	_ = os.MkdirAll(libDir, 0o755)
+	_ = os.WriteFile(filepath.Join(libDir, "libpython3.11.dylib"), createSyntheticMachODylibArm64(128), 0o644)
+	stdlibDir := filepath.Join(libDir, "python3.11")
 	_ = os.MkdirAll(stdlibDir, 0o755)
 	_ = os.WriteFile(filepath.Join(stdlibDir, "os.py"), []byte("# test"), 0o644)
+	_ = os.MkdirAll(filepath.Join(stdlibDir, "lib-dynload"), 0o755)
 
 	manifest := &RuntimeManifest{
 		SchemaVersion:  CurrentSchemaVersion,

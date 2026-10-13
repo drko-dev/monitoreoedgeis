@@ -299,13 +299,49 @@ To ensure the standalone interpreter executes completely isolated from host conf
 ### 9.3 Packaging Tooling (`deploy/installer/fetch-runtime-deps.sh`)
 - Reproducible, fail-closed fetching and staging tool.
 - Validates archive SHA-256 before extraction.
-- Extracts into temporary staging with strict confinement verification.
+- Invokes dedicated secure extractor (`cmd/runtime-extractor` via Go) instead of raw `tar -xzf`.
+- Stages within `$TARGET_DIR/.python.tmp.$$` on the exact same filesystem.
 - Sets executable permissions (`chmod -R +x python/bin`).
-- Moves atomically into destination runtime path.
+- Moves atomically into destination runtime path with rollback on failure.
 - Supports `--verify-only` for offline build verification.
 
 ### 9.4 Physical vs. Synthetic Validation Distinction
 - **Synthetic Test Fixtures:** 20 table-driven unit tests verify error handling (missing file, corrupted hash, truncated size, non-executable bits, wrong Mach-O architecture, wrong version, incompatible ABI, incomplete stdlib, escaping symlinks, execution timeout, air-gapped readiness, path relocatability, and paths with spaces) using synthetic fixtures without requiring large binaries in git.
 - **Physical Verification:** `TestEmbeddedPython_RealPythonExecution` executes against real CPython 3.11.9 Standalone Apple Silicon Mach-O binary, confirming probe execution, JSON serialization, and standard library hermetic loading.
+
+### 9.5 Security Hardening & Secure Extraction Architecture
+To mitigate archive extraction attacks (Zip Slip / Tar Slip, symlink traversal, hardlink injection, tar bombs):
+1. **Entry-by-Entry Pre-Validation (`internal/installer/secure_extractor.go`):**
+   - Rejects absolute paths (`/usr/bin`, `\windows\sys`).
+   - Rejects path traversal components (`..`, `../`, `/../`).
+   - Rejects non-regular file types (device files, fifos, sockets).
+   - Enforces tar bomb resource constraints: 1 GB single file limit (`MaxFileSize`), 2 GB cumulative extracted bytes (`MaxTotalBytes`), and 50,000 maximum entries (`MaxEntries`).
+   - Verifies symlink targets: rejects absolute targets and targets that resolve outside the staging root.
+   - Refuses to write through existing symlinks (`os.Remove` before file creation).
+   - Validates hardlink targets to ensure they reference pre-existing files within staging.
+2. **Same-Filesystem Staging & Rollback Guarantee:**
+   - Staging directory is allocated strictly as a hidden sibling `$TARGET_DIR/.python.tmp.<pid>` on the exact same filesystem as the final target, avoiding cross-filesystem moves.
+   - Full distribution verification (`python3.11` binary, `libpython3.11.dylib`, `os.py`, `lib-dynload`) occurs entirely on staging BEFORE modifying the active target runtime.
+   - Existing valid runtime is never deleted upon staging failure; atomic rename swap ensures rollback to backup `$TARGET_DIR/.python.old.<pid>` if replacement fails.
+   - Cleanup handlers strictly delete the current attempt's staging directory.
+3. **Template Manifest vs. Release Separation:**
+   - Embedded manifest `assets/runtime-manifest.json` specifies `"manifest_type": "template"` to indicate that dependent components (wheels in H3, worker/ffmpeg in H4) are unbuilt specifications and not ready-for-inference releases.
+   - Formalized state: `PYTHON_EXECUTABLE` indicates interpreter availability, but explicitly does NOT imply `RUNTIME_READY` or `INFERENCE_READY`.
+
+### 9.6 Adversarial Test Suite Coverage (`secure_extractor_test.go`)
+Twelve adversarial test scenarios validate fail-closed packaging behavior:
+1. `TestSecureExtractor_Case1_PathTraversal`: Tar entry with `../` is rejected before extraction.
+2. `TestSecureExtractor_Case2_AbsolutePath`: Tar entry with `/etc/shadow` is rejected.
+3. `TestSecureExtractor_Case3_EscapingSymlink`: Symlink pointing outside extraction root is rejected.
+4. `TestSecureExtractor_Case4_DangerousHardlink`: Hardlink pointing outside destination is rejected.
+5. `TestSecureExtractor_Case5_ArchiveHashMismatchPreExtraction`: Corrupted archive hash fails before opening.
+6. `TestSecureExtractor_Case6_InterruptedExtractionCleanup`: Partial extraction cleans up current attempt only.
+7. `TestSecureExtractor_Case7_StagingMoveFailureRollback`: Swap failure restores previous valid runtime.
+8. `TestSecureExtractor_Case8_PreviousValidRuntimePreserved`: Failed extraction preserves running environment.
+9. `TestSecureExtractor_Case9_RepeatedPreparationIdempotent`: Repeated extractions succeed without corruption.
+10. `TestSecureExtractor_Case10_SameFilesystemStagingGuarantee`: Verifies sibling staging path on same filesystem.
+11. `TestEmbeddedPython_Case11_IncompleteDistributionChecks`: Verifies detection of missing dylib or stdlib.
+12. `TestEmbeddedPython_Case12_RealMacOSArm64Validation`: Physical validation of Apple Silicon Python execution.
+
 
 

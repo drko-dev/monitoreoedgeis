@@ -1,6 +1,7 @@
 {
   "schema_version": "1.0.0",
   "runtime_version": "1.0.0",
+  "manifest_type": "template",
   "platform": "darwin",
   "architecture": "arm64",
   "python": {

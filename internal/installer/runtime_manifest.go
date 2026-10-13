@@ -107,6 +107,7 @@ type CompatibilitySpec struct {
 type RuntimeManifest struct {
 	SchemaVersion  string            `json:"schema_version"`
 	RuntimeVersion string            `json:"runtime_version"`
+	ManifestType   string            `json:"manifest_type,omitempty"`
 	Platform       string            `json:"platform"`
 	Architecture   string            `json:"architecture"`
 	Python         PythonSpec        `json:"python"`
@@ -114,6 +115,20 @@ type RuntimeManifest struct {
 	Binaries       []BinarySpec      `json:"binaries"`
 	Dependencies   []DependencySpec  `json:"dependencies"`
 	Compatibility  CompatibilitySpec `json:"compatibility"`
+}
+
+// Manifest type classifications.
+const (
+	ManifestTypeTemplate = "template"
+	ManifestTypeRelease  = "release"
+)
+
+// IsTemplate reports whether this manifest is a specification template rather than a sealed release pack.
+func (m *RuntimeManifest) IsTemplate() bool {
+	if m == nil {
+		return false
+	}
+	return m.ManifestType == ManifestTypeTemplate || m.ManifestType == ""
 }
 
 // ArtifactValidationResult reports the validation outcome for a single file.
