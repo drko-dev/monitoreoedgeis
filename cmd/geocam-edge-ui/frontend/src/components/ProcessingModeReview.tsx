@@ -82,6 +82,8 @@ export const ProcessingModeReview: React.FC<ProcessingModeReviewProps> = ({
     );
   }
 
+  const hasBlockers = Boolean(plan.blockers && plan.blockers.length > 0);
+
   return (
     <div className="card mode-selector-card">
       <h3 className="card-title">{t('mode.reviewTitle')}</h3>
@@ -91,6 +93,31 @@ export const ProcessingModeReview: React.FC<ProcessingModeReviewProps> = ({
         <dt>{t('mode.selectedLabel')}</dt>
         <dd>{MODE_LABELS[plan.requested_mode]}</dd>
       </dl>
+
+      {hasBlockers && (
+        <div
+          className="error-alert"
+          style={{
+            marginTop: '1rem',
+            marginBottom: '1rem',
+            padding: '0.85rem 1rem',
+            backgroundColor: 'rgba(239, 68, 68, 0.12)',
+            border: '1px solid var(--danger)',
+            borderRadius: 'var(--radius-sm)',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+            <span className="check-icon fail" aria-hidden="true">✗</span>
+            <strong style={{ color: 'var(--danger)' }}>{t('mode.blockedTitle')}</strong>
+          </div>
+          <ul style={{ margin: '0.25rem 0 0 1.25rem', padding: 0, color: 'var(--text-primary)' }}>
+            {plan.blockers!.map((blocker, idx) => (
+              <li key={idx} style={{ marginBottom: '0.25rem' }}>{blocker}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {Object.keys(plan.config_changes).length > 0 && (
         <>
           <p className="card-header-row">{t('mode.changes')}</p>
@@ -124,7 +151,12 @@ export const ProcessingModeReview: React.FC<ProcessingModeReviewProps> = ({
         <Button variant="secondary" onClick={onBack} disabled={applying}>
           {t('mode.back')}
         </Button>
-        <Button variant="primary" onClick={onApply} loading={applying}>
+        <Button
+          variant="primary"
+          onClick={onApply}
+          loading={applying}
+          disabled={hasBlockers || applying}
+        >
           {t('mode.apply')}
         </Button>
       </div>

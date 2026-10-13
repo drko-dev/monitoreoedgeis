@@ -32,6 +32,17 @@ export const SystemCard: React.FC<SystemCardProps> = ({ report }) => {
           </strong>
         </li>
         <li className="check-item">
+          <span className={`check-icon ${report.ffmpeg_present ? 'pass' : 'fail'}`} aria-hidden="true">
+            {report.ffmpeg_present ? '✓' : '✗'}
+          </span>
+          <span className="check-label">{t('ffmpeg.status')}</span>
+          <strong className="check-value">
+            {report.ffmpeg_present
+              ? `${t('ffmpeg.installed')}${report.ffmpeg_path ? ` (${report.ffmpeg_path})` : ''}`
+              : t('ffmpeg.notInstalled')}
+          </strong>
+        </li>
+        <li className="check-item">
           <span className="check-icon pass" aria-hidden="true">✓</span>
           <span className="check-label">{t('system.memory')}</span>
           <strong className="check-value">

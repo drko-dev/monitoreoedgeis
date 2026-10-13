@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -30,6 +29,10 @@ type Service struct {
 	HealthAddr         string
 	httpClient         *http.Client
 	EnrollmentProvider EnrollmentProvider
+
+	dependencyResolver  *DependencyResolver
+	dependencyInstaller *DependencyInstaller
+
 	// applyMu serializes ApplyProcessingMode so two concurrent Apply calls
 	// (e.g. a double click) can never race on the same persistent config
 	// file.
@@ -52,6 +55,7 @@ func NewService(dataDir, configFilePath string) *Service {
 	if dataDir == "" {
 		dataDir = defaultInstallerDataDir()
 	}
+	resolver := NewDependencyResolver(dataDir)
 	return &Service{
 		DataDir:        dataDir,
 		ConfigFilePath: configFilePath,
@@ -59,7 +63,9 @@ func NewService(dataDir, configFilePath string) *Service {
 		httpClient: &http.Client{
 			Timeout: 350 * time.Millisecond,
 		},
-		EnrollmentProvider: NewSaaSEnrollmentProvider(nil),
+		EnrollmentProvider:  NewSaaSEnrollmentProvider(nil),
+		dependencyResolver:  resolver,
+		dependencyInstaller: NewDependencyInstaller(resolver),
 	}
 }
 
@@ -84,7 +90,7 @@ func (s *Service) GetSystemReport(ctx context.Context) (*SystemReport, error) {
 	host := platform.Detect()
 	sample := platform.Collect(s.DataDir, nil)
 
-	ffmpegPresent, ffprobePath := s.checkFFmpeg()
+	ffmpegStatus := s.ResolveFFmpeg(ctx)
 	gpuSupported, gpuInfo := s.checkGPU()
 
 	configPresent := s.checkConfigPresent()
@@ -128,8 +134,11 @@ func (s *Service) GetSystemReport(ctx context.Context) (*SystemReport, error) {
 		FreeRAMMB:         freeRAMMB,
 		DiskPath:          sample.DiskDataDir,
 		FreeDiskGB:        freeDiskGB,
-		FFmpegPresent:     ffmpegPresent,
-		FFprobePath:       ffprobePath,
+		FFmpegPresent:     ffmpegStatus.Ready,
+		FFprobePath:       ffmpegStatus.FFprobePath,
+		FFmpegPath:        ffmpegStatus.FFmpegPath,
+		FFmpegVersion:     ffmpegStatus.FFmpegVersion,
+		FFmpegSource:      string(ffmpegStatus.Source),
 		HasGPUSupport:     gpuSupported,
 		GPUInfo:           gpuInfo,
 	}, nil
@@ -226,13 +235,28 @@ func DeriveInstallerState(
 	}
 }
 
-func (s *Service) checkFFmpeg() (bool, string) {
-	path, err := exec.LookPath("ffmpeg")
-	if err != nil {
-		return false, ""
+// ResolveFFmpeg inspects the host for FFmpeg and FFprobe according to strict search order.
+func (s *Service) ResolveFFmpeg(ctx context.Context) *DependencyStatus {
+	if s.dependencyResolver == nil {
+		s.dependencyResolver = NewDependencyResolver(s.DataDir)
 	}
-	probePath, _ := exec.LookPath("ffprobe")
-	return path != "", probePath
+	return s.dependencyResolver.Resolve(ctx)
+}
+
+// InstallFFmpeg attempts to provision FFmpeg safely via Homebrew on macOS.
+func (s *Service) InstallFFmpeg(ctx context.Context) (*DependencyStatus, error) {
+	if s.dependencyInstaller == nil {
+		if s.dependencyResolver == nil {
+			s.dependencyResolver = NewDependencyResolver(s.DataDir)
+		}
+		s.dependencyInstaller = NewDependencyInstaller(s.dependencyResolver)
+	}
+	return s.dependencyInstaller.Install(ctx)
+}
+
+func (s *Service) checkFFmpeg() (bool, string) {
+	status := s.ResolveFFmpeg(context.Background())
+	return status.Ready, status.FFprobePath
 }
 
 func (s *Service) checkGPU() (bool, string) {

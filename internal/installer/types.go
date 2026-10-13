@@ -51,6 +51,9 @@ type SystemReport struct {
 	FreeDiskGB        uint64         `json:"free_disk_gb"`
 	FFmpegPresent     bool           `json:"ffmpeg_present"`
 	FFprobePath       string         `json:"ffprobe_path,omitempty"`
+	FFmpegPath        string         `json:"ffmpeg_path,omitempty"`
+	FFmpegVersion     string         `json:"ffmpeg_version,omitempty"`
+	FFmpegSource      string         `json:"ffmpeg_source,omitempty"`
 	HasGPUSupport     bool           `json:"has_gpu_support"`
 	GPUInfo           string         `json:"gpu_info,omitempty"`
 }

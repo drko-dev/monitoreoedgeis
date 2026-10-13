@@ -213,7 +213,7 @@ func (s *Service) evaluateCapability(mode ProcessingMode, report *SystemReport) 
 			nil, []string{"Unsupported platform."}
 	}
 	if !report.FFmpegPresent {
-		return CapabilityUnavailable, "ffmpeg is required for the local video pipeline and was not found on PATH.",
+		return CapabilityUnavailable, "ffmpeg is required for the local video pipeline and was not found on the system.",
 			nil, []string{"ffmpeg not found."}
 	}
 
@@ -428,6 +428,15 @@ func (s *Service) PlanProcessingMode(ctx context.Context, req ProcessingModeRequ
 		componentsRequired = []string{"Local vision worker process", "Person detection model", "Vehicle detection model"}
 	}
 
+	blockers := option.Blockers
+	if option.Capability == CapabilityUnavailable && len(blockers) == 0 {
+		if option.CapabilityReason != "" {
+			blockers = []string{option.CapabilityReason}
+		} else {
+			blockers = []string{"Mode is not available on this host."}
+		}
+	}
+
 	return &ProcessingModePlan{
 		RequestedMode:           req.Mode,
 		CurrentMode:             current.Mode,
@@ -437,7 +446,7 @@ func (s *Service) PlanProcessingMode(ctx context.Context, req ProcessingModeRequ
 		RestartRequired:         s.checkDaemonRunning(ctx),
 		ComponentsRequired:      componentsRequired,
 		Warnings:                option.Warnings,
-		Blockers:                option.Blockers,
+		Blockers:                blockers,
 		RollbackAvailable:       true,
 	}, nil
 }

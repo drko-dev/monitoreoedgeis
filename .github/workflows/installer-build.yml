@@ -88,7 +88,9 @@ jobs:
         run: |
           tags=()
           [ -n "${{ matrix.tags }}" ] && tags=(-tags "${{ matrix.tags }}")
-          go run github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION} build -clean -platform ${{ matrix.wails_platform }} "${tags[@]}"
+          build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          ldflags="-X github.com/drko-dev/monitoreoedgeis/internal/agent.Version=${VERSION} -X github.com/drko-dev/monitoreoedgeis/internal/agent.Commit=${COMMIT} -X github.com/drko-dev/monitoreoedgeis/internal/agent.BuildDate=${build_date}"
+          go run github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION} build -clean -platform ${{ matrix.wails_platform }} -ldflags "${ldflags}" "${tags[@]}"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -116,6 +118,9 @@ jobs:
           foreach ($s in '040904b0', "GEO CAM Edge Installer", $env:VERSION) {
             if (-not $text.Contains($s)) { Write-Error "version resource lacks '$s'"; exit 1 }
           }
+          $verOut = & $exe --version
+          Write-Host "installer --version: $verOut"
+          if ($verOut -notmatch "GEO CAM Edge Installer $env:VERSION") { Write-Error "binary --version output '$verOut' lacks '$env:VERSION'"; exit 1 }
           $p = Start-Process -FilePath $exe -PassThru
           Start-Sleep -Seconds 15
           if ($p.HasExited) { Write-Error "installer exited during launch check (code $($p.ExitCode))"; exit 1 }
@@ -130,6 +135,10 @@ jobs:
           v=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")
           [ "$v" = "$VERSION" ] || { echo "::error::CFBundleShortVersionString is '$v', expected '$VERSION'"; exit 1; }
           [ "$(lipo -archs "$app/Contents/MacOS/geocam-edge-ui")" = arm64 ] || { echo "::error::app binary is not arm64"; exit 1; }
+          app_ver=$("$app/Contents/MacOS/geocam-edge-ui" --version)
+          echo "installer --version: $app_ver"
+          echo "$app_ver" | grep -F "$VERSION" || { echo "::error::binary --version does not report $VERSION"; exit 1; }
+          echo "$app_ver" | grep -F "$COMMIT" || { echo "::error::binary --version does not report $COMMIT"; exit 1; }
           # Ad-hoc signature (no certificate): Apple Silicon refuses to run
           # code without any signature, and a sealed bundle avoids the
           # "app is damaged" message on download.
@@ -149,6 +158,10 @@ jobs:
         run: |
           set -euo pipefail
           bin=cmd/geocam-edge-ui/build/bin/geocam-edge-ui
+          bin_ver=$("$bin" --version)
+          echo "installer --version: $bin_ver"
+          echo "$bin_ver" | grep -F "$VERSION" || { echo "::error::binary --version does not report $VERSION"; exit 1; }
+          echo "$bin_ver" | grep -F "$COMMIT" || { echo "::error::binary --version does not report $COMMIT"; exit 1; }
           if ldd "$bin" | grep 'not found'; then echo "::error::unresolved shared libraries"; exit 1; fi
           rc=0
           xvfb-run -a timeout 15 "$bin" || rc=$?

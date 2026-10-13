@@ -16,6 +16,7 @@ import { useCameraOnboarding } from './hooks/useCameraOnboarding';
 import { candidateKeyForRequest, candidateDisplayName } from './utils/cameraOnboardingDisplay';
 import { ProcessingMode, OnboardingCandidate } from './types/installer';
 import { useI18n } from './i18n/I18nContext';
+import { useFFmpeg } from './hooks/useFFmpeg';
 import { HelpLink } from './components/HelpLink';
 import { docsLinks } from './config/docsLinks';
 import './App.css';
@@ -41,6 +42,14 @@ export const App: React.FC = () => {
     password: string;
   } | null>(null);
   const cameraOnboarding = useCameraOnboarding();
+  const ffmpeg = useFFmpeg();
+
+  const handleInstallFFmpeg = async () => {
+    const res = await ffmpeg.install();
+    if (res && res.ready) {
+      refresh();
+    }
+  };
 
   const needsEnrollment = state?.state === 'NEEDS_ENROLLMENT' || state?.state === 'NEW';
   const isEnrolled = state?.state === 'ENROLLED';
@@ -165,6 +174,11 @@ export const App: React.FC = () => {
           onSelect={setSelectedMode}
           onContinue={handleSelectContinue}
           loading={processingMode.planning}
+          ffmpegStatus={ffmpeg.status}
+          onInstallFFmpeg={handleInstallFFmpeg}
+          installingFFmpeg={ffmpeg.installing}
+          verifyingFFmpeg={ffmpeg.verifying}
+          ffmpegError={ffmpeg.error}
         />
       ) : isEnrolled && modeStep === 'review' ? (
         <ProcessingModeReview
