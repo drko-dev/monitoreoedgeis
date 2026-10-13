@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -1737,12 +1736,12 @@ func TestWheelhouse_CaseE_ConcurrentExecutionProtection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := fileLock(lockFile); err != nil {
 		t.Fatal(err)
 	}
 
 	_, errFlock := mgr1.InstallOffline(context.Background())
-	_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	_ = fileUnlock(lockFile)
 	_ = lockFile.Close()
 
 	if errFlock == nil {

@@ -15,7 +15,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -915,7 +914,7 @@ func (l *runtimeLock) Release() {
 		return
 	}
 	if l.file != nil {
-		_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
+		_ = fileUnlock(l.file)
 		_ = l.file.Close()
 	}
 	if l.pathMutex != nil {
@@ -953,7 +952,7 @@ func acquireRuntimeLock(libDir string) (*runtimeLock, error) {
 		return nil, fmt.Errorf("failed to open runtime lock file %s: %w", lockPath, err)
 	}
 
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := fileLock(lockFile); err != nil {
 		_ = lockFile.Close()
 		pMu.Unlock()
 		return nil, &SafeError{
