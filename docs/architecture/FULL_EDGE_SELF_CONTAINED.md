@@ -226,3 +226,33 @@ All error reporting and health inspection strings must pass through `SanitizeErr
 - No raw RTSP credentials or tokens exposed in logs or UI.
 - No system paths containing sensitive user names leaked to SaaS telemetry.
 - Safe structured error codes (`RUNTIME_INTEGRITY_FAILED`, `OFFLINE_PACKAGE_NOT_FOUND`, `MODEL_CORRUPTED`) with localized, actionable user guidance.
+
+---
+
+## 8. Cryptographic Verification Contract & TOCTOU Guarantees (Milestone H1)
+
+Implemented in `internal/installer/runtime_manifest.go` with full test coverage in `internal/installer/runtime_manifest_test.go`:
+
+1. **Manifest Schema & Specification:**
+   - Enforces `schema_version = "1.0.0"`.
+   - Strict validation of platform (`darwin`, `linux`, `windows`) and architecture (`arm64`, `amd64`).
+   - Exact pinned versions for all dependencies (prohibiting open ranges like `>=`, `<=`, `~`, `^`, `*`).
+   - Standard 64-character lowercase/uppercase hexadecimal SHA-256 digests.
+   - Size-in-bytes positive constraints (`size_bytes > 0`).
+
+2. **Security & Path Confinement:**
+   - Absolute paths are strictly rejected (`ErrArtifactSecurity`).
+   - Path traversal attempts (`..`, `../`, nested `foo/../../bar`) are rejected with `ErrArtifactSecurity`.
+   - Symlink protection: symlinks are inspected via `filepath.EvalSymlinks`, ensuring the target resolves strictly within the runtime root directory. Broken symlinks or symlinks pointing outside the pack root fail closed with `ErrArtifactSecurity`.
+
+3. **Streaming Verification:**
+   - File checksum calculation uses streaming `io.Copy` into `crypto/sha256.New()`, avoiding buffering entire large archives (e.g., PyTorch wheel or Python binary) in memory.
+
+4. **TOCTOU (Time-of-Check to Time-of-Use) Architectural Guarantee:**
+   - While `ValidateArtifacts` verifies files at inspection time, concurrent processes could mutate files between check and execution.
+   - To eliminate TOCTOU risks in Milestone H6 (Staging & Activation):
+     - Unpacking and validation MUST occur in an isolated staging directory (`$GEOCAM_DATA_DIR/vision-runtime.tmp.<pid>`) with restrictive permissions (`0700`).
+     - Validation must pass completely before activation.
+     - Activation is executed via atomic filesystem rename (`os.Rename`), ensuring the running service only ever points to a sealed, fully verified runtime directory.
+     - Binaries are marked read-only (`0555` / `0444`) post-staging.
+

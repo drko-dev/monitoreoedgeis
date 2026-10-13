@@ -1,0 +1,73 @@
+{
+  "schema_version": "1.0.0",
+  "runtime_version": "1.0.0",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "python": {
+    "version": "3.11.9",
+    "abi": "cp311",
+    "relative_binary_path": "python/bin/python3",
+    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "size_bytes": 12345678
+  },
+  "worker": {
+    "version": "1.1.0",
+    "entrypoint": "worker/worker.py",
+    "sha256": "123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",
+    "size_bytes": 5464
+  },
+  "binaries": [
+    {
+      "name": "ffmpeg",
+      "relative_path": "ffmpeg/ffmpeg",
+      "version": "7.1.0",
+      "sha256": "23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01",
+      "size_bytes": 45000000
+    },
+    {
+      "name": "ffprobe",
+      "relative_path": "ffmpeg/ffprobe",
+      "version": "7.1.0",
+      "sha256": "3456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef012",
+      "size_bytes": 44000000
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "torch",
+      "version": "2.4.0",
+      "filename": "torch-2.4.0-cp311-none-macosx_11_0_arm64.whl",
+      "relative_path": "wheelhouse/torch-2.4.0-cp311-none-macosx_11_0_arm64.whl",
+      "sha256": "456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123",
+      "size_bytes": 65000000
+    },
+    {
+      "name": "torchvision",
+      "version": "0.19.0",
+      "filename": "torchvision-0.19.0-cp311-cp311-macosx_11_0_arm64.whl",
+      "relative_path": "wheelhouse/torchvision-0.19.0-cp311-cp311-macosx_11_0_arm64.whl",
+      "sha256": "56789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234",
+      "size_bytes": 1500000
+    },
+    {
+      "name": "ultralytics",
+      "version": "8.3.1",
+      "filename": "ultralytics-8.3.1-py3-none-any.whl",
+      "relative_path": "wheelhouse/ultralytics-8.3.1-py3-none-any.whl",
+      "sha256": "6789abcdef0123456789abcdef0123456789abcdef0123456789abcdef012345",
+      "size_bytes": 780000
+    },
+    {
+      "name": "pillow",
+      "version": "10.4.0",
+      "filename": "pillow-10.4.0-cp311-cp311-macosx_11_0_arm64.whl",
+      "relative_path": "wheelhouse/pillow-10.4.0-cp311-cp311-macosx_11_0_arm64.whl",
+      "sha256": "789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456",
+      "size_bytes": 3500000
+    }
+  ],
+  "compatibility": {
+    "edge_min_version": "1.1.6",
+    "models_pack_min_version": "1.0.0"
+  }
+}
