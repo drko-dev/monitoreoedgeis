@@ -26,6 +26,10 @@ export function GetFFmpegStatus():Promise<installer.DependencyStatus>;
 
 export function InstallFFmpeg():Promise<installer.DependencyStatus>;
 
+export function GetVisionRuntimeStatus():Promise<installer.VisionRuntimeStatus>;
+
+export function PrepareVisionRuntime():Promise<installer.VisionRuntimeStatus>;
+
 export function TestSaaSConnection(arg1:string):Promise<installer.ServerCheckResult>;
 
 export function GetSystemReport():Promise<installer.SystemReport>;

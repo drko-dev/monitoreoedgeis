@@ -16,6 +16,7 @@ import {
   CameraOnboardingPlan,
   CameraOnboardingApplyResult,
   DependencyStatus,
+  VisionRuntimeStatus,
 } from '../types/installer';
 import {
   GetSystemReport,
@@ -24,6 +25,8 @@ import {
   GetSaaSURL,
   GetFFmpegStatus,
   InstallFFmpeg,
+  GetVisionRuntimeStatus,
+  PrepareVisionRuntime,
   GetProcessingModeOptions,
   GetCurrentProcessingMode,
   PlanProcessingMode,
@@ -423,6 +426,81 @@ export async function installFFmpeg(): Promise<DependencyStatus> {
     source: 'homebrew',
     install_supported: true,
     install_method: 'homebrew',
+  };
+}
+
+// fetchVisionRuntimeStatus inspects the host vision runtime
+export async function fetchVisionRuntimeStatus(): Promise<VisionRuntimeStatus> {
+  try {
+    const status = await GetVisionRuntimeStatus();
+    if (status && typeof status === 'object') {
+      return status as unknown as VisionRuntimeStatus;
+    }
+  } catch {
+    // Fallback below when not in Wails desktop runtime
+  }
+
+  return {
+    python_found: true,
+    python_path: '/opt/homebrew/bin/python3',
+    python_version: '3.11.4',
+    venv_found: false,
+    venv_path: '',
+    worker_script_path: '',
+    packages_ready: false,
+    torch_available: false,
+    ultralytics_ready: false,
+    pillow_ready: false,
+    device: 'mps',
+    device_name: 'Apple Silicon Metal (MPS)',
+    models_dir: '/var/lib/geocam-edge/models',
+    person_model_found: false,
+    vehicle_model_found: false,
+    missing_models: ['yolo11s-pose.pt', 'yolo11n.pt'],
+    ready: false,
+    can_provision: true,
+    message: 'Entorno de inferencia no preparado.',
+  };
+}
+
+// prepareVisionRuntime provisions the local Python virtual environment and installs worker dependencies
+export async function prepareVisionRuntime(): Promise<VisionRuntimeStatus> {
+  try {
+    const status = await PrepareVisionRuntime();
+    if (status && typeof status === 'object') {
+      return status as unknown as VisionRuntimeStatus;
+    }
+  } catch (err: unknown) {
+    if (err && typeof err === 'object' && 'safe_message' in err) {
+      throw err;
+    }
+    throw {
+      code: 'PROVISION_FAILED',
+      safe_message: err instanceof Error ? err.message : String(err),
+      recoverable: true,
+    };
+  }
+
+  return {
+    python_found: true,
+    python_path: '/var/lib/geocam-edge/vision-runtime/bin/python',
+    python_version: '3.11.4',
+    venv_found: true,
+    venv_path: '/var/lib/geocam-edge/vision-runtime',
+    worker_script_path: '/var/lib/geocam-edge/vision-worker/worker.py',
+    packages_ready: true,
+    torch_available: true,
+    ultralytics_ready: true,
+    pillow_ready: true,
+    device: 'mps',
+    device_name: 'Apple Silicon Metal (MPS)',
+    models_dir: '/var/lib/geocam-edge/models',
+    person_model_found: false,
+    vehicle_model_found: false,
+    missing_models: ['yolo11s-pose.pt', 'yolo11n.pt'],
+    ready: false,
+    can_provision: true,
+    message: 'Modelos faltantes en /var/lib/geocam-edge/models: yolo11s-pose.pt, yolo11n.pt',
   };
 }
 

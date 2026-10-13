@@ -1,0 +1,5 @@
+# GEO CAM Edge local vision worker (Milestone K2) runtime dependencies.
+# Pinned to major versions only -- exact pins belong to the appliance
+# provisioning step (Hito T's job, not this one's), never to Git.
+ultralytics>=8.3,<9
+pillow>=10,<12

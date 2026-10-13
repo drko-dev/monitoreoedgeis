@@ -179,6 +179,7 @@ export const App: React.FC = () => {
           installingFFmpeg={ffmpeg.installing}
           verifyingFFmpeg={ffmpeg.verifying}
           ffmpegError={ffmpeg.error}
+          onRefreshModes={processingMode.refresh}
         />
       ) : isEnrolled && modeStep === 'review' ? (
         <ProcessingModeReview

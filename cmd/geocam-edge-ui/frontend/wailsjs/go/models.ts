@@ -462,6 +462,58 @@ export namespace installer {
 	        this.password = source["password"];
 	    }
 	}
+	export class VisionRuntimeStatus {
+	    python_found: boolean;
+	    python_path: string;
+	    python_version: string;
+	    venv_found: boolean;
+	    venv_path: string;
+	    worker_script_path: string;
+	    packages_ready: boolean;
+	    torch_available: boolean;
+	    torch_version?: string;
+	    ultralytics_ready: boolean;
+	    ultralytics_version?: string;
+	    pillow_ready: boolean;
+	    device: string;
+	    device_name: string;
+	    models_dir: string;
+	    person_model_found: boolean;
+	    vehicle_model_found: boolean;
+	    missing_models?: string[];
+	    ready: boolean;
+	    can_provision: boolean;
+	    message?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new VisionRuntimeStatus(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.python_found = source["python_found"];
+	        this.python_path = source["python_path"];
+	        this.python_version = source["python_version"];
+	        this.venv_found = source["venv_found"];
+	        this.venv_path = source["venv_path"];
+	        this.worker_script_path = source["worker_script_path"];
+	        this.packages_ready = source["packages_ready"];
+	        this.torch_available = source["torch_available"];
+	        this.torch_version = source["torch_version"];
+	        this.ultralytics_ready = source["ultralytics_ready"];
+	        this.ultralytics_version = source["ultralytics_version"];
+	        this.pillow_ready = source["pillow_ready"];
+	        this.device = source["device"];
+	        this.device_name = source["device_name"];
+	        this.models_dir = source["models_dir"];
+	        this.person_model_found = source["person_model_found"];
+	        this.vehicle_model_found = source["vehicle_model_found"];
+	        this.missing_models = source["missing_models"];
+	        this.ready = source["ready"];
+	        this.can_provision = source["can_provision"];
+	        this.message = source["message"];
+	    }
+	}
 
 }
 

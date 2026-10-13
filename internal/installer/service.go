@@ -33,6 +33,10 @@ type Service struct {
 	dependencyResolver  *DependencyResolver
 	dependencyInstaller *DependencyInstaller
 
+	visionResolver    *VisionRuntimeResolver
+	visionProvisioner *VisionRuntimeProvisioner
+	visionMu          sync.Mutex
+
 	// applyMu serializes ApplyProcessingMode so two concurrent Apply calls
 	// (e.g. a double click) can never race on the same persistent config
 	// file.
@@ -56,6 +60,7 @@ func NewService(dataDir, configFilePath string) *Service {
 		dataDir = defaultInstallerDataDir()
 	}
 	resolver := NewDependencyResolver(dataDir)
+	visionRes := NewVisionRuntimeResolver(dataDir)
 	return &Service{
 		DataDir:        dataDir,
 		ConfigFilePath: configFilePath,
@@ -66,6 +71,8 @@ func NewService(dataDir, configFilePath string) *Service {
 		EnrollmentProvider:  NewSaaSEnrollmentProvider(nil),
 		dependencyResolver:  resolver,
 		dependencyInstaller: NewDependencyInstaller(resolver),
+		visionResolver:      visionRes,
+		visionProvisioner:   NewVisionRuntimeProvisioner(visionRes),
 	}
 }
 
@@ -252,6 +259,27 @@ func (s *Service) InstallFFmpeg(ctx context.Context) (*DependencyStatus, error) 
 		s.dependencyInstaller = NewDependencyInstaller(s.dependencyResolver)
 	}
 	return s.dependencyInstaller.Install(ctx)
+}
+
+// GetVisionRuntimeStatus inspects the host for local Full Edge runtime and models.
+func (s *Service) GetVisionRuntimeStatus(ctx context.Context) (*VisionRuntimeStatus, error) {
+	if s.visionResolver == nil {
+		s.visionResolver = NewVisionRuntimeResolver(s.DataDir)
+	}
+	return s.visionResolver.Resolve(ctx)
+}
+
+// PrepareVisionRuntime provisions the local venv, installs worker dependencies, and configures Full Edge.
+func (s *Service) PrepareVisionRuntime(ctx context.Context) (*VisionRuntimeStatus, error) {
+	s.visionMu.Lock()
+	defer s.visionMu.Unlock()
+	if s.visionProvisioner == nil {
+		if s.visionResolver == nil {
+			s.visionResolver = NewVisionRuntimeResolver(s.DataDir)
+		}
+		s.visionProvisioner = NewVisionRuntimeProvisioner(s.visionResolver)
+	}
+	return s.visionProvisioner.Provision(ctx)
 }
 
 func (s *Service) checkFFmpeg() (bool, string) {

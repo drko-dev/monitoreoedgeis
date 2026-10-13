@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
@@ -221,46 +220,34 @@ func (s *Service) evaluateCapability(mode ProcessingMode, report *SystemReport) 
 		return CapabilitySupported, "", nil, nil
 	}
 
-	workerCmd, hasWorkerCmd, err := config.PersistentValue("GEOCAM_EDGE_YOLO_WORKER_CMD")
-	if err != nil {
-		return CapabilityUnavailable, "Stored configuration could not be read.", nil, []string{err.Error()}
-	}
-	workerCmd = strings.TrimSpace(workerCmd)
-	if !hasWorkerCmd || workerCmd == "" {
-		return CapabilityUnavailable, "Local vision runtime is not configured (GEOCAM_EDGE_YOLO_WORKER_CMD is unset).",
-			nil, []string{"Local vision worker command is not configured."}
-	}
-	if !commandResolvable(workerCmd) {
-		return CapabilityUnavailable, "Configured local vision worker command was not found.",
-			nil, []string{fmt.Sprintf("Vision worker command not found: %s", workerCmd)}
+	vrStatus, err := s.GetVisionRuntimeStatus(context.Background())
+	if err != nil || vrStatus == nil {
+		return CapabilityUnavailable, "Local vision runtime could not be evaluated.", nil, []string{"Vision runtime inspection failed."}
 	}
 
-	modelsDir, hasModelsDir, err := config.PersistentValue("GEOCAM_EDGE_YOLO_MODELS_DIR")
-	if err != nil {
-		return CapabilityUnavailable, "Stored configuration could not be read.", nil, []string{err.Error()}
-	}
-	if !hasModelsDir || strings.TrimSpace(modelsDir) == "" {
-		modelsDir = filepath.Join(report.DataDir, config.DefaultEdgeYOLOModelsDirName)
-	}
-	personModel, _, _ := config.PersistentValue("GEOCAM_EDGE_YOLO_PERSON_MODEL")
-	if strings.TrimSpace(personModel) == "" {
-		personModel = config.DefaultEdgeYOLOPersonModel
-	}
-	vehicleModel, _, _ := config.PersistentValue("GEOCAM_EDGE_YOLO_VEHICLE_MODEL")
-	if strings.TrimSpace(vehicleModel) == "" {
-		vehicleModel = config.DefaultEdgeYOLOVehicleModel
-	}
-
-	var missing []string
-	if _, err := os.Stat(filepath.Join(modelsDir, personModel)); err != nil {
-		missing = append(missing, personModel)
-	}
-	if _, err := os.Stat(filepath.Join(modelsDir, vehicleModel)); err != nil {
-		missing = append(missing, vehicleModel)
-	}
-	if len(missing) > 0 {
-		return CapabilityUnavailable, "Required model file(s) not present.",
-			nil, []string{fmt.Sprintf("Missing model file(s): %s", strings.Join(missing, ", "))}
+	if !vrStatus.Ready {
+		var blockers []string
+		if !vrStatus.PackagesReady {
+			workerCmd, hasWorkerCmd, _ := config.PersistentValue("GEOCAM_EDGE_YOLO_WORKER_CMD")
+			if !hasWorkerCmd || strings.TrimSpace(workerCmd) == "" {
+				blockers = append(blockers, "Local vision worker command is not configured.")
+			} else if !commandResolvable(strings.TrimSpace(workerCmd)) {
+				blockers = append(blockers, fmt.Sprintf("Vision worker command not found: %s", workerCmd))
+			} else {
+				blockers = append(blockers, "Local vision runtime dependencies not satisfied.")
+			}
+		}
+		if len(vrStatus.MissingModels) > 0 {
+			blockers = append(blockers, fmt.Sprintf("Missing model file(s): %s", strings.Join(vrStatus.MissingModels, ", ")))
+		}
+		if len(blockers) == 0 {
+			blockers = append(blockers, "Vision worker environment is not ready.")
+		}
+		reason := vrStatus.Message
+		if reason == "" {
+			reason = strings.Join(blockers, " ")
+		}
+		return CapabilityUnavailable, reason, nil, blockers
 	}
 
 	device, _, _ := config.PersistentValue("GEOCAM_EDGE_YOLO_DEVICE")
