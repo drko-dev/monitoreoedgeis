@@ -54,6 +54,18 @@ func (a *App) InstallFFmpeg() (*installer.DependencyStatus, error) {
 	return res, structuredError(err)
 }
 
+// GetVisionRuntimeStatus returns the current status of the Full Edge vision runtime.
+func (a *App) GetVisionRuntimeStatus() (*installer.VisionRuntimeStatus, error) {
+	res, err := a.installer.GetVisionRuntimeStatus(a.ctx)
+	return res, structuredError(err)
+}
+
+// PrepareVisionRuntime provisions the Full Edge python environment safely.
+func (a *App) PrepareVisionRuntime() (*installer.VisionRuntimeStatus, error) {
+	res, err := a.installer.PrepareVisionRuntime(a.ctx)
+	return res, structuredError(err)
+}
+
 // TestSaaSConnection tests connectivity to a GEO CAM SaaS server.
 func (a *App) TestSaaSConnection(rawURL string) (*installer.ServerCheckResult, error) {
 	return a.installer.TestSaaSConnection(a.ctx, rawURL)

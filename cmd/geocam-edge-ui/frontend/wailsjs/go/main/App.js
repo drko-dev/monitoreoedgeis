@@ -50,6 +50,14 @@ export function InstallFFmpeg() {
   return window['go']['main']['App']['InstallFFmpeg']();
 }
 
+export function GetVisionRuntimeStatus() {
+  return window['go']['main']['App']['GetVisionRuntimeStatus']();
+}
+
+export function PrepareVisionRuntime() {
+  return window['go']['main']['App']['PrepareVisionRuntime']();
+}
+
 export function TestSaaSConnection(arg1) {
   return window['go']['main']['App']['TestSaaSConnection'](arg1);
 }

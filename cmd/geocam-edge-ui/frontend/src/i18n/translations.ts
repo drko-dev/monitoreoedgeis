@@ -153,6 +153,20 @@ export const es = {
   'ffmpeg.installFailed': 'Error al instalar FFmpeg: {{error}}',
   'ffmpeg.manualInstruction': 'Instalá FFmpeg manualmente usando Homebrew (`brew install ffmpeg`) o el gestor de paquetes de tu sistema.',
 
+  // Full Edge Vision Runtime
+  'vision.title': 'Entorno de inferencia local (Full Edge)',
+  'vision.notConfigured': 'El entorno de inferencia local no está preparado.',
+  'vision.missingDesc': 'Full Edge requiere un entorno virtual con dependencias de visión (Ultralytics, PyTorch, Pillow) y los modelos de detección.',
+  'vision.prepareAction': 'Preparar Full Edge',
+  'vision.preparing': 'Preparando entorno de inferencia...',
+  'vision.verifying': 'Verificando dependencias...',
+  'vision.ready': 'Entorno de inferencia listo ({{device}}).',
+  'vision.pythonVersion': 'Python: {{version}} ({{path}})',
+  'vision.missingModels': 'Modelos requeridos ausentes en {{dir}}: {{models}}',
+  'vision.missingModelsHelp': 'Descargá o copiá los pesos de los modelos requeridos en la carpeta indicada para habilitar Full Edge.',
+  'vision.recheck': 'Volver a comprobar',
+  'vision.prepareFailed': 'Error al preparar Full Edge: {{error}}',
+
   // Camera discovery
   'camera.discoveryTitle': 'Agregar cámara',
   'camera.discoveryHelp': '¿Mi cámara no aparece?',
@@ -361,6 +375,20 @@ export const en = {
   'ffmpeg.ready': 'FFmpeg is ready to use.',
   'ffmpeg.installFailed': 'Failed to install FFmpeg: {{error}}',
   'ffmpeg.manualInstruction': 'Please install FFmpeg manually using Homebrew (`brew install ffmpeg`) or your system package manager.',
+
+  // Full Edge Vision Runtime
+  'vision.title': 'Local Inference Runtime (Full Edge)',
+  'vision.notConfigured': 'Local inference runtime is not prepared.',
+  'vision.missingDesc': 'Full Edge requires an isolated virtual environment with vision dependencies (Ultralytics, PyTorch, Pillow) and detection model weights.',
+  'vision.prepareAction': 'Prepare Full Edge',
+  'vision.preparing': 'Preparing inference runtime...',
+  'vision.verifying': 'Verifying dependencies...',
+  'vision.ready': 'Inference runtime ready ({{device}}).',
+  'vision.pythonVersion': 'Python: {{version}} ({{path}})',
+  'vision.missingModels': 'Required models missing in {{dir}}: {{models}}',
+  'vision.missingModelsHelp': 'Download or place the required model weights into the specified directory to enable Full Edge.',
+  'vision.recheck': 'Recheck',
+  'vision.prepareFailed': 'Failed to prepare Full Edge: {{error}}',
 
   'camera.discoveryTitle': 'Add camera',
   'camera.discoveryHelp': "My camera doesn't appear?",

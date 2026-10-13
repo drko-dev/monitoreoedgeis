@@ -58,3 +58,18 @@ test('interpolate with no vars returns the template unchanged', () => {
 test('interpolate leaves unknown placeholders untouched', () => {
   assert.equal(interpolate('{{known}} {{unknown}}', { known: 'ok' }), 'ok {{unknown}}');
 });
+
+test('translations do not contain double question marks or malformed prefix', () => {
+  for (const [key, value] of Object.entries(es)) {
+    assert.ok(!value.includes('? ¿'), `es.${key} contains '? ¿'`);
+    assert.ok(!value.startsWith('? '), `es.${key} starts with '? '`);
+    if (value.endsWith('?')) {
+      assert.ok(value.startsWith('¿'), `es.${key} ends with '?' but does not start with '¿'`);
+    }
+  }
+  for (const [key, value] of Object.entries(en)) {
+    assert.ok(!value.includes('? ¿'), `en.${key} contains '? ¿'`);
+    assert.ok(!value.startsWith('? '), `en.${key} starts with '? '`);
+    assert.ok(!value.startsWith('¿'), `en.${key} should not contain inverted question mark`);
+  }
+});

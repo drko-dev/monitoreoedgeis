@@ -15,6 +15,6 @@ export const HelpLink: React.FC<HelpLinkProps> = ({ href, children }) => (
     className="btn-link help-link"
     onClick={() => openExternal(href)}
   >
-    <span aria-hidden="true">?</span> {children}
+    {children}
   </button>
 );

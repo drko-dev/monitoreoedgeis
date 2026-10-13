@@ -1,11 +1,12 @@
 import React from 'react';
-import { ProcessingModeOption, ProcessingMode, DependencyStatus } from '../types/installer';
+import { ProcessingModeOption, ProcessingMode, DependencyStatus, VisionRuntimeStatus } from '../types/installer';
 import { capabilityBadge } from '../utils/processingModeDisplay';
 import { Button } from './Button';
 import { HelpLink } from './HelpLink';
 import { useI18n } from '../i18n/I18nContext';
 import { docsLinks } from '../config/docsLinks';
 import { useFFmpeg } from '../hooks/useFFmpeg';
+import { useVisionRuntime } from '../hooks/useVisionRuntime';
 
 interface ProcessingModeSelectorProps {
   options: ProcessingModeOption[];
@@ -19,6 +20,11 @@ interface ProcessingModeSelectorProps {
   installingFFmpeg?: boolean;
   verifyingFFmpeg?: boolean;
   ffmpegError?: string | null;
+  visionStatus?: VisionRuntimeStatus | null;
+  onPrepareVision?: () => void;
+  provisioningVision?: boolean;
+  visionError?: string | null;
+  onRefreshModes?: () => void;
 }
 
 export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
@@ -33,9 +39,15 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
   installingFFmpeg,
   verifyingFFmpeg,
   ffmpegError,
+  visionStatus,
+  onPrepareVision,
+  provisioningVision,
+  visionError,
+  onRefreshModes,
 }) => {
   const { t } = useI18n();
   const hookFFmpeg = useFFmpeg();
+  const hookVision = useVisionRuntime();
 
   const status = ffmpegStatus !== undefined ? ffmpegStatus : hookFFmpeg.status;
   const installing = installingFFmpeg !== undefined ? installingFFmpeg : hookFFmpeg.installing;
@@ -43,8 +55,35 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
   const installError = ffmpegError !== undefined ? ffmpegError : hookFFmpeg.error;
   const handleInstall = onInstallFFmpeg || hookFFmpeg.install;
 
+  const currentVision = visionStatus !== undefined ? visionStatus : hookVision.status;
+  const provisioningV = provisioningVision !== undefined ? provisioningVision : hookVision.provisioning;
+  const currentVisionError = visionError !== undefined ? visionError : hookVision.error;
+
+  const handlePrepare = async () => {
+    if (onPrepareVision) {
+      onPrepareVision();
+    } else {
+      try {
+        await hookVision.prepare();
+        if (onRefreshModes) {
+          onRefreshModes();
+        }
+      } catch {
+        // error handled by hook
+      }
+    }
+  };
+
+  const handleRecheck = async () => {
+    await hookVision.check();
+    if (onRefreshModes) {
+      onRefreshModes();
+    }
+  };
+
   const selectedOption = options.find((o) => o.mode === selected);
   const isSelectedUnavailable = selectedOption?.capability === 'UNAVAILABLE';
+  const fullEdgeOption = options.find((o) => o.mode === 'full_edge');
 
   return (
     <div className="card mode-selector-card">
@@ -141,8 +180,7 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
               key={option.mode}
               type="button"
               className={`mode-card ${isSelected ? 'mode-card-selected' : ''} ${isUnavailable ? 'mode-card-disabled' : ''}`}
-              onClick={() => !isUnavailable && onSelect(option.mode)}
-              disabled={isUnavailable}
+              onClick={() => onSelect(option.mode)}
               aria-pressed={isSelected}
             >
               <div className="mode-card-header">
@@ -176,6 +214,117 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
           );
         })}
       </div>
+
+      {/* Full Edge Vision Runtime Provisioning / Status Section */}
+      {(selected === 'full_edge' || (fullEdgeOption && fullEdgeOption.capability === 'UNAVAILABLE')) && currentVision && (
+        <div
+          className="card"
+          style={{
+            border: `1px solid ${
+              currentVision.ready
+                ? 'var(--success)'
+                : currentVision.packages_ready
+                ? 'var(--warning, #f59e0b)'
+                : 'var(--danger)'
+            }`,
+            backgroundColor: currentVision.ready
+              ? 'rgba(16, 185, 129, 0.06)'
+              : currentVision.packages_ready
+              ? 'rgba(245, 158, 11, 0.08)'
+              : 'rgba(239, 68, 68, 0.08)',
+            marginTop: '1.25rem',
+            marginBottom: '1rem',
+            padding: '1rem',
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
+            <div style={{ flex: '1 1 300px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <span className={`check-icon ${currentVision.ready ? 'pass' : 'fail'}`} aria-hidden="true">
+                  {currentVision.ready ? '✓' : currentVision.packages_ready ? '⚠' : '✗'}
+                </span>
+                <strong
+                  style={{
+                    color: currentVision.ready
+                      ? 'var(--success)'
+                      : currentVision.packages_ready
+                      ? 'var(--warning, #d97706)'
+                      : 'var(--danger)',
+                  }}
+                >
+                  {currentVision.ready
+                    ? t('vision.ready', { device: currentVision.device_name })
+                    : currentVision.packages_ready
+                    ? t('vision.title')
+                    : t('vision.notConfigured')}
+                </strong>
+              </div>
+              {!currentVision.packages_ready && (
+                <p style={{ margin: '0.25rem 0 0.5rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                  {t('vision.missingDesc')}
+                </p>
+              )}
+              {currentVision.python_found && (
+                <p style={{ margin: '0.25rem 0 0', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                  {t('vision.pythonVersion', {
+                    version: currentVision.python_version || 'N/A',
+                    path: currentVision.python_path || 'N/A',
+                  })}
+                </p>
+              )}
+              {currentVision.packages_ready && !currentVision.ready && (
+                <div style={{ marginTop: '0.5rem' }}>
+                  <p style={{ margin: '0.25rem 0', fontSize: '0.85rem', color: 'var(--danger)', fontWeight: 500 }}>
+                    {t('vision.missingModels', {
+                      dir: currentVision.models_dir,
+                      models: (currentVision.missing_models || []).join(', '),
+                    })}
+                  </p>
+                  <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                    {t('vision.missingModelsHelp')}
+                  </p>
+                </div>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+              {!currentVision.packages_ready && (
+                <Button
+                  variant="primary"
+                  onClick={handlePrepare}
+                  loading={provisioningV}
+                  disabled={provisioningV || !currentVision.can_provision}
+                >
+                  {provisioningV ? t('vision.preparing') : t('vision.prepareAction')}
+                </Button>
+              )}
+              {currentVision.packages_ready && !currentVision.ready && (
+                <Button
+                  variant="secondary"
+                  onClick={handleRecheck}
+                  loading={hookVision.loading}
+                  disabled={hookVision.loading}
+                >
+                  {t('vision.recheck')}
+                </Button>
+              )}
+            </div>
+          </div>
+          {currentVisionError && (
+            <div
+              style={{
+                marginTop: '0.75rem',
+                padding: '0.5rem',
+                backgroundColor: 'rgba(239, 68, 68, 0.15)',
+                borderRadius: 'var(--radius-sm)',
+                fontSize: '0.85rem',
+                color: 'var(--danger)',
+              }}
+            >
+              <p style={{ margin: 0 }}>{t('vision.prepareFailed', { error: currentVisionError })}</p>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="actions-bar" style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: '0.5rem' }}>
         {isSelectedUnavailable && (

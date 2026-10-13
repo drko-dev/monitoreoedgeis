@@ -56,6 +56,30 @@ export interface DependencyStatus {
   message?: string;
 }
 
+export interface VisionRuntimeStatus {
+  python_found: boolean;
+  python_path: string;
+  python_version: string;
+  venv_found: boolean;
+  venv_path: string;
+  worker_script_path: string;
+  packages_ready: boolean;
+  torch_available: boolean;
+  torch_version?: string;
+  ultralytics_ready: boolean;
+  ultralytics_version?: string;
+  pillow_ready: boolean;
+  device: string;
+  device_name: string;
+  models_dir: string;
+  person_model_found: boolean;
+  vehicle_model_found: boolean;
+  missing_models?: string[];
+  ready: boolean;
+  can_provision: boolean;
+  message?: string;
+}
+
 export interface InstallerState {
   state: StateCode;
   reason_code: string;
