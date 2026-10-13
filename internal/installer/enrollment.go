@@ -272,10 +272,10 @@ func (s *Service) GetSaaSURL(ctx context.Context) string {
 
 // ServerCheckResult represents the outcome of checking connectivity to a GEO CAM server.
 type ServerCheckResult struct {
-	Accessible  bool   `json:"accessible"`
-	Status      string `json:"status"` // "OK", "INVALID_URL", "INVALID_TLS", "UNREACHABLE"
-	Message     string `json:"message"`
-	HTTPStatus  int    `json:"http_status,omitempty"`
+	Accessible bool   `json:"accessible"`
+	Status     string `json:"status"` // "OK", "INVALID_URL", "INVALID_TLS", "UNREACHABLE"
+	Message    string `json:"message"`
+	HTTPStatus int    `json:"http_status,omitempty"`
 }
 
 // TestSaaSConnection verifies reachability and responsiveness of the configured GEO CAM server.
