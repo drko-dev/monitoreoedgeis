@@ -1,0 +1,79 @@
+name: Offline H7A certification harness
+
+on:
+  pull_request:
+    paths:
+      - 'internal/offlinecert/**'
+      - 'cmd/offline-cert/**'
+      - '.github/workflows/offline-h7a.yml'
+      - 'docs/testing/offline-h7a-framework.md'
+      - 'internal/installer/runtime_manifest.go'
+      - 'internal/installer/runtime_manifest_test.go'
+  push:
+    branches: [main]
+    paths:
+      - 'internal/offlinecert/**'
+      - 'cmd/offline-cert/**'
+      - '.github/workflows/offline-h7a.yml'
+      - 'docs/testing/offline-h7a-framework.md'
+      - 'internal/installer/runtime_manifest.go'
+      - 'internal/installer/runtime_manifest_test.go'
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Harness unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.2'
+      - name: Cache Go modules before offline test steps
+        run: go mod download
+      - name: Run harness tests without module network access
+        run: GOPROXY=off GOSUMDB=off go test -count=1 ./internal/offlinecert ./cmd/offline-cert
+
+  runtime-contract:
+    name: Runtime manifest contract tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.2'
+      - name: Cache Go modules before offline test steps
+        run: go mod download
+      - name: Exercise existing manifest adversarial tests
+        run: GOPROXY=off GOSUMDB=off go test -count=1 ./internal/installer -run '^TestRuntimeManifest_'
+
+  offline-process-boundary:
+    name: Offline process-boundary smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.2'
+      - name: Cache Go modules before offline test steps
+        run: go mod download
+      - name: Run clean-environment, timeout and PyPI-attempt trap tests
+        run: GOPROXY=off GOSUMDB=off go test -count=1 ./internal/offlinecert -run '^TestSandbox'
+      - name: Generate scoped machine-readable readiness report
+        run: |
+          set -euo pipefail
+          GOPROXY=off GOSUMDB=off go run ./cmd/offline-cert \
+            -self-test -target-os linux -target-arch amd64 -base-sha "$GITHUB_SHA" \
+            > "$RUNNER_TEMP/offline-h7a-report.json"
+          jq -e '.scope == "synthetic-fixture-and-readiness-only"' "$RUNNER_TEMP/offline-h7a-report.json"
+          jq -e '.checks[] | select(.id == "offline-provisioning" and .status == "pending")' "$RUNNER_TEMP/offline-h7a-report.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: offline-h7a-readiness-report
+          path: ${{ runner.temp }}/offline-h7a-report.json
+          if-no-files-found: error
+
+# Physical certification is intentionally not a CI job. It requires an
+# integrated H3-H6 build and a separately authorized, explicitly provisioned rig.
