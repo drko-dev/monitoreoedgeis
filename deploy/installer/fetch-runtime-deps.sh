@@ -224,6 +224,20 @@ cleanup() {
     echo "::notice::Fault injection: simulated signal during cleanup" >&2
   fi
 
+  # Filesystem evidence recovery:
+  # Regardless of the memory STATE variable, if an uncommitted backup physically exists on disk,
+  # it indicates that a previous valid runtime was moved and must be restored!
+  if [ -d "$backup_old" ] && [ "$STATE" != "COMMITTED" ]; then
+    echo "::warning::Abnormal termination with active backup found on filesystem at $backup_old (state: $STATE, sig: $sig, exit code: $exit_code). Attempting rollback..." >&2
+    if perform_rollback "filesystem_evidence_${STATE}_${sig}_${exit_code}"; then
+      rm -rf "$staging_tmp" "$broken_tmp" 2>/dev/null || true
+    else
+      echo "::error::CRITICAL: Backup preserved at: $backup_old" >&2
+    fi
+    [ -n "${work:-}" ] && [ -d "$work" ] && rm -rf "$work" 2>/dev/null || true
+    exit $exit_code
+  fi
+
   case "$STATE" in
     COMMITTED)
       # Normal successful exit: remove temporary staging, backup, and work directories
@@ -358,6 +372,18 @@ if [ -e "$TARGET_PYTHON" ] || [ -L "$TARGET_PYTHON" ]; then
   if ! mv "$TARGET_PYTHON" "$backup_old"; then
     fail "Failed to backup previous runtime from $TARGET_PYTHON to $backup_old"
   fi
+
+  # Confirm backup was physically created on filesystem before progressing
+  if [ ! -d "$backup_old" ]; then
+    fail "Failed to verify backup creation: $backup_old does not exist on filesystem"
+  fi
+
+  # Fault injection: simulate interruption right after rename and BEFORE updating STATE to BACKED_UP
+  if [ "${FAULT_INJECT}" = "sigint_during_backing_up" ] || [ "${FAULT_INJECT}" = "interrupt_during_backing_up" ]; then
+    echo "::notice::FAULT_INJECTION: simulating SIGINT after rename but before STATE=BACKED_UP" >&2
+    kill -INT $$
+  fi
+
   STATE="BACKED_UP"
 
   if [ "${FAULT_INJECT}" = "sigint_between_moves" ]; then

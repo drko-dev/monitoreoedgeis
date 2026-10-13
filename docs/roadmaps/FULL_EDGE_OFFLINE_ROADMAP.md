@@ -151,9 +151,12 @@ This document establishes the official engineering roadmap to transition GEO CAM
   - Extractor seguro implementado en Go (`cmd/runtime-extractor` y `internal/installer/secure_extractor.go`) reemplaza `tar -xzf` con validación previa de entradas, límites contra tar-bombs y staging en el mismo filesystem con rollback atómico.
   - Máquina de estados explícita (`INIT` -> `PREPARING` -> `STAGED` -> `BACKING_UP` -> `BACKED_UP` -> `ACTIVATING` -> `ACTIVATED` -> `VERIFYING` -> `COMMITTED`) implementada en `deploy/installer/fetch-runtime-deps.sh`.
   - Preservación estricta de backups: el backup previo nunca se elimina hasta que la verificación post-activación tiene éxito; ante fallo de restauración, el backup se conserva intacto y se reporta en logs.
+  - Recuperación basada en evidencia física del filesystem: inspección de `[ -d "$backup_old" ]` en `cleanup()` para activar rollback ante interrupción en cualquier micro-ventana de transición (e.g. antes de asignar `STATE=BACKED_UP`).
+  - Verificación física inmediata de backup en disco tras el primer rename antes de avanzar hacia la activación.
+  - Delimitación explícita de la ventana no atómica del swap de dos renames en POSIX, documentando que fallos catastróficos no capturables (SIGKILL, kernel panic, corte eléctrico) requieren reconciliación de arranque persistente en H6.
   - `runtime-manifest.json` marcado explícitamente como `template` para componentes no construidos (H3–H5).
   - Estado formal `PYTHON_EXECUTABLE` no implica `RUNTIME_READY` o `INFERENCE_READY`.
-  - 100% de tests unitarios, de integración y adversariales aprobados bajo `go test -count=1 -race ./internal/installer/...` y `./deploy/installer/test-rollback-safety.sh`.
+  - 100% de tests unitarios, de integración y adversariales aprobados bajo `go test -count=1 -race ./internal/installer/...` y `./deploy/installer/test-rollback-safety.sh` (13 escenarios en 12 categorías).
 - **Riesgos:** Mitigado aislamiento mediante flags `-I` y filtrado estricto de variables. Mitigado TOCTOU mediante staging en directorio oculto del mismo filesystem y rename atómico con rollback. Documentada la limitación de reemplazo de directorios de dos pasos en POSIX vs puntero único de H6.
 - **Bloqueos:** Ninguno.
 - **Entregable:** Branch `feat/full-edge-embedded-python` con `EmbeddedPythonManager`, extractor seguro, script de fetch endurecido con máquina de estados, y suite de tests de rollback.

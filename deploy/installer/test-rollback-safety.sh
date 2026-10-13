@@ -218,25 +218,44 @@ rm -rf "$T7_DIR"
 pass "Case 7: Error en verificación final disparó rollback y restauró runtime previo"
 
 # -----------------------------------------------------------------------------
-# Case 8: Interrupción entre renames (SIGINT between backup and activation)
+# Case 8a: Interrupción entre renames (SIGINT after STATE=BACKED_UP)
 # -----------------------------------------------------------------------------
-echo "[Test 8/12] Case 8: Interrupción entre renames captura señal y ejecuta rollback"
+echo "[Test 8a] Case 8a: Interrupción entre renames captura señal y ejecuta rollback"
 TESTS_RUN=$((TESTS_RUN + 1))
-T8_DIR=$(mktemp -d)
-setup_synthetic_runtime "$T8_DIR" "canary_v8"
+T8A_DIR=$(mktemp -d)
+setup_synthetic_runtime "$T8A_DIR" "canary_v8a"
 
 set +e
-"$FETCH_SCRIPT" --target-dir "$T8_DIR" --force --fault-inject sigint_between_moves >/dev/null 2>&1
-T8_EXIT=$?
+"$FETCH_SCRIPT" --target-dir "$T8A_DIR" --force --fault-inject sigint_between_moves >/dev/null 2>&1
+T8A_EXIT=$?
 set -e
 
-# SIGINT should terminate with non-zero exit code
-[ "$T8_EXIT" -ne 0 ] || fail_test "Case 8: expected non-zero exit from SIGINT"
-[ -f "$T8_DIR/python/canary.txt" ] || fail_test "Case 8: trap failed to restore previous runtime after SIGINT"
-[ "$(cat "$T8_DIR/python/canary.txt")" = "canary_v8" ] || fail_test "Case 8: canary corrupted after SIGINT rollback"
-"$FETCH_SCRIPT" --target-dir "$T8_DIR" --verify-only >/dev/null || fail_test "Case 8: runtime corrupted after SIGINT"
-rm -rf "$T8_DIR"
-pass "Case 8: Interrupción entre renames (SIGINT) capturada y rollback ejecutado exitosamente"
+[ "$T8A_EXIT" -ne 0 ] || fail_test "Case 8a: expected non-zero exit from SIGINT"
+[ -f "$T8A_DIR/python/canary.txt" ] || fail_test "Case 8a: trap failed to restore previous runtime after SIGINT"
+[ "$(cat "$T8A_DIR/python/canary.txt")" = "canary_v8a" ] || fail_test "Case 8a: canary corrupted after SIGINT rollback"
+"$FETCH_SCRIPT" --target-dir "$T8A_DIR" --verify-only >/dev/null || fail_test "Case 8a: runtime corrupted after SIGINT"
+rm -rf "$T8A_DIR"
+pass "Case 8a: Interrupción entre renames (SIGINT) capturada y rollback ejecutado exitosamente"
+
+# -----------------------------------------------------------------------------
+# Case 8b: Interrupción durante BACKING_UP (después de primer mv y antes de asignar STATE=BACKED_UP)
+# -----------------------------------------------------------------------------
+echo "[Test 8b] Case 8b: Interrupción durante BACKING_UP recupera runtime usando evidencia del filesystem"
+TESTS_RUN=$((TESTS_RUN + 1))
+T8B_DIR=$(mktemp -d)
+setup_synthetic_runtime "$T8B_DIR" "canary_v8b"
+
+set +e
+"$FETCH_SCRIPT" --target-dir "$T8B_DIR" --force --fault-inject sigint_during_backing_up >/dev/null 2>&1
+T8B_EXIT=$?
+set -e
+
+[ "$T8B_EXIT" -ne 0 ] || fail_test "Case 8b: expected non-zero exit from SIGINT during BACKING_UP"
+[ -f "$T8B_DIR/python/canary.txt" ] || fail_test "Case 8b: filesystem evidence recovery failed! target runtime not restored"
+[ "$(cat "$T8B_DIR/python/canary.txt")" = "canary_v8b" ] || fail_test "Case 8b: canary corrupted after BACKING_UP rollback"
+"$FETCH_SCRIPT" --target-dir "$T8B_DIR" --verify-only >/dev/null || fail_test "Case 8b: runtime corrupted after BACKING_UP rollback"
+rm -rf "$T8B_DIR"
+pass "Case 8b: Interrupción durante BACKING_UP recuperó el runtime previo mediante evidencia real del filesystem"
 
 # -----------------------------------------------------------------------------
 # Case 9: Interrupción durante cleanup (Graceful single execution)

@@ -324,20 +324,22 @@ To guarantee absolute reliability against archive corruption, filesystem errors,
    - Error states: `ROLLING_BACK`, `ROLLED_BACK`, `ROLLBACK_FAILED`.
    - Staging occurs strictly in sibling hidden directory `$TARGET_DIR/.python.tmp.<pid>` on the exact same filesystem.
    - Existing runtime is preserved in `$TARGET_DIR/.python.old.<pid>`.
+   - **Filesystem Evidence Recovery in `cleanup()`:** Shell signal traps can be triggered at arbitrary sub-statement boundaries (e.g., immediately after `mv target backup` succeeds, before memory variable `STATE="BACKED_UP"` is assigned). Instead of relying exclusively on memory `STATE`, `cleanup()` actively inspects the filesystem: if `[ -d "$backup_old" ] && [ "$STATE" != "COMMITTED" ]`, it infers ground truth that an active backup exists and initiates automatic rollback.
+   - **Physical Backup Confirmation:** The script physically verifies `[ -d "$backup_old" ]` immediately following the first rename, failing closed before staging can be activated.
    - **Backup Preservation Guarantee:** Previous backup is NEVER deleted until post-activation verification succeeds (`STATE=COMMITTED`).
    - **Rollback Resilience:** If activation or post-activation verification fails, rollback restores the backup. If rollback itself fails, the backup directory is SAFELY PRESERVED on disk and its path and recovery command are logged (`STATE=ROLLBACK_FAILED`).
    - **Signal Shielding:** Signal traps (`INT`, `TERM`, `HUP`, `EXIT`) trigger automated rollback during the transition window and prevent destructive double cleanup (`IN_CLEANUP` re-entrancy lock).
 3. **Atomic Rename vs. Two-Step Directory Swap Distinction:**
    - In POSIX filesystems without atomic exchange syscalls (e.g. Darwin), directory replacement requires a two-step sequence: `mv target backup` followed by `mv staging target`.
-   - Between step 1 and step 2, target is momentarily absent.
-   - Mitigations: (1) Staging is verified 100% before step 1, (2) signals are trapped to immediately restore backup, (3) backup is kept until post-activation verification succeeds, and (4) unrecovered backups are preserved if restoration fails.
-   - Note for Milestone H6: Full upgrade system in H6 will evaluate versioned directories with single-pointer symlink swapping (`ln -sfn ... && mv -f link target`).
+   - Between step 1 and step 2, target is momentarily absent. This two-rename sequence is NOT a single atomic filesystem transaction.
+   - Mitigations: (1) Staging is verified 100% before step 1, (2) signals (`SIGINT`, `SIGTERM`, `SIGHUP`) are trapped to immediately restore backup, (3) backup physical presence is asserted before proceeding, (4) uncommitted backups trigger rollback via filesystem evidence, and (5) unrecovered backups are preserved if restoration fails.
+   - **Persistent Next-Boot Recovery Limitation (H6 Scope):** Uncatchable signals (`SIGKILL`), kernel panics, and abrupt power loss during the rename window bypass shell traps and leave `.python.old.<pid>` or `.python.tmp.<pid>` on disk. Handling crash recovery across unexpected process termination requires a persistent on-disk marker / startup reconciliation routine, formally scoped for Milestone H6 (Staging, Activation & Resilience).
 4. **Template Manifest vs. Release Separation:**
    - Embedded manifest `assets/runtime-manifest.json` specifies `"manifest_type": "template"` to indicate that dependent components (wheels in H3, worker/ffmpeg in H4) are unbuilt specifications and not ready-for-inference releases.
    - Formalized state: `PYTHON_EXECUTABLE` indicates interpreter availability, but explicitly does NOT imply `RUNTIME_READY` or `INFERENCE_READY`.
 
 ### 9.6 Adversarial Test Suite Coverage (`secure_extractor_test.go` & `test-rollback-safety.sh`)
-Twelve mandatory rollback safety failure modes are validated via deterministic fault injection (`deploy/installer/test-rollback-safety.sh`):
+Thirteen mandatory rollback safety failure modes across twelve categories are validated via deterministic fault injection (`deploy/installer/test-rollback-safety.sh`):
 1. **Case 1 (Fresh install):** Successful clean installation without leftover temporary files.
 2. **Case 2 (Valid previous runtime update):** Clean upgrade with backup deleted post-commit.
 3. **Case 3 (Error before activation):** Pre-activation failure leaves target untouched and cleans staging.
@@ -345,11 +347,12 @@ Twelve mandatory rollback safety failure modes are validated via deterministic f
 5. **Case 5 (Error activating new runtime):** Activation failure triggers automatic rollback and restores valid runtime.
 6. **Case 6 (Error restoring backup):** Restoration failure preserves backup directory intact with manual recovery instructions.
 7. **Case 7 (Error in final verification):** Post-activation verification failure triggers rollback and restores previous runtime.
-8. **Case 8 (Interruption between renames):** SIGINT between renames is trapped, initiating rollback and restoring valid runtime.
-9. **Case 9 (Interruption during cleanup):** Trap handler prevents re-entrancy and double cleanup crashes.
-10. **Case 10 (Repeated execution):** Idempotent execution skips redundant work when runtime is already verified.
-11. **Case 11 (Exact cryptographic preservation):** Canary files and dylibs remain bit-for-bit identical after rollback.
-12. **Case 12 (Absence of deletion of unrecovered backups):** Failed restoration never prunes backup on process exit.
+8. **Case 8a (Interruption between renames):** SIGINT between renames (`STATE=BACKED_UP`) is trapped, initiating rollback and restoring valid runtime.
+9. **Case 8b (Interruption during BACKING_UP):** SIGINT immediately after first rename (before `STATE=BACKED_UP` variable assignment) triggers rollback via physical filesystem evidence and restores target runtime.
+10. **Case 9 (Interruption during cleanup):** Trap handler prevents re-entrancy and double cleanup crashes.
+11. **Case 10 (Repeated execution):** Idempotent execution skips redundant work when runtime is already verified.
+12. **Case 11 (Exact cryptographic preservation):** Canary files and dylibs remain bit-for-bit identical after rollback.
+13. **Case 12 (Absence of deletion of unrecovered backups):** Failed restoration never prunes backup on process exit.
 
 Go unit test suite in `secure_extractor_test.go` (14 cases) validates entry confinement, tar bomb bounds, same-filesystem staging, post-activation validation rollback (`Case 13`), and backup preservation upon rollback failure (`Case 14`).
 
