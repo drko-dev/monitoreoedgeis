@@ -164,7 +164,10 @@ export const es = {
   'vision.pythonVersion': 'Python: {{version}} ({{path}})',
   'vision.missingModels': 'Modelos requeridos ausentes en {{dir}}: {{models}}',
   'vision.missingModelsHelp': 'Descargá o copiá los pesos de los modelos requeridos en la carpeta indicada para habilitar Full Edge.',
+  'vision.importModel': 'Importar {{model}}',
+  'vision.importing': 'Importando...',
   'vision.recheck': 'Volver a comprobar',
+  'vision.retry': 'Reintentar',
   'vision.prepareFailed': 'Error al preparar Full Edge: {{error}}',
 
   // Camera discovery
@@ -387,7 +390,10 @@ export const en = {
   'vision.pythonVersion': 'Python: {{version}} ({{path}})',
   'vision.missingModels': 'Required models missing in {{dir}}: {{models}}',
   'vision.missingModelsHelp': 'Download or place the required model weights into the specified directory to enable Full Edge.',
+  'vision.importModel': 'Import {{model}}',
+  'vision.importing': 'Importing...',
   'vision.recheck': 'Recheck',
+  'vision.retry': 'Retry',
   'vision.prepareFailed': 'Failed to prepare Full Edge: {{error}}',
 
   'camera.discoveryTitle': 'Add camera',

@@ -58,6 +58,14 @@ export function PrepareVisionRuntime() {
   return window['go']['main']['App']['PrepareVisionRuntime']();
 }
 
+export function ImportModel(arg1, arg2) {
+  return window['go']['main']['App']['ImportModel'](arg1, arg2);
+}
+
+export function SelectAndImportModel(arg1) {
+  return window['go']['main']['App']['SelectAndImportModel'](arg1);
+}
+
 export function TestSaaSConnection(arg1) {
   return window['go']['main']['App']['TestSaaSConnection'](arg1);
 }

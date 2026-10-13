@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/installer"
+	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // App is the desktop application bridge. It exposes strictly typed, audited methods
@@ -64,6 +65,37 @@ func (a *App) GetVisionRuntimeStatus() (*installer.VisionRuntimeStatus, error) {
 func (a *App) PrepareVisionRuntime() (*installer.VisionRuntimeStatus, error) {
 	res, err := a.installer.PrepareVisionRuntime(a.ctx)
 	return res, structuredError(err)
+}
+
+// ImportModel copies and validates a local model file into the managed models directory.
+func (a *App) ImportModel(modelName, sourcePath string) (*installer.VisionRuntimeStatus, error) {
+	res, err := a.installer.ImportModel(a.ctx, modelName, sourcePath)
+	return res, structuredError(err)
+}
+
+// SelectAndImportModel opens a native file dialog to select and import a model file.
+func (a *App) SelectAndImportModel(modelName string) (*installer.VisionRuntimeStatus, error) {
+	filePath, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "Seleccionar archivo de modelo PyTorch (" + modelName + ")",
+		Filters: []wailsRuntime.FileFilter{
+			{
+				DisplayName: "PyTorch Models (*.pt)",
+				Pattern:     "*.pt",
+			},
+			{
+				DisplayName: "All Files (*.*)",
+				Pattern:     "*.*",
+			},
+		},
+	})
+	if err != nil {
+		return nil, structuredError(err)
+	}
+	if filePath == "" {
+		// User cancelled dialog, return current status without error
+		return a.installer.GetVisionRuntimeStatus(a.ctx)
+	}
+	return a.ImportModel(modelName, filePath)
 }
 
 // TestSaaSConnection tests connectivity to a GEO CAM SaaS server.

@@ -27,6 +27,8 @@ import {
   InstallFFmpeg,
   GetVisionRuntimeStatus,
   PrepareVisionRuntime,
+  ImportModel,
+  SelectAndImportModel,
   GetProcessingModeOptions,
   GetCurrentProcessingMode,
   PlanProcessingMode,
@@ -502,5 +504,47 @@ export async function prepareVisionRuntime(): Promise<VisionRuntimeStatus> {
     can_provision: true,
     message: 'Modelos faltantes en /var/lib/geocam-edge/models: yolo11s-pose.pt, yolo11n.pt',
   };
+}
+
+// importModel imports a specific model file from a known filesystem path
+export async function importModel(modelName: string, sourcePath: string): Promise<VisionRuntimeStatus> {
+  try {
+    const status = await ImportModel(modelName, sourcePath);
+    if (status && typeof status === 'object') {
+      return status as unknown as VisionRuntimeStatus;
+    }
+  } catch (err: unknown) {
+    if (err && typeof err === 'object' && 'safe_message' in err) {
+      throw err;
+    }
+    throw {
+      code: 'IMPORT_FAILED',
+      safe_message: err instanceof Error ? err.message : String(err),
+      recoverable: true,
+    };
+  }
+
+  return fetchVisionRuntimeStatus();
+}
+
+// selectAndImportModel opens the native OS file picker and imports the selected model
+export async function selectAndImportModel(modelName: string): Promise<VisionRuntimeStatus> {
+  try {
+    const status = await SelectAndImportModel(modelName);
+    if (status && typeof status === 'object') {
+      return status as unknown as VisionRuntimeStatus;
+    }
+  } catch (err: unknown) {
+    if (err && typeof err === 'object' && 'safe_message' in err) {
+      throw err;
+    }
+    throw {
+      code: 'IMPORT_FAILED',
+      safe_message: err instanceof Error ? err.message : String(err),
+      recoverable: true,
+    };
+  }
+
+  return fetchVisionRuntimeStatus();
 }
 

@@ -5,12 +5,14 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 	"github.com/drko-dev/monitoreoedgeis/internal/fulledge"
@@ -42,6 +44,7 @@ type VisionRuntimeStatus struct {
 	MissingModels      []string `json:"missing_models,omitempty"`
 	Ready              bool     `json:"ready"`
 	CanProvision       bool     `json:"can_provision"`
+	Stage              string   `json:"stage,omitempty"`
 	Message            string   `json:"message,omitempty"`
 }
 
@@ -96,6 +99,7 @@ type VisionRuntimeResolver struct {
 	execCmd           CommandExecutor
 	goos              string
 	goarch            string
+	userHomeDir       func() (string, error)
 	getConfiguredCmd  func() (string, bool, error)
 	getConfiguredArgs func() (string, bool, error)
 	getConfiguredDir  func() (string, bool, error)
@@ -105,12 +109,13 @@ type VisionRuntimeResolver struct {
 // NewVisionRuntimeResolver constructs a resolver for dataDir using OS primitives.
 func NewVisionRuntimeResolver(dataDir string) *VisionRuntimeResolver {
 	return &VisionRuntimeResolver{
-		dataDir:  dataDir,
-		lookPath: exec.LookPath,
-		stat:     os.Stat,
-		execCmd:  DefaultCommandExecutor,
-		goos:     runtime.GOOS,
-		goarch:   runtime.GOARCH,
+		dataDir:     dataDir,
+		lookPath:    exec.LookPath,
+		stat:        os.Stat,
+		execCmd:     DefaultCommandExecutor,
+		goos:        runtime.GOOS,
+		goarch:      runtime.GOARCH,
+		userHomeDir: os.UserHomeDir,
 		getConfiguredCmd: func() (string, bool, error) {
 			return config.PersistentValue("GEOCAM_EDGE_YOLO_WORKER_CMD")
 		},
@@ -251,10 +256,6 @@ func (r *VisionRuntimeResolver) Resolve(ctx context.Context) (*VisionRuntimeStat
 	}
 
 	// 4. Overall Readiness evaluation
-	// Ready requires:
-	// - worker script present (or custom command resolvable)
-	// - packages ready
-	// - both models found
 	workerScriptValid := false
 	if status.WorkerScriptPath != "" {
 		if _, err := r.stat(status.WorkerScriptPath); err == nil {
@@ -291,6 +292,107 @@ func (r *VisionRuntimeResolver) Resolve(ctx context.Context) (*VisionRuntimeStat
 	return status, nil
 }
 
+// ImportModel validates and atomically copies a local .pt model file into the managed models directory.
+func (r *VisionRuntimeResolver) ImportModel(ctx context.Context, modelName, sourcePath string) (*VisionRuntimeStatus, error) {
+	allowedModels := map[string]bool{
+		config.DefaultEdgeYOLOPersonModel:  true, // "yolo11s-pose.pt"
+		config.DefaultEdgeYOLOVehicleModel: true, // "yolo11n.pt"
+	}
+	if !allowedModels[modelName] {
+		return nil, &SafeError{
+			Code:        "INVALID_MODEL_NAME",
+			SafeMessage: fmt.Sprintf("Model name %q is not recognized or allowed.", modelName),
+			Recoverable: false,
+		}
+	}
+
+	cleanSrc := filepath.Clean(sourcePath)
+	info, err := r.stat(cleanSrc)
+	if err != nil {
+		return nil, &SafeError{
+			Code:        "FILE_NOT_FOUND",
+			SafeMessage: fmt.Sprintf("Source model file not found: %s", cleanSrc),
+			Recoverable: true,
+		}
+	}
+	if !info.Mode().IsRegular() {
+		return nil, &SafeError{
+			Code:        "INVALID_FILE_TYPE",
+			SafeMessage: "Selected model must be a regular file.",
+			Recoverable: false,
+		}
+	}
+	if info.Size() <= 0 {
+		return nil, &SafeError{
+			Code:        "EMPTY_FILE",
+			SafeMessage: "Selected model file is empty.",
+			Recoverable: false,
+		}
+	}
+
+	modelsDir, hasDir, _ := r.getConfiguredDir()
+	if !hasDir || strings.TrimSpace(modelsDir) == "" {
+		modelsDir = filepath.Join(r.dataDir, config.DefaultEdgeYOLOModelsDirName)
+	}
+	if err := os.MkdirAll(modelsDir, 0o755); err != nil {
+		return nil, &SafeError{
+			Code:        "MKDIR_FAILED",
+			SafeMessage: "Failed to create models directory.",
+			Recoverable: true,
+			Details:     err.Error(),
+		}
+	}
+
+	destPath := filepath.Join(modelsDir, modelName)
+	tmpPath := filepath.Join(modelsDir, fmt.Sprintf(".%s.%d.tmp", modelName, time.Now().UnixNano()))
+
+	srcFile, err := os.Open(cleanSrc)
+	if err != nil {
+		return nil, &SafeError{
+			Code:        "READ_ERROR",
+			SafeMessage: "Failed to read source model file.",
+			Recoverable: true,
+			Details:     err.Error(),
+		}
+	}
+	defer srcFile.Close()
+
+	tmpFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return nil, &SafeError{
+			Code:        "WRITE_ERROR",
+			SafeMessage: "Failed to create destination model file.",
+			Recoverable: true,
+			Details:     err.Error(),
+		}
+	}
+
+	_, copyErr := io.Copy(tmpFile, srcFile)
+	syncErr := tmpFile.Sync()
+	closeErr := tmpFile.Close()
+
+	if copyErr != nil || syncErr != nil || closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return nil, &SafeError{
+			Code:        "COPY_FAILED",
+			SafeMessage: "Failed to copy model file.",
+			Recoverable: true,
+		}
+	}
+
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return nil, &SafeError{
+			Code:        "RENAME_FAILED",
+			SafeMessage: "Failed to place model file into models directory.",
+			Recoverable: true,
+			Details:     err.Error(),
+		}
+	}
+
+	return r.Resolve(ctx)
+}
+
 func (r *VisionRuntimeResolver) isVersionCompatible(ver string) bool {
 	parts := strings.Split(ver, ".")
 	if len(parts) < 2 {
@@ -301,7 +403,7 @@ func (r *VisionRuntimeResolver) isVersionCompatible(ver string) bool {
 		return false
 	}
 	minor, err := strconv.Atoi(parts[1])
-	if err != nil || minor < 8 {
+	if err != nil || minor < 8 || minor > 13 {
 		return false
 	}
 	return true
@@ -322,29 +424,88 @@ func (r *VisionRuntimeResolver) probePython(ctx context.Context, pyBin string) (
 }
 
 func (r *VisionRuntimeResolver) findBasePython(ctx context.Context) (string, string) {
-	candidates := []string{"python3.11", "python3.12", "python3.10", "python3.9", "python3", "python"}
+	var candidates []string
+
 	if r.goos == "darwin" {
+		homeDir := ""
+		if r.userHomeDir != nil {
+			homeDir, _ = r.userHomeDir()
+		}
+
+		// Priority 1: Homebrew on Apple Silicon (/opt/homebrew) and Intel (/usr/local)
 		candidates = append(candidates,
-			"/opt/homebrew/bin/python3.11",
 			"/opt/homebrew/bin/python3.12",
+			"/opt/homebrew/bin/python3.11",
 			"/opt/homebrew/bin/python3.10",
 			"/opt/homebrew/bin/python3.9",
+			"/opt/homebrew/bin/python3.13",
 			"/opt/homebrew/bin/python3",
-			"/usr/local/bin/python3.11",
 			"/usr/local/bin/python3.12",
+			"/usr/local/bin/python3.11",
+			"/usr/local/bin/python3.10",
+			"/usr/local/bin/python3.9",
+			"/usr/local/bin/python3.13",
 			"/usr/local/bin/python3",
-			"/usr/bin/python3",
 		)
+		// Priority 2: User-local environment (~/.local/bin)
+		if homeDir != "" {
+			userLocal := filepath.Join(homeDir, ".local", "bin")
+			candidates = append(candidates,
+				filepath.Join(userLocal, "python3.12"),
+				filepath.Join(userLocal, "python3.11"),
+				filepath.Join(userLocal, "python3.10"),
+				filepath.Join(userLocal, "python3.9"),
+				filepath.Join(userLocal, "python3.13"),
+				filepath.Join(userLocal, "python3"),
+			)
+		}
+		// Priority 3: System PATH lookups
+		candidates = append(candidates,
+			"python3.12",
+			"python3.11",
+			"python3.10",
+			"python3.9",
+			"python3.13",
+			"python3",
+		)
+		// Priority 4: Apple system python as last fallback
+		candidates = append(candidates, "/usr/bin/python3")
 	} else if r.goos == "linux" {
 		candidates = append(candidates,
-			"/usr/bin/python3.11",
 			"/usr/bin/python3.12",
+			"/usr/bin/python3.11",
 			"/usr/bin/python3.10",
 			"/usr/bin/python3.9",
+			"/usr/bin/python3.13",
 			"/usr/bin/python3",
+			"/usr/local/bin/python3.12",
+			"/usr/local/bin/python3.11",
 			"/usr/local/bin/python3",
+			"python3.12",
+			"python3.11",
+			"python3.10",
+			"python3.9",
+			"python3",
+		)
+	} else {
+		candidates = append(candidates,
+			"python3.12",
+			"python3.11",
+			"python3.10",
+			"python3.9",
+			"python3",
+			"python",
 		)
 	}
+
+	type evaluatedCandidate struct {
+		path    string
+		version string
+		score   int
+	}
+
+	var valid []evaluatedCandidate
+	seen := make(map[string]bool)
 
 	for _, cand := range candidates {
 		var resolved string
@@ -357,32 +518,81 @@ func (r *VisionRuntimeResolver) findBasePython(ctx context.Context) (string, str
 				resolved = p
 			}
 		}
-		if resolved == "" {
+		if resolved == "" || seen[resolved] {
 			continue
 		}
+		seen[resolved] = true
 
 		out, err := r.execCmd(ctx, resolved, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]}')")
 		if err != nil {
 			continue
 		}
 		ver := strings.TrimSpace(string(out))
-		if r.isVersionCompatible(ver) {
-			return resolved, ver
+		if !r.isVersionCompatible(ver) {
+			continue
+		}
+
+		// Calculate candidate quality score
+		score := 0
+		parts := strings.Split(ver, ".")
+		minor := 0
+		if len(parts) >= 2 {
+			minor, _ = strconv.Atoi(parts[1])
+		}
+
+		switch minor {
+		case 11:
+			score += 100
+		case 12:
+			score += 95
+		case 10:
+			score += 90
+		case 9:
+			score += 85
+		case 13:
+			score += 80
+		default:
+			score += 70
+		}
+
+		// Location scoring: heavily prefer Homebrew/local binaries, penalize /usr/bin/python3
+		if resolved == "/usr/bin/python3" {
+			score -= 30
+		} else if strings.HasPrefix(resolved, "/opt/homebrew/") || strings.HasPrefix(resolved, "/usr/local/") {
+			score += 15
+		}
+
+		valid = append(valid, evaluatedCandidate{path: resolved, version: ver, score: score})
+	}
+
+	if len(valid) == 0 {
+		return "", ""
+	}
+
+	// Select candidate with highest score
+	best := valid[0]
+	for _, c := range valid[1:] {
+		if c.score > best.score {
+			best = c
 		}
 	}
 
-	return "", ""
+	return best.path, best.version
 }
 
 // VisionRuntimeProvisioner handles the safe, user-initiated setup of the local
 // venv and dependencies for Full Edge mode.
 type VisionRuntimeProvisioner struct {
-	resolver *VisionRuntimeResolver
+	resolver  *VisionRuntimeResolver
+	timeAfter func(d time.Duration) <-chan time.Time
 }
 
 // NewVisionRuntimeProvisioner builds a provisioner from a resolver.
 func NewVisionRuntimeProvisioner(resolver *VisionRuntimeResolver) *VisionRuntimeProvisioner {
-	return &VisionRuntimeProvisioner{resolver: resolver}
+	return &VisionRuntimeProvisioner{
+		resolver:  resolver,
+		timeAfter: time.After,
+	}
 }
 
 // StageWorkerAssets copies embedded worker.py, backend.py, requirements.txt to destDir.
@@ -409,7 +619,80 @@ func StageWorkerAssets(destDir string) error {
 	return nil
 }
 
-// Provision sets up the venv, installs requirements, verifies imports, and persists config.
+// isVenvHealthy checks if the existing venv can run python and pip with compatible versions.
+func (p *VisionRuntimeProvisioner) isVenvHealthy(ctx context.Context, venvPy string) bool {
+	if _, err := p.resolver.stat(venvPy); err != nil {
+		return false
+	}
+	out, err := p.resolver.execCmd(ctx, venvPy, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]}')")
+	if err != nil {
+		return false
+	}
+	ver := strings.TrimSpace(string(out))
+	if !p.resolver.isVersionCompatible(ver) {
+		return false
+	}
+	if _, err := p.resolver.execCmd(ctx, venvPy, "-m", "pip", "--version"); err != nil {
+		return false
+	}
+	return true
+}
+
+// isTransientPipError detects temporary PyPI network and timeout errors.
+func isTransientPipError(output string) bool {
+	lower := strings.ToLower(output)
+
+	// Permanent failures must never be retried
+	permanent := []string{
+		"no matching distribution",
+		"could not find a version that satisfies the requirement",
+		"incompatible with this python",
+		"requires-python",
+		"syntaxerror",
+		"permission denied",
+		"invalid requirement",
+	}
+	for _, p := range permanent {
+		if strings.Contains(lower, p) {
+			return false
+		}
+	}
+
+	transient := []string{
+		"readtimeouterror",
+		"read timed out",
+		"connecttimeout",
+		"connectionreset",
+		"connection reset by peer",
+		"temporary failure",
+		"timed out",
+		"503",
+		"502",
+		"504",
+		"500 internal server error",
+		"network is unreachable",
+		"tls handshake timeout",
+		"broken pipe",
+		"ssl error",
+		"connection error",
+	}
+	for _, t := range transient {
+		if strings.Contains(lower, t) {
+			return true
+		}
+	}
+	return false
+}
+
+func truncateDetails(s string, maxLen int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[len(s)-maxLen:]
+}
+
+// Provision sets up the venv, updates pip, installs requirements, verifies imports, and persists config.
 func (p *VisionRuntimeProvisioner) Provision(ctx context.Context) (*VisionRuntimeStatus, error) {
 	r := p.resolver
 
@@ -418,7 +701,7 @@ func (p *VisionRuntimeProvisioner) Provision(ctx context.Context) (*VisionRuntim
 	if basePy == "" {
 		return nil, &SafeError{
 			Code:        "PYTHON_NOT_FOUND",
-			SafeMessage: "No compatible Python 3 (>= 3.8) interpreter was found on the host. Please install Python 3.9 - 3.12.",
+			SafeMessage: "No compatible Python 3 (>= 3.8, <= 3.13) interpreter was found on the host. Please install Python 3.11 or 3.12.",
 			Recoverable: true,
 		}
 	}
@@ -445,31 +728,98 @@ func (p *VisionRuntimeProvisioner) Provision(ctx context.Context) (*VisionRuntim
 		}
 	}
 
-	// 4. Create virtual environment if not already present
+	// 4. Create or heal virtual environment
 	venvPy := r.venvPythonPath()
-	if _, err := r.stat(venvPy); err != nil {
+	if !p.isVenvHealthy(ctx, venvPy) {
+		_ = os.RemoveAll(venvDir)
 		if _, err := r.execCmd(ctx, basePy, "-m", "venv", venvDir); err != nil {
 			return nil, &SafeError{
 				Code:        "VENV_CREATE_FAILED",
 				SafeMessage: fmt.Sprintf("Failed to create Python virtual environment with %s: %v", basePy, err),
 				Recoverable: true,
-				Details:     err.Error(),
+				Details:     truncateDetails(err.Error(), 300),
 			}
 		}
 	}
 
-	// 5. Install dependencies into the venv safely via pip
-	reqFile := filepath.Join(workerDir, "requirements.txt")
-	if _, err := r.execCmd(ctx, venvPy, "-m", "pip", "install", "-r", reqFile); err != nil {
+	// 5. Upgrade pip toolchain in venv before installing requirements
+	_, _ = r.execCmd(ctx, venvPy, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel")
+	if _, err := r.execCmd(ctx, venvPy, "-m", "pip", "--version"); err != nil {
 		return nil, &SafeError{
-			Code:        "PIP_INSTALL_FAILED",
-			SafeMessage: "Failed to install required Python packages (ultralytics, pillow).",
+			Code:        "PIP_TOOLCHAIN_FAILED",
+			SafeMessage: "Virtual environment pip toolchain is unusable.",
 			Recoverable: true,
-			Details:     err.Error(),
+			Details:     truncateDetails(err.Error(), 300),
 		}
 	}
 
-	// 6. Probe the venv environment
+	// 6. Install dependencies into the venv with retry and generous timeouts
+	reqFile := filepath.Join(workerDir, "requirements.txt")
+	const maxAttempts = 3
+	backoffs := []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second}
+	var lastOutput string
+	var installErr error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		args := []string{
+			"-m", "pip", "install",
+			"--prefer-binary",
+			"--retries", "8",
+			"--timeout", "120",
+			"-r", reqFile,
+		}
+		out, err := r.execCmd(ctx, venvPy, args...)
+		if err == nil {
+			installErr = nil
+			break
+		}
+
+		installErr = err
+		lastOutput = string(out)
+		combinedErrOutput := lastOutput
+		if combinedErrOutput == "" && err != nil {
+			combinedErrOutput = err.Error()
+		} else if err != nil {
+			combinedErrOutput = combinedErrOutput + "\n" + err.Error()
+		}
+
+		if !isTransientPipError(combinedErrOutput) || attempt == maxAttempts {
+			break
+		}
+
+		backoff := backoffs[attempt-1]
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-p.timeAfter(backoff):
+		}
+	}
+
+	if installErr != nil {
+		combinedFinalOutput := lastOutput
+		if combinedFinalOutput == "" && installErr != nil {
+			combinedFinalOutput = installErr.Error()
+		} else if installErr != nil {
+			combinedFinalOutput = combinedFinalOutput + "\n" + installErr.Error()
+		}
+
+		if isTransientPipError(combinedFinalOutput) {
+			return nil, &SafeError{
+				Code:        "PIP_TIMEOUT",
+				SafeMessage: "No se pudo completar la descarga de las dependencias. La conexión con PyPI agotó el tiempo de espera. Podés reintentar sin perder lo ya descargado.",
+				Recoverable: true,
+				Details:     truncateDetails(combinedFinalOutput, 300),
+			}
+		}
+		return nil, &SafeError{
+			Code:        "PIP_INSTALL_FAILED",
+			SafeMessage: "Error al instalar las dependencias de visión en el entorno virtual.",
+			Recoverable: true,
+			Details:     truncateDetails(combinedFinalOutput, 300),
+		}
+	}
+
+	// 7. Probe the venv environment
 	probe, err := r.probePython(ctx, venvPy)
 	if err != nil || len(probe.Missing) > 0 {
 		var missingStr string
@@ -483,7 +833,7 @@ func (p *VisionRuntimeProvisioner) Provision(ctx context.Context) (*VisionRuntim
 		}
 	}
 
-	// 7. Persist configuration
+	// 8. Persist configuration
 	stagedWorker := filepath.Join(workerDir, "worker.py")
 	changes := map[string]string{
 		"GEOCAM_EDGE_YOLO_WORKER_CMD":  venvPy,
@@ -501,6 +851,6 @@ func (p *VisionRuntimeProvisioner) Provision(ctx context.Context) (*VisionRuntim
 		}
 	}
 
-	// 8. Return fresh status
+	// 9. Return fresh status
 	return r.Resolve(ctx)
 }
