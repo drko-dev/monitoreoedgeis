@@ -3,6 +3,20 @@
 > Answers one question: **"¿Dónde estamos parados ahora?"**
 > Git + the final Hito Z integration are the source of truth. Historical sections below are retained as implementation history and may describe the state that existed at those earlier hitos.
 
+## Current Active Initiative: Full Edge Self-Contained Offline Runtime
+
+### Hito OFFLINE-H0: Baseline y Arquitectura (Current)
+- **Branch:** `docs/full-edge-offline-h0`
+- **Base:** `main @ 999874e5f63d389127e13cc096d66e8e58eec251`
+- **Objective:** Definición de la arquitectura técnica y el roadmap ejecutable para un Full Edge 100% self-contained y offline en el instalador de escritorio, priorizando macOS Apple Silicon (arm64, M1–M4).
+- **Decisión de Packaging:** Python Standalone hermético (3.11.x) + Wheelhouse offline con pins exactos (`--no-index --find-links`) + FFmpeg estático bundled. Se descarta la copia cruda de venv (shebangs y paths absolutos frágiles) y la dependencia de Python de sistema o Homebrew (que en máquinas limpias dispara diálogo de Xcode CLT o falla si solo existe Python 3.14).
+- **Integridad y Resiliencia:** Ciclo de 4 estados (`VALID`, `MISSING`, `CORRUPTED`, `INCOMPATIBLE`), extracción en directorio staging `.tmp`, verificación SHA-256 de cada archivo contra `runtime-manifest.json`, swap atómico (`os.Rename`) y rollback automático.
+- **Licensing Gate:** `MODEL_REDISTRIBUTION_APPROVED=false` estrictamente mantenido. El runtime offline técnico queda desacoplado de la publicación de pesos comerciales (`RUNTIME_OFFLINE_READY=true`, `MODEL_PACK_RELEASE_BLOCKED=true`).
+- **Documentos de Referencia:**
+  - Arquitectura detallada: `docs/architecture/FULL_EDGE_SELF_CONTAINED.md`
+  - Roadmap maestro H0–H9: `docs/roadmaps/FULL_EDGE_OFFLINE_ROADMAP.md`
+  - Estado de simplificación: `docs/architecture/GEO_CAM_SIMPLIFICATION_STATUS.md`
+
 ## Desktop Installer Releases
 
 ### installer-v1.1.3 — PUBLICADO (Release Stable)
