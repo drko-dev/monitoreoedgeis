@@ -259,4 +259,53 @@ Implemented in `internal/installer/runtime_manifest.go` with full test coverage 
      - Activation is executed via atomic filesystem rename (`os.Rename`), ensuring the running service only ever consumes a fully verified, sealed runtime directory.
      - Binaries are marked read-only (`0555` / `0444`) post-staging.
 
+---
+
+## 9. Embedded Python Standalone Architecture (Milestone H2)
+
+Implemented in `internal/installer/embedded_python.go` with full test coverage in `internal/installer/embedded_python_test.go` and tooling in `deploy/installer/fetch-runtime-deps.sh`:
+
+### 9.1 Pinned Python Distribution & Provenance
+- **Distribution:** `astral-sh/python-build-standalone` (CPython 3.11.9 install-only standalone).
+- **Release Tag:** `20240415`.
+- **Target Platform & Architecture:** `darwin/arm64` (Apple Silicon M1, M2, M3, M4).
+- **macOS Minimum Version:** macOS 11.0 Big Sur (`minos 11.0`, SDK 14.2).
+- **License:** Python Software Foundation License (PSF-2.0, permissive, fully redistributable).
+- **Relocatability:** Compiled with `@executable_path/../lib/libpython3.11.dylib` and dynamic linking against system frameworks (`CoreFoundation`, `libSystem.B.dylib`), with zero dependencies on Homebrew, Xcode CLT, or host Python.
+- **Archive Cryptographic Pinned Metadata:**
+  - URL: `https://github.com/astral-sh/python-build-standalone/releases/download/20240415/cpython-3.11.9%2B20240415-aarch64-apple-darwin-install_only.tar.gz`
+  - Archive Size: `17915401` bytes.
+  - Archive SHA-256: `7af7058f7c268b4d87ed7e08c2c7844ef8460863b3e679db3afdce8bb1eedfae`.
+- **Physical Binary Pinned Metadata:**
+  - Relative Path: `python/bin/python3` (symlink) -> `python/bin/python3.11`.
+  - Binary Size: `50168` bytes.
+  - Binary SHA-256: `906779570632e91fc62730f51b2b3ef0327d4992d989d6c9a2b6e7118836c170`.
+  - Mach-O Format: Mach-O 64-bit executable arm64 (`CPU_TYPE_ARM64 = 0x0100000c`).
+
+### 9.2 Subprocess Isolation Contract (`IsolateEnv`)
+To ensure the standalone interpreter executes completely isolated from host configuration:
+1. **Environment Scrubbing:**
+   - Strips all `PYTHON*` variables (`PYTHONHOME`, `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONUSERBASE`, `PYTHONEXECUTABLE`, `PYTHONSAFEPATH`, `PYTHONOPTIMIZE`, `PYTHONDEBUG`, etc.).
+   - Strips `VIRTUAL_ENV` and `__PYVENV_LAUNCHER__`.
+   - Injects `PYTHONNOUSERSITE=1`.
+2. **PATH Sanitization:**
+   - Filters `PATH` segments, removing Homebrew (`/opt/homebrew`, `/usr/local/bin`, `/usr/local/sbin`, `Cellar`), Conda, miniconda, anaconda, pyenv, asdf, nvm, and cargo.
+   - Preserves only clean base system directories (`/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`).
+3. **Execution Flags:**
+   - Subprocess invocations pass isolated mode flags (`-I`) ensuring `sys.path` does not include user directories or host site-packages.
+4. **Standard Library Verification:**
+   - `VerifyStandardLibrary` executes an in-process verification script asserting that core standard library modules (`os`, `json`, `hashlib`, `platform`, `math`, `re`, `time`) resolve strictly within `sys.prefix`, never from host paths.
+
+### 9.3 Packaging Tooling (`deploy/installer/fetch-runtime-deps.sh`)
+- Reproducible, fail-closed fetching and staging tool.
+- Validates archive SHA-256 before extraction.
+- Extracts into temporary staging with strict confinement verification.
+- Sets executable permissions (`chmod -R +x python/bin`).
+- Moves atomically into destination runtime path.
+- Supports `--verify-only` for offline build verification.
+
+### 9.4 Physical vs. Synthetic Validation Distinction
+- **Synthetic Test Fixtures:** 20 table-driven unit tests verify error handling (missing file, corrupted hash, truncated size, non-executable bits, wrong Mach-O architecture, wrong version, incompatible ABI, incomplete stdlib, escaping symlinks, execution timeout, air-gapped readiness, path relocatability, and paths with spaces) using synthetic fixtures without requiring large binaries in git.
+- **Physical Verification:** `TestEmbeddedPython_RealPythonExecution` executes against real CPython 3.11.9 Standalone Apple Silicon Mach-O binary, confirming probe execution, JSON serialization, and standard library hermetic loading.
+
 

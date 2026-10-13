@@ -107,26 +107,49 @@ This document establishes the official engineering roadmap to transition GEO CAM
 
 ---
 
-### Hito H2 — Python Embebido Standalone (macOS arm64)
+### Hito H2 — Python Embebido Standalone (macOS arm64) (COMPLETADO — Branch feat/full-edge-embedded-python)
 
 - **Objetivo:** Integrar un intérprete Python 3.11 standalone hermético para darwin-arm64, eliminando cualquier dependencia de Python de sistema o Homebrew.
-- **Dependencias:** H1 completado.
+- **Dependencias:** H1 completado y mergeado (#138).
 - **Archivos/Componentes involucrados:**
-  - `deploy/installer/fetch-runtime-deps.sh` (o script de preparación)
-  - `internal/installer/embedded_python.go`
-  - `internal/installer/embedded_python_test.go`
-- **Implementación esperada:**
-  - Detección y extracción de Python Standalone (ej. `python-build-standalone` 3.11.x) en el data dir de la aplicación.
-  - Validación de ejecución aislada sin tocar variables de entorno globales (`PYTHONPATH`, `PYTHONHOME`).
-  - Verificación de compatibilidad con aceleración Apple Silicon Metal (MPS).
-- **Tests obligatorios:**
-  - Test en máquina sin `/usr/bin/python3` en el PATH simulado.
-  - Test de ejecución de scripts básicos en sandbox temporal.
+  - `deploy/installer/fetch-runtime-deps.sh`: script de adquisición reproducible y staging con validación SHA-256 y Mach-O.
+  - `internal/installer/embedded_python.go`: gestor de runtime hermético `EmbeddedPythonManager`, sanitizador `IsolateEnv()`, verificador Mach-O `ValidateMachOArch()`, probador de versión/ABI `ProbeInterpreter()` y validador de biblioteca estándar `VerifyStandardLibrary()`.
+  - `internal/installer/assets/runtime-manifest.json`: metadatos fijados de CPython 3.11.9 Standalone para `darwin/arm64` (SHA-256 binario `906779570632e91fc62730f51b2b3ef0327d4992d989d6c9a2b6e7118836c170`, 50168 bytes).
+  - `internal/installer/embedded_python_test.go`: suite table-driven de 20 escenarios unitarios y de integración + prueba física con intérprete real verificado.
+- **Implementación completada:**
+  - Adopción de `astral-sh/python-build-standalone` CPython 3.11.9 (release tag `20240415`, PSF-2.0 license).
+  - Verificación criptográfica de archivo (`7af7058f...`, 17915401 bytes) y binario (`90677957...`, 50168 bytes).
+  - Aislamiento de entorno en subprocess: purga de `PYTHON*`, `VIRTUAL_ENV`, `__PYVENV_LAUNCHER__`, filtrado de Homebrew/Conda de `PATH`, inyección de `PYTHONNOUSERSITE=1` y ejecución con `-I`.
+  - Verificación de arquitectura Mach-O 64-bit arm64 (`macho.CpuArm64`).
+  - Verificación de carga hermética de la biblioteca estándar dentro de `sys.prefix`.
+- **Tests obligatorios (20 escenarios aprobados con -race):**
+  1. Python embebido válido (synthetic fixture).
+  2. Python ausente (`ErrArtifactMissing` / `PYTHON_NOT_FOUND`).
+  3. Hash incorrecto (`ErrArtifactCorrupted` / `PYTHON_HASH_MISMATCH`).
+  4. Tamaño incorrecto (`ErrArtifactCorrupted` / `PYTHON_SIZE_MISMATCH`).
+  5. Ejecutable sin permisos (`PYTHON_NOT_EXECUTABLE`).
+  6. Arquitectura incorrecta (`PYTHON_ARCH_INCOMPATIBLE`).
+  7. Versión incorrecta (`PYTHON_VERSION_INCOMPATIBLE`).
+  8. ABI incompatible (`PYTHON_ABI_INCOMPATIBLE`).
+  9. Distribución incompleta (`PYTHON_STDLIB_INCOMPLETE`).
+  10. Sin Python del sistema en PATH.
+  11. Homebrew ausente en PATH.
+  12. Python host incompatible ignorado.
+  13. PYTHONHOME/PYTHONPATH contaminados purgados.
+  14. Symlink externo rechazado (`SECURITY_ESCAPING_SYMLINK`).
+  15. Ejecución con timeout (`PYTHON_EXEC_TIMEOUT`).
+  16. Ejecución de biblioteca estándar (`STDLIB_VERIFIED`).
+  17. Preparación con red bloqueada (air-gapped).
+  18. Pack reubicado en ruta diferente.
+  19. Rutas con espacios.
+  20. Validación repetida e idempotente.
+  - Test de integración física: ejecución de intérprete CPython 3.11.9 real en Apple Silicon (`TestEmbeddedPython_RealPythonExecution`).
 - **Criterios de aceptación (DONE):**
-  - El intérprete embebido ejecuta y reporta versión 3.11.x sin intervención del sistema host.
-- **Riesgos:** Dependencias dinámicas de librerías del sistema macOS que difieran entre macOS 12, 13, 14 y 15.
+  - El intérprete embebido ejecuta y reporta versión 3.11.9 sin intervención del sistema host.
+  - 100% de tests unitarios y de integración aprobados bajo `go test -count=1 -race ./internal/installer/...`.
+- **Riesgos:** Mitigado aislamiento mediante flags `-I` y filtrado estricto de variables. Mitigado TOCTOU mediante especificación de staging en 0700 y rename atómico para H6.
 - **Bloqueos:** Ninguno.
-- **Entregable:** Módulo de gestión del intérprete embebido probado.
+- **Entregable:** Branch `feat/full-edge-embedded-python` con `EmbeddedPythonManager`, script de fetch y tests.
 
 ---
 
