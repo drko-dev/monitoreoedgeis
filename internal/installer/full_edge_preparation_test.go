@@ -66,6 +66,11 @@ func TestValidateFullEdgePreparationReadyRequiresCompleteCertification(t *testin
 		{name: "not 100 percent", mutate: func(s *FullEdgePreparationSnapshot) { s.ProgressPercent = 99 }},
 		{name: "component python pending", mutate: func(s *FullEdgePreparationSnapshot) { s.Components[0].Status = ComponentStatusPending }},
 		{name: "component model failed", mutate: func(s *FullEdgePreparationSnapshot) { s.Components[5].Status = ComponentStatusFailed }},
+		{name: "components absent", mutate: func(s *FullEdgePreparationSnapshot) { s.Components = nil }},
+		{name: "components empty", mutate: func(s *FullEdgePreparationSnapshot) { s.Components = []ComponentProgressItem{} }},
+		{name: "component missing", mutate: func(s *FullEdgePreparationSnapshot) { s.Components = s.Components[:5] }},
+		{name: "duplicate component", mutate: func(s *FullEdgePreparationSnapshot) { s.Components[5].Key = s.Components[0].Key }},
+		{name: "unknown component", mutate: func(s *FullEdgePreparationSnapshot) { s.Components[5].Key = "other" }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -10,6 +10,9 @@ export const preparationStages = [
 ] as const;
 
 const sha256Pattern = /^[a-f0-9]{64}$/i;
+const requiredComponents = new Set([
+  'python', 'wheelhouse', 'worker', 'ffmpeg', 'ffprobe', 'authorized_models',
+]);
 
 const preparationStates = new Set([
   'NOT_PREPARED',
@@ -62,14 +65,15 @@ export function isCertifiedReady(snapshot: FullEdgePreparationSnapshot | null): 
 
   if (!certificateValid) return false;
 
-  // Verify all components report READY
-  if (snapshot.components && snapshot.components.length > 0) {
-    for (const comp of snapshot.components) {
-      if (comp.status !== 'READY') return false;
-    }
+  // Require exactly one READY report per component; missing, duplicate, or
+  // unknown keys must never promote a runtime to READY.
+  if (!Array.isArray(snapshot.components) || snapshot.components.length !== requiredComponents.size) return false;
+  const reportedComponents = new Set<string>();
+  for (const comp of snapshot.components) {
+    if (!requiredComponents.has(comp.key) || comp.status !== 'READY' || reportedComponents.has(comp.key)) return false;
+    reportedComponents.add(comp.key);
   }
-
-  return true;
+  return reportedComponents.size === requiredComponents.size;
 }
 
 export function isPreparationActive(state: string | undefined): boolean {

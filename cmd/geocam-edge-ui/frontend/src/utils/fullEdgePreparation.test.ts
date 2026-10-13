@@ -113,4 +113,16 @@ test('all components must report READY for readiness certification', () => {
   // When all components are READY
   readyWithComponents.components![5].status = 'READY';
   assert.equal(isCertifiedReady(readyWithComponents), true);
+
+  assert.equal(isCertifiedReady({ ...readyWithComponents, components: undefined }), false);
+  assert.equal(isCertifiedReady({ ...readyWithComponents, components: [] }), false);
+  assert.equal(isCertifiedReady({ ...readyWithComponents, components: readyWithComponents.components!.slice(0, 5) }), false);
+  assert.equal(isCertifiedReady({
+    ...readyWithComponents,
+    components: [...readyWithComponents.components!.slice(0, 5), { ...readyWithComponents.components![0] }],
+  }), false);
+  assert.equal(isCertifiedReady({
+    ...readyWithComponents,
+    components: [...readyWithComponents.components!.slice(0, 5), { ...readyWithComponents.components![5], key: 'unknown' }],
+  }), false);
 });

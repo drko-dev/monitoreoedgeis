@@ -152,13 +152,26 @@ func (s FullEdgePreparationSnapshot) CertifiedReady() bool {
 	if s.State != StateReady || s.ProgressPercent != 100 || !s.Certification.Valid() {
 		return false
 	}
-	// Verify that all 6 required components are marked READY
-	if len(s.Components) > 0 {
-		for _, comp := range s.Components {
-			if comp.Status != ComponentStatusReady {
-				return false
-			}
+	// Require exactly one READY report for every required component. An absent,
+	// incomplete, duplicate, or unknown component list must fail closed.
+	required := map[string]struct{}{
+		"python": {}, "wheelhouse": {}, "worker": {},
+		"ffmpeg": {}, "ffprobe": {}, "authorized_models": {},
+	}
+	if len(s.Components) != len(required) {
+		return false
+	}
+	for _, comp := range s.Components {
+		if comp.Status != ComponentStatusReady {
+			return false
 		}
+		if _, ok := required[comp.Key]; !ok {
+			return false
+		}
+		delete(required, comp.Key)
+	}
+	if len(required) != 0 {
+		return false
 	}
 	return true
 }
