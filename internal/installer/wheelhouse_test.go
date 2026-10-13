@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -1420,5 +1422,568 @@ func TestWheelhouse_Scenario18_Real36ArtifactsCompatibility(t *testing.T) {
 		if err := validateWheelTags(dep, PlatformDarwin, ArchArm64); err != nil {
 			t.Errorf("dependency %s failed tag validation: %v", dep.Name, err)
 		}
+	}
+}
+
+// -----------------------------------------------------------------------------
+// H3 Final Safety Review: Recoverable Backups & Concurrency Protection
+// -----------------------------------------------------------------------------
+
+// Case A: Pending backup from prior run restored
+func TestWheelhouse_CaseA_PendingBackupFromPriorRunRestored(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewWheelhouseManager(wheelDir, pyMgr, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	siteDir := mgr.SitePackagesPath()
+	libDir := filepath.Dir(siteDir)
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate prior interrupted run: site-packages is missing, backup exists
+	_ = os.RemoveAll(siteDir)
+	backupDir := filepath.Join(libDir, ".site-packages.old.prior_interrupted_run")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	canaryPath := filepath.Join(backupDir, "canary.txt")
+	if err := os.WriteFile(canaryPath, []byte("unreconciled_backup_content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Direct reconciliation test
+	if err := ReconcilePendingArtifacts(libDir); err != nil {
+		t.Fatalf("ReconcilePendingArtifacts failed: %v", err)
+	}
+
+	// Verify backup was restored to site-packages
+	restoredCanary := filepath.Join(siteDir, "canary.txt")
+	content, err := os.ReadFile(restoredCanary)
+	if err != nil || string(content) != "unreconciled_backup_content" {
+		t.Fatalf("reconcile failed to restore canary file: %v", err)
+	}
+	if _, err := os.Stat(backupDir); !os.IsNotExist(err) {
+		t.Errorf("expected backupDir to be moved to site-packages, but it still exists")
+	}
+
+	// 2. Re-simulate interrupted state and test reconciliation inside InstallOffline
+	_ = os.RemoveAll(siteDir)
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(canaryPath, []byte("unreconciled_backup_content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr.SetPipExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	})
+
+	rep, err := mgr.InstallOffline(context.Background())
+	if err != nil || !rep.Success {
+		t.Fatalf("InstallOffline failed after pending backup reconciliation: %v", err)
+	}
+}
+
+// Case B: Name collision of staging and backup
+func TestWheelhouse_CaseB_NameCollisionOfStagingAndBackup(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewWheelhouseManager(wheelDir, pyMgr, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	siteDir := mgr.SitePackagesPath()
+	libDir := filepath.Dir(siteDir)
+	if err := os.MkdirAll(siteDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	siteCanary := filepath.Join(siteDir, "active_canary.txt")
+	_ = os.WriteFile(siteCanary, []byte("active_data"), 0o644)
+
+	mgr.SetPipExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	})
+
+	// B.1: Staging collision
+	collidingStaging := filepath.Join(libDir, ".site-packages.tmp.collision_test")
+	_ = os.MkdirAll(collidingStaging, 0o755)
+	stagingPrecious := filepath.Join(collidingStaging, "do_not_delete.txt")
+	_ = os.WriteFile(stagingPrecious, []byte("precious_staging_data"), 0o644)
+
+	mgr.SetStagingDirOverride(collidingStaging)
+	_, err = mgr.InstallOffline(context.Background())
+	if err == nil {
+		t.Fatal("expected staging collision error, got nil")
+	}
+	var safeErr *SafeError
+	if !errors.As(err, &safeErr) || safeErr.Code != ErrCodeWheelStagingFailed {
+		t.Errorf("expected ErrCodeWheelStagingFailed, got %v", err)
+	}
+	// Verify colliding staging and precious file were NOT deleted
+	if content, err := os.ReadFile(stagingPrecious); err != nil || string(content) != "precious_staging_data" {
+		t.Errorf("precious file in colliding staging was destroyed: %v", err)
+	}
+	_ = os.RemoveAll(collidingStaging)
+	mgr.SetStagingDirOverride("")
+
+	// B.2: Backup collision (activation swap guard)
+	collidingBackup := filepath.Join(libDir, ".custom_backup_collision")
+	_ = os.MkdirAll(collidingBackup, 0o755)
+	backupPrecious := filepath.Join(collidingBackup, "do_not_delete_backup.txt")
+	_ = os.WriteFile(backupPrecious, []byte("precious_backup_data"), 0o644)
+
+	mgr.SetBackupDirOverride(collidingBackup)
+	_, err = mgr.InstallOffline(context.Background())
+	if err == nil {
+		t.Fatal("expected backup collision error, got nil")
+	}
+	if !errors.As(err, &safeErr) || safeErr.Code != ErrCodeWheelActivationFailed {
+		t.Errorf("expected ErrCodeWheelActivationFailed on backup collision, got %v", err)
+	}
+	// Verify colliding backup and precious file were NOT deleted
+	if content, err := os.ReadFile(backupPrecious); err != nil || string(content) != "precious_backup_data" {
+		t.Errorf("precious file in colliding backup was destroyed: %v", err)
+	}
+	_ = os.RemoveAll(collidingBackup)
+	mgr.SetBackupDirOverride("")
+
+	// B.3: Pending backup artifact detection (reconciler guard)
+	pendingBackup := filepath.Join(libDir, ".site-packages.old.pending_test")
+	_ = os.MkdirAll(pendingBackup, 0o755)
+	pendingPrecious := filepath.Join(pendingBackup, "pending.txt")
+	_ = os.WriteFile(pendingPrecious, []byte("pending_data"), 0o644)
+
+	_, err = mgr.InstallOffline(context.Background())
+	if err == nil {
+		t.Fatal("expected pending backup collision error, got nil")
+	}
+	if !errors.As(err, &safeErr) || safeErr.Code != ErrCodeWheelPendingBackupFound {
+		t.Errorf("expected ErrCodeWheelPendingBackupFound on pending backup collision, got %v", err)
+	}
+	if content, err := os.ReadFile(pendingPrecious); err != nil || string(content) != "pending_data" {
+		t.Errorf("pending file in backup was destroyed: %v", err)
+	}
+	_ = os.RemoveAll(pendingBackup)
+}
+
+// Case C: Staging rename failure triggers rollback
+func TestWheelhouse_CaseC_StagingRenameFailureTriggersRollback(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewWheelhouseManager(wheelDir, pyMgr, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	siteDir := mgr.SitePackagesPath()
+	_ = os.MkdirAll(siteDir, 0o755)
+	canaryPath := filepath.Join(siteDir, "original_runtime.txt")
+	_ = os.WriteFile(canaryPath, []byte("original_site_packages_content"), 0o644)
+
+	mgr.SetFaultInjection("staging_swap_fail")
+	mgr.SetPipExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	})
+
+	_, err = mgr.InstallOffline(context.Background())
+	if err == nil {
+		t.Fatal("expected staging_swap_fail error, got nil")
+	}
+	var safeErr *SafeError
+	if !errors.As(err, &safeErr) || safeErr.Code != ErrCodeWheelActivationFailed {
+		t.Errorf("expected ErrCodeWheelActivationFailed, got %v", err)
+	}
+
+	// Verify rollback restored the backup
+	content, err := os.ReadFile(canaryPath)
+	if err != nil || string(content) != "original_site_packages_content" {
+		t.Fatalf("rollback failed to restore original site-packages: %v", err)
+	}
+}
+
+// Case D: Rollback restore failure preserves backup
+func TestWheelhouse_CaseD_RollbackRestoreFailurePreservesBackup(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewWheelhouseManager(wheelDir, pyMgr, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	siteDir := mgr.SitePackagesPath()
+	libDir := filepath.Dir(siteDir)
+	_ = os.MkdirAll(siteDir, 0o755)
+	canaryPath := filepath.Join(siteDir, "precious_data.txt")
+	_ = os.WriteFile(canaryPath, []byte("precious_unrecoverable_data"), 0o644)
+
+	mgr.SetFaultInjection("restore_fail")
+	mgr.SetPipExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	})
+
+	_, err = mgr.InstallOffline(context.Background())
+	if err == nil {
+		t.Fatal("expected restore_fail error, got nil")
+	}
+
+	var safeErr *SafeError
+	if !errors.As(err, &safeErr) || safeErr.Code != ErrCodeWheelRollbackFailed {
+		t.Fatalf("expected ErrCodeWheelRollbackFailed, got %v", err)
+	}
+
+	// Check that error message mentions manual recovery command
+	if !strings.Contains(safeErr.SafeMessage, "mv") || !strings.Contains(safeErr.SafeMessage, "backup preservado") {
+		t.Errorf("expected safe message with recovery instruction, got: %s", safeErr.SafeMessage)
+	}
+
+	// Verify that the backup directory was PRESERVED on disk!
+	entries, _ := os.ReadDir(libDir)
+	foundBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".site-packages.old.") {
+			foundBackup = true
+			backupCanary := filepath.Join(libDir, entry.Name(), "precious_data.txt")
+			data, err := os.ReadFile(backupCanary)
+			if err != nil || string(data) != "precious_unrecoverable_data" {
+				t.Errorf("precious data corrupted in preserved backup: %v", err)
+			}
+		}
+	}
+	if !foundBackup {
+		t.Fatal("backup directory was NOT preserved on disk after rollback restoration failure!")
+	}
+}
+
+// Case E: Concurrent execution protection
+func TestWheelhouse_CaseE_ConcurrentExecutionProtection(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr1, err := NewWheelhouseManager(wheelDir, pyMgr, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr2, err := NewWheelhouseManager(wheelDir, pyMgr, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// E.1 In-process concurrency protection
+	startedFirst := make(chan struct{})
+	finishFirst := make(chan struct{})
+
+	mgr1.SetPipExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		close(startedFirst)
+		<-finishFirst
+		return []byte("ok"), nil
+	})
+	mgr2.SetPipExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	})
+
+	var wg sync.WaitGroup
+	var err2 error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = mgr1.InstallOffline(context.Background())
+	}()
+
+	<-startedFirst
+
+	// Attempt concurrent installation on the same python runtime
+	_, err2 = mgr2.InstallOffline(context.Background())
+	close(finishFirst)
+	wg.Wait()
+
+	if err2 == nil {
+		t.Fatal("expected second concurrent InstallOffline to fail, got nil")
+	}
+	var safeErr *SafeError
+	if !errors.As(err2, &safeErr) || safeErr.Code != ErrCodeWheelConcurrentInstall {
+		t.Errorf("expected ErrCodeWheelConcurrentInstall, got %v", err2)
+	}
+
+	// E.2 Cross-process file lock concurrency protection
+	siteDir := mgr1.SitePackagesPath()
+	libDir := filepath.Dir(siteDir)
+	lockPath := filepath.Join(libDir, ".install.lock")
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+
+	_, errFlock := mgr1.InstallOffline(context.Background())
+	_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	_ = lockFile.Close()
+
+	if errFlock == nil {
+		t.Fatal("expected InstallOffline to fail when .install.lock is held, got nil")
+	}
+	if !errors.As(errFlock, &safeErr) || safeErr.Code != ErrCodeWheelConcurrentInstall {
+		t.Errorf("expected ErrCodeWheelConcurrentInstall under external flock, got %v", errFlock)
+	}
+}
+
+// Case F: Interruption between renames
+func TestWheelhouse_CaseF_InterruptionBetweenRenames(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewWheelhouseManager(wheelDir, pyMgr, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	siteDir := mgr.SitePackagesPath()
+	libDir := filepath.Dir(siteDir)
+	_ = os.MkdirAll(siteDir, 0o755)
+	canaryPath := filepath.Join(siteDir, "crash_canary.txt")
+	_ = os.WriteFile(canaryPath, []byte("data_before_crash"), 0o644)
+
+	mgr.SetFaultInjection("interrupted_between_renames")
+	mgr.SetPipExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	})
+
+	_, err = mgr.InstallOffline(context.Background())
+	if err == nil {
+		t.Fatal("expected error on interrupted_between_renames, got nil")
+	}
+
+	// Verify filesystem state right after interruption
+	if _, err := os.Stat(siteDir); !os.IsNotExist(err) {
+		t.Fatal("expected site-packages to be absent after first rename in interrupted state")
+	}
+
+	entries, _ := os.ReadDir(libDir)
+	foundBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".site-packages.old.") {
+			foundBackup = true
+			canary := filepath.Join(libDir, entry.Name(), "crash_canary.txt")
+			data, err := os.ReadFile(canary)
+			if err != nil || string(data) != "data_before_crash" {
+				t.Errorf("corrupted data in backup after interruption: %v", err)
+			}
+		}
+	}
+	if !foundBackup {
+		t.Fatal("backup directory missing after interruption between renames")
+	}
+}
+
+// Case G: Retry after interruption restores previous state
+func TestWheelhouse_CaseG_RetryAfterInterruptionRestoresPreviousState(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewWheelhouseManager(wheelDir, pyMgr, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	siteDir := mgr.SitePackagesPath()
+	libDir := filepath.Dir(siteDir)
+	_ = os.MkdirAll(siteDir, 0o755)
+	canaryPath := filepath.Join(siteDir, "recoverable.txt")
+	_ = os.WriteFile(canaryPath, []byte("recoverable_state_before_crash"), 0o644)
+
+	// Step 1: Interrupt execution
+	mgr.SetFaultInjection("interrupted_between_renames")
+	mgr.SetPipExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	})
+	_, _ = mgr.InstallOffline(context.Background())
+
+	// Confirm siteDir is absent
+	if _, err := os.Stat(siteDir); !os.IsNotExist(err) {
+		t.Fatal("pre-condition failed: site-packages should be missing")
+	}
+
+	// Step 2: Retry without fault injection
+	mgr.SetFaultInjection("")
+	rep, err := mgr.InstallOffline(context.Background())
+	if err != nil || !rep.Success {
+		t.Fatalf("retry after interruption failed: %v", err)
+	}
+
+	// Confirm siteDir exists and dependencies are installed
+	if _, err := os.Stat(siteDir); err != nil {
+		t.Fatalf("site-packages missing after retry: %v", err)
+	}
+	if mgr.ReadinessState() != StateDependenciesInstalled {
+		t.Errorf("expected StateDependenciesInstalled, got %s", mgr.ReadinessState())
+	}
+
+	// Ensure no stale backup or tmp files remain
+	entries, _ := os.ReadDir(libDir)
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".site-packages.old.") || strings.HasPrefix(entry.Name(), ".site-packages.tmp.") {
+			t.Errorf("leftover artifact after successful retry: %s", entry.Name())
+		}
+	}
+}
+
+// Case H: Cryptographic bit-for-bit preservation of previous runtime
+func TestWheelhouse_CaseH_CryptographicBitForBitPreservation(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewWheelhouseManager(wheelDir, pyMgr, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	siteDir := mgr.SitePackagesPath()
+	_ = os.MkdirAll(filepath.Join(siteDir, "pkg_a"), 0o755)
+	_ = os.MkdirAll(filepath.Join(siteDir, "pkg_b", "sub"), 0o755)
+	_ = os.WriteFile(filepath.Join(siteDir, "pkg_a", "__init__.py"), []byte("# pkg_a\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(siteDir, "pkg_a", "core.py"), []byte("print('core')\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(siteDir, "pkg_b", "sub", "data.json"), []byte(`{"v": 1}`), 0o644)
+
+	// Compute initial hash map
+	initialHashes := make(map[string]string)
+	err = filepath.Walk(siteDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		rel, _ := filepath.Rel(siteDir, path)
+		data, _ := os.ReadFile(path)
+		h := sha256.Sum256(data)
+		initialHashes[rel] = hex.EncodeToString(h[:])
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Trigger failure during swap
+	mgr.SetFaultInjection("staging_swap_fail")
+	mgr.SetPipExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	})
+
+	_, err = mgr.InstallOffline(context.Background())
+	if err == nil {
+		t.Fatal("expected failure, got nil")
+	}
+
+	// Compute post-rollback hash map
+	postHashes := make(map[string]string)
+	err = filepath.Walk(siteDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		rel, _ := filepath.Rel(siteDir, path)
+		data, _ := os.ReadFile(path)
+		h := sha256.Sum256(data)
+		postHashes[rel] = hex.EncodeToString(h[:])
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(initialHashes) != len(postHashes) {
+		t.Fatalf("file count mismatch after rollback: initial %d, post %d", len(initialHashes), len(postHashes))
+	}
+	for rel, initHash := range initialHashes {
+		postHash, exists := postHashes[rel]
+		if !exists {
+			t.Errorf("file %s missing after rollback", rel)
+		} else if initHash != postHash {
+			t.Errorf("file %s cryptographic hash mismatch: %s vs %s", rel, initHash, postHash)
+		}
+	}
+}
+
+// Case I: Clean and idempotent installation
+func TestWheelhouse_CaseI_CleanAndIdempotentInstallation(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewWheelhouseManager(wheelDir, pyMgr, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	siteDir := mgr.SitePackagesPath()
+	libDir := filepath.Dir(siteDir)
+
+	mgr.SetPipExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return []byte("Requirement already satisfied"), nil
+	})
+
+	// Run 1: Fresh install
+	rep1, err := mgr.InstallOffline(context.Background())
+	if err != nil || !rep1.Success {
+		t.Fatalf("first installation failed: %v", err)
+	}
+
+	// Check clean state
+	entries1, _ := os.ReadDir(libDir)
+	for _, entry := range entries1 {
+		if strings.HasPrefix(entry.Name(), ".site-packages.") {
+			t.Errorf("unexpected leftover artifact after run 1: %s", entry.Name())
+		}
+	}
+
+	// Run 2: Repeat install (idempotence)
+	rep2, err := mgr.InstallOffline(context.Background())
+	if err != nil || !rep2.Success {
+		t.Fatalf("second installation failed: %v", err)
+	}
+
+	// Check clean state again
+	entries2, _ := os.ReadDir(libDir)
+	for _, entry := range entries2 {
+		if strings.HasPrefix(entry.Name(), ".site-packages.") {
+			t.Errorf("unexpected leftover artifact after run 2: %s", entry.Name())
+		}
+	}
+
+	if mgr.ReadinessState() != StateDependenciesInstalled {
+		t.Errorf("expected StateDependenciesInstalled, got %s", mgr.ReadinessState())
 	}
 }

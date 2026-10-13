@@ -12,7 +12,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -39,6 +42,8 @@ var (
 	ErrWheelStagingIncomplete       = errors.New("staged site-packages dependencies incomplete or invalid")
 	ErrWheelActivationFailed        = errors.New("site-packages directory activation swap failed")
 	ErrWheelRollbackFailed          = errors.New("site-packages rollback failed to restore previous valid installation")
+	ErrWheelConcurrentInstall       = errors.New("concurrent installation already in progress on python runtime")
+	ErrWheelPendingBackupFound      = errors.New("unreconciled pending backup found from prior run")
 )
 
 // Typed error codes for SafeError.
@@ -63,6 +68,8 @@ const (
 	ErrCodeWheelStagingFailed        = "WHEEL_STAGING_FAILED"
 	ErrCodeWheelActivationFailed     = "WHEEL_ACTIVATION_FAILED"
 	ErrCodeWheelRollbackFailed       = "WHEEL_ROLLBACK_FAILED"
+	ErrCodeWheelConcurrentInstall    = "WHEEL_CONCURRENT_INSTALL"
+	ErrCodeWheelPendingBackupFound   = "WHEEL_PENDING_BACKUP_FOUND"
 )
 
 // Lifecycle readiness states for the offline Python runtime.
@@ -375,12 +382,14 @@ func (l *WheelhouseLock) FindDependency(name string) *WheelDependencySpec {
 
 // WheelhouseManager manages offline wheel validation and hermetic installation.
 type WheelhouseManager struct {
-	wheelhouseDir string
-	pythonMgr     *EmbeddedPythonManager
-	lock          *WheelhouseLock
-	pipExecutor   PipCommandExecutor
-	readiness     string
-	faultInject   string
+	wheelhouseDir      string
+	pythonMgr          *EmbeddedPythonManager
+	lock               *WheelhouseLock
+	pipExecutor        PipCommandExecutor
+	readiness          string
+	faultInject        string
+	stagingDirOverride string
+	backupDirOverride  string
 }
 
 // NewWheelhouseManager creates a WheelhouseManager for the specified wheelhouse directory and Python manager.
@@ -417,6 +426,16 @@ func (m *WheelhouseManager) SetFaultInjection(stage string) {
 	m.faultInject = stage
 }
 
+// SetStagingDirOverride sets an explicit staging dir path for testing collision scenarios.
+func (m *WheelhouseManager) SetStagingDirOverride(dir string) {
+	m.stagingDirOverride = dir
+}
+
+// SetBackupDirOverride sets an explicit backup dir path for testing collision scenarios.
+func (m *WheelhouseManager) SetBackupDirOverride(dir string) {
+	m.backupDirOverride = dir
+}
+
 // ReadinessState returns the current lifecycle readiness state of the wheelhouse.
 func (m *WheelhouseManager) ReadinessState() string {
 	return m.readiness
@@ -435,6 +454,17 @@ func (m *WheelhouseManager) SitePackagesPath() string {
 	pythonBin := m.pythonMgr.BinaryPath()
 	prefix := filepath.Dir(filepath.Dir(pythonBin))
 	return filepath.Join(prefix, "lib", "python3.11", "site-packages")
+}
+
+// ReconcilePendingArtifacts inspects and resolves leftover backups or staging dirs in the runtime.
+func (m *WheelhouseManager) ReconcilePendingArtifacts() error {
+	if m.pythonMgr == nil {
+		return errors.New("python manager is nil")
+	}
+	pythonBin := m.pythonMgr.BinaryPath()
+	prefix := filepath.Dir(filepath.Dir(pythonBin))
+	libDir := filepath.Join(prefix, "lib", "python3.11")
+	return ReconcilePendingArtifacts(libDir)
 }
 
 // ValidateArtifacts verifies physical existence, canonical confinement, exact byte size, and SHA-256 for all wheels.
@@ -869,6 +899,195 @@ func copyPathRecursively(src, dst string) error {
 	return err
 }
 
+var (
+	// Package-level in-memory lock registry to prevent concurrent installations within the same Go process
+	runtimeLocksMu sync.Mutex
+	runtimeLocks   = make(map[string]*sync.Mutex)
+)
+
+type runtimeLock struct {
+	file      *os.File
+	pathMutex *sync.Mutex
+}
+
+func (l *runtimeLock) Release() {
+	if l == nil {
+		return
+	}
+	if l.file != nil {
+		_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
+		_ = l.file.Close()
+	}
+	if l.pathMutex != nil {
+		l.pathMutex.Unlock()
+	}
+}
+
+func acquireRuntimeLock(libDir string) (*runtimeLock, error) {
+	canonPath, err := filepath.EvalSymlinks(libDir)
+	if err != nil {
+		canonPath = filepath.Clean(libDir)
+	}
+
+	runtimeLocksMu.Lock()
+	pMu, exists := runtimeLocks[canonPath]
+	if !exists {
+		pMu = &sync.Mutex{}
+		runtimeLocks[canonPath] = pMu
+	}
+	runtimeLocksMu.Unlock()
+
+	if !pMu.TryLock() {
+		return nil, &SafeError{
+			Code:        ErrCodeWheelConcurrentInstall,
+			SafeMessage: fmt.Sprintf("Instalación concurrente detectada en el runtime de Python: %s", libDir),
+			Recoverable: false,
+			Err:         ErrWheelConcurrentInstall,
+		}
+	}
+
+	lockPath := filepath.Join(libDir, ".install.lock")
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		pMu.Unlock()
+		return nil, fmt.Errorf("failed to open runtime lock file %s: %w", lockPath, err)
+	}
+
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lockFile.Close()
+		pMu.Unlock()
+		return nil, &SafeError{
+			Code:        ErrCodeWheelConcurrentInstall,
+			SafeMessage: fmt.Sprintf("Instalación concurrente entre procesos detectada en: %s", lockPath),
+			Recoverable: false,
+			Err:         ErrWheelConcurrentInstall,
+		}
+	}
+
+	_ = lockFile.Truncate(0)
+	_, _ = lockFile.Seek(0, 0)
+	_, _ = fmt.Fprintf(lockFile, "pid=%d time=%d\n", os.Getpid(), time.Now().UnixNano())
+
+	return &runtimeLock{
+		file:      lockFile,
+		pathMutex: pMu,
+	}, nil
+}
+
+func generateUniqueDir(baseDir, prefix string) (string, error) {
+	for i := 0; i < 1000; i++ {
+		cand := filepath.Join(baseDir, fmt.Sprintf("%s.%d_%d_%d", prefix, os.Getpid(), time.Now().UnixNano(), i))
+		if _, err := os.Stat(cand); os.IsNotExist(err) {
+			return cand, nil
+		}
+	}
+	return "", fmt.Errorf("failed to generate unique directory for %s in %s", prefix, baseDir)
+}
+
+// ReconcilePendingArtifacts inspects libDir for leftover artifacts from previous runs
+// (.site-packages.old.*, .site-packages.tmp.*, .site-packages.broken.*) and reconciles them.
+func ReconcilePendingArtifacts(libDir string) error {
+	sitePackages := filepath.Join(libDir, "site-packages")
+
+	entries, err := os.ReadDir(libDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	var oldBackups []string
+	var tmpStagings []string
+	var brokenDirs []string
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() {
+			continue
+		}
+		if strings.HasPrefix(name, ".site-packages.old.") {
+			oldBackups = append(oldBackups, filepath.Join(libDir, name))
+		} else if strings.HasPrefix(name, ".site-packages.tmp.") {
+			tmpStagings = append(tmpStagings, filepath.Join(libDir, name))
+		} else if strings.HasPrefix(name, ".site-packages.broken.") {
+			brokenDirs = append(brokenDirs, filepath.Join(libDir, name))
+		}
+	}
+
+	// If there are no pending backups, there is nothing to reconcile
+	if len(oldBackups) == 0 {
+		return nil
+	}
+
+	// Sort backups to find the most recent one
+	sort.Slice(oldBackups, func(i, j int) bool {
+		fi1, err1 := os.Stat(oldBackups[i])
+		fi2, err2 := os.Stat(oldBackups[j])
+		if err1 == nil && err2 == nil {
+			return fi1.ModTime().After(fi2.ModTime())
+		}
+		return oldBackups[i] > oldBackups[j]
+	})
+	latestBackup := oldBackups[0]
+
+	siteFi, siteErr := os.Stat(sitePackages)
+	siteExists := (siteErr == nil)
+
+	if !siteExists {
+		// site-packages is MISSING! An interrupted swap occurred after moving site-packages to backup.
+		// Reconcile by restoring the latest backup to site-packages.
+		if err := os.Rename(latestBackup, sitePackages); err != nil {
+			return &SafeError{
+				Code:        ErrCodeWheelRollbackFailed,
+				SafeMessage: fmt.Sprintf("CRITICAL: Error reconciliando y restaurando backup previo %s a site-packages: %v. Backup preservado. Comando manual: mv %s %s", latestBackup, err, latestBackup, sitePackages),
+				Recoverable: false,
+				Err:         ErrWheelRollbackFailed,
+			}
+		}
+		// Clean up remaining stale temporary artifacts from the interrupted run
+		for _, tmp := range tmpStagings {
+			_ = os.RemoveAll(tmp)
+		}
+		for _, brk := range brokenDirs {
+			_ = os.RemoveAll(brk)
+		}
+		return nil
+	}
+
+	// Check if sitePackages is empty
+	if siteFi.IsDir() {
+		siteEntries, err := os.ReadDir(sitePackages)
+		if err == nil && len(siteEntries) == 0 {
+			_ = os.Remove(sitePackages)
+			if err := os.Rename(latestBackup, sitePackages); err != nil {
+				return &SafeError{
+					Code:        ErrCodeWheelRollbackFailed,
+					SafeMessage: fmt.Sprintf("CRITICAL: Error restaurando backup previo %s a site-packages vacío: %v. Backup preservado. Comando manual: mv %s %s", latestBackup, err, latestBackup, sitePackages),
+					Recoverable: false,
+					Err:         ErrWheelRollbackFailed,
+				}
+			}
+			for _, tmp := range tmpStagings {
+				_ = os.RemoveAll(tmp)
+			}
+			for _, brk := range brokenDirs {
+				_ = os.RemoveAll(brk)
+			}
+			return nil
+		}
+	}
+
+	// Both sitePackages and latestBackup exist and have content:
+	// We must NEVER delete a backup without proving it is unneeded.
+	return &SafeError{
+		Code:        ErrCodeWheelPendingBackupFound,
+		SafeMessage: fmt.Sprintf("Artefactos de activación pendientes detectados: backup previo no reconciliado en %s junto a site-packages existente. Debe resolver manualmente antes de continuar. Comando sugerido para restaurar backup: mv %s %s (o eliminar el backup si site-packages es correcto)", latestBackup, latestBackup, sitePackages),
+		Recoverable: false,
+		Err:         ErrWheelPendingBackupFound,
+	}
+}
+
 // InstallOffline executes pip install strictly offline (--no-index, --find-links, --require-hashes)
 // into an isolated staging directory on the same filesystem, and performs an atomic directory swap with
 // automatic transactional rollback if verification fails.
@@ -898,17 +1117,66 @@ func (m *WheelhouseManager) InstallOffline(ctx context.Context) (*InstallReport,
 	if err := os.MkdirAll(libDir, 0o755); err != nil {
 		return nil, err
 	}
+	// Protect against concurrent installations (in-process and cross-process)
+	lock, err := acquireRuntimeLock(libDir)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Release()
+
+	// Reconcile any pending artifacts from prior runs before proceeding
+	if err := ReconcilePendingArtifacts(libDir); err != nil {
+		return nil, err
+	}
 
 	sitePackages := filepath.Join(libDir, "site-packages")
-	pid := os.Getpid()
-	stagingDir := filepath.Join(libDir, fmt.Sprintf(".site-packages.tmp.%d", pid))
-	backupDir := filepath.Join(libDir, fmt.Sprintf(".site-packages.old.%d", pid))
-	brokenDir := filepath.Join(libDir, fmt.Sprintf(".site-packages.broken.%d", pid))
 
-	// Clean up any stale staging/backup artifacts before starting
-	_ = os.RemoveAll(stagingDir)
-	_ = os.RemoveAll(backupDir)
-	_ = os.RemoveAll(brokenDir)
+	var stagingDir, backupDir, brokenDir string
+	var genErr error
+
+	if m.stagingDirOverride != "" {
+		stagingDir = m.stagingDirOverride
+	} else {
+		stagingDir, genErr = generateUniqueDir(libDir, ".site-packages.tmp")
+		if genErr != nil {
+			return nil, genErr
+		}
+	}
+
+	if m.backupDirOverride != "" {
+		backupDir = m.backupDirOverride
+	} else {
+		backupDir, genErr = generateUniqueDir(libDir, ".site-packages.old")
+		if genErr != nil {
+			return nil, genErr
+		}
+	}
+
+	brokenDir, genErr = generateUniqueDir(libDir, ".site-packages.broken")
+	if genErr != nil {
+		return nil, genErr
+	}
+
+	// Guard against collisions: never delete a backup without proving it is unneeded!
+	if fi, err := os.Stat(stagingDir); err == nil && fi.IsDir() {
+		entries, _ := os.ReadDir(stagingDir)
+		if len(entries) > 0 {
+			return nil, &SafeError{
+				Code:        ErrCodeWheelStagingFailed,
+				SafeMessage: fmt.Sprintf("Colisión en directorio de staging detectada: %s ya existe y no está vacío", stagingDir),
+				Recoverable: false,
+				Err:         fmt.Errorf("staging collision: %s already exists", stagingDir),
+			}
+		}
+	}
+	if _, err := os.Stat(backupDir); err == nil {
+		return nil, &SafeError{
+			Code:        ErrCodeWheelActivationFailed,
+			SafeMessage: fmt.Sprintf("Colisión en directorio de backup detectada: %s ya existe y no será sobrescrito", backupDir),
+			Recoverable: false,
+			Err:         fmt.Errorf("backup directory collision: %s already exists", backupDir),
+		}
+	}
 
 	// 3. Generate ephemeral cryptographic requirements lock
 	reqFile, err := os.CreateTemp("", "geocam-requirements.*.lock.txt")
@@ -1048,6 +1316,16 @@ func (m *WheelhouseManager) InstallOffline(ctx context.Context) (*InstallReport,
 	hadPrevious := false
 	if fi, err := os.Stat(sitePackages); err == nil && fi.IsDir() {
 		hadPrevious = true
+		if m.faultInject == "backup_rename_fail" {
+			_ = os.RemoveAll(stagingDir)
+			return nil, &SafeError{
+				Code:        ErrCodeWheelActivationFailed,
+				SafeMessage: "FAULT_INJECTION: fallo al mover site-packages existente a backup",
+				Recoverable: false,
+				Err:         ErrWheelActivationFailed,
+			}
+		}
+
 		if err := os.Rename(sitePackages, backupDir); err != nil {
 			_ = os.RemoveAll(stagingDir)
 			return nil, &SafeError{
@@ -1059,9 +1337,46 @@ func (m *WheelhouseManager) InstallOffline(ctx context.Context) (*InstallReport,
 		}
 	}
 
+	// Fault injection for interruption between renames
+	if m.faultInject == "interrupted_between_renames" {
+		return nil, &SafeError{
+			Code:        ErrCodeWheelActivationFailed,
+			SafeMessage: "FAULT_INJECTION: proceso interrumpido entre renames (backup creado, staging no activado)",
+			Recoverable: true,
+			Err:         errors.New("interrupted between renames"),
+		}
+	}
+
+	if m.faultInject == "staging_swap_fail" {
+		if hadPrevious {
+			if rbErr := os.Rename(backupDir, sitePackages); rbErr != nil {
+				return nil, &SafeError{
+					Code:        ErrCodeWheelRollbackFailed,
+					SafeMessage: fmt.Sprintf("CRITICAL: Error activando staging y falló la restauración del backup previo; backup preservado en %s. Comando de recuperación manual: mv %s %s", backupDir, backupDir, sitePackages),
+					Recoverable: false,
+					Err:         ErrWheelRollbackFailed,
+				}
+			}
+		}
+		_ = os.RemoveAll(stagingDir)
+		return nil, &SafeError{
+			Code:        ErrCodeWheelActivationFailed,
+			SafeMessage: "FAULT_INJECTION: fallo al activar staging en site-packages",
+			Recoverable: false,
+			Err:         ErrWheelActivationFailed,
+		}
+	}
+
 	if err := os.Rename(stagingDir, sitePackages); err != nil {
 		if hadPrevious {
-			_ = os.Rename(backupDir, sitePackages)
+			if rbErr := os.Rename(backupDir, sitePackages); rbErr != nil {
+				return nil, &SafeError{
+					Code:        ErrCodeWheelRollbackFailed,
+					SafeMessage: fmt.Sprintf("CRITICAL: Error activando staging y falló la restauración del backup previo (%v); backup preservado en %s. Comando de recuperación manual: mv %s %s", rbErr, backupDir, backupDir, sitePackages),
+					Recoverable: false,
+					Err:         ErrWheelRollbackFailed,
+				}
+			}
 		}
 		_ = os.RemoveAll(stagingDir)
 		return nil, &SafeError{
@@ -1072,82 +1387,60 @@ func (m *WheelhouseManager) InstallOffline(ctx context.Context) (*InstallReport,
 		}
 	}
 
-	// Fault injection for post-activation failures
-	if m.faultInject == "pip_check_fail" {
+	rollbackAfterActivation := func(origErr error, code string, msg string) error {
 		_ = os.RemoveAll(brokenDir)
 		_ = os.Rename(sitePackages, brokenDir)
+
 		if hadPrevious {
-			_ = os.Rename(backupDir, sitePackages)
+			if m.faultInject == "restore_fail" {
+				return &SafeError{
+					Code:        ErrCodeWheelRollbackFailed,
+					SafeMessage: fmt.Sprintf("CRITICAL: Error restaurando backup; backup preservado en %s. Comando de recuperación manual: mv %s %s", backupDir, backupDir, sitePackages),
+					Recoverable: false,
+					Err:         ErrWheelRollbackFailed,
+				}
+			}
+
+			if rbErr := os.Rename(backupDir, sitePackages); rbErr != nil {
+				return &SafeError{
+					Code:        ErrCodeWheelRollbackFailed,
+					SafeMessage: fmt.Sprintf("CRITICAL: Error restaurando backup tras fallo (%v); backup preservado en %s. Comando de recuperación manual: mv %s %s", rbErr, backupDir, backupDir, sitePackages),
+					Recoverable: false,
+					Err:         ErrWheelRollbackFailed,
+				}
+			}
 		}
+
 		_ = os.RemoveAll(brokenDir)
-		return nil, &SafeError{
-			Code:        ErrCodeWheelPipCheckFailed,
-			SafeMessage: "FAULT_INJECTION: pip check falló",
+		return &SafeError{
+			Code:        code,
+			SafeMessage: msg,
 			Recoverable: true,
-			Err:         ErrWheelPipCheckFailed,
+			Err:         origErr,
 		}
+	}
+
+	// Fault injection for post-activation failures
+	if m.faultInject == "pip_check_fail" {
+		return nil, rollbackAfterActivation(ErrWheelPipCheckFailed, ErrCodeWheelPipCheckFailed, "FAULT_INJECTION: pip check falló")
 	}
 
 	if m.faultInject == "audit_fail" {
-		_ = os.RemoveAll(brokenDir)
-		_ = os.Rename(sitePackages, brokenDir)
-		if hadPrevious {
-			_ = os.Rename(backupDir, sitePackages)
-		}
-		_ = os.RemoveAll(brokenDir)
-		return nil, &SafeError{
-			Code:        ErrCodeWheelAuditMismatch,
-			SafeMessage: "FAULT_INJECTION: auditoría de distribuciones falló",
-			Recoverable: true,
-			Err:         ErrWheelAuditMismatch,
-		}
+		return nil, rollbackAfterActivation(ErrWheelAuditMismatch, ErrCodeWheelAuditMismatch, "FAULT_INJECTION: auditoría de distribuciones falló")
 	}
 
 	if m.faultInject == "restore_fail" {
-		_ = os.RemoveAll(brokenDir)
-		_ = os.Rename(sitePackages, brokenDir)
-		return nil, &SafeError{
-			Code:        ErrCodeWheelRollbackFailed,
-			SafeMessage: fmt.Sprintf("CRITICAL: Error restaurando backup; backup preservado en %s", backupDir),
-			Recoverable: false,
-			Err:         ErrWheelRollbackFailed,
-		}
+		return nil, rollbackAfterActivation(ErrWheelRollbackFailed, ErrCodeWheelRollbackFailed, "FAULT_INJECTION: fallo al restaurar backup")
 	}
 
 	// 7. Post-activation verification on active interpreter
 	if m.pipExecutor == nil {
 		if err := m.CheckPipConsistency(ctx); err != nil {
-			_ = os.RemoveAll(brokenDir)
-			_ = os.Rename(sitePackages, brokenDir)
-			if hadPrevious {
-				if rbErr := os.Rename(backupDir, sitePackages); rbErr != nil {
-					return nil, &SafeError{
-						Code:        ErrCodeWheelRollbackFailed,
-						SafeMessage: fmt.Sprintf("CRITICAL: Error restaurando backup tras fallo de pip check; backup preservado en %s", backupDir),
-						Recoverable: false,
-						Err:         ErrWheelRollbackFailed,
-					}
-				}
-			}
-			_ = os.RemoveAll(brokenDir)
-			return nil, err
+			return nil, rollbackAfterActivation(err, ErrCodeWheelPipCheckFailed, fmt.Sprintf("Fallo de consistencia pip check: %v", err))
 		}
 
 		if _, err := m.AuditInstalledDistributions(ctx); err != nil {
-			_ = os.RemoveAll(brokenDir)
-			_ = os.Rename(sitePackages, brokenDir)
-			if hadPrevious {
-				if rbErr := os.Rename(backupDir, sitePackages); rbErr != nil {
-					return nil, &SafeError{
-						Code:        ErrCodeWheelRollbackFailed,
-						SafeMessage: fmt.Sprintf("CRITICAL: Error restaurando backup tras fallo de auditoría; backup preservado en %s", backupDir),
-						Recoverable: false,
-						Err:         ErrWheelRollbackFailed,
-					}
-				}
-			}
-			_ = os.RemoveAll(brokenDir)
-			return nil, err
+			return nil, rollbackAfterActivation(err, ErrCodeWheelAuditMismatch, fmt.Sprintf("Fallo de auditoría de distribuciones: %v", err))
 		}
 	}
 

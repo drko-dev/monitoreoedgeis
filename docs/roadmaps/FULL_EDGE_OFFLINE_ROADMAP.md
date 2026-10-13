@@ -176,14 +176,17 @@ This document establishes the official engineering roadmap to transition GEO CAM
 - **Implementación realizada:**
   - Lockfile determinista `assets/wheelhouse-lock.json` con 36 wheels binarios exactos (173.9 MB total), hashes SHA-256 reales, tamaños y metadatos de tags PEP 427.
   - Instalación verdaderamente determinista con barrera criptográfica obligatoria: generación efímera de `requirements.lock.txt` con exact pins (`name==version --hash=sha256:...`) e invocación de pip con `--require-hashes --no-index --find-links=<wheelhouse> --only-binary=:all: --no-cache-dir`. Pip opera en modo fail-closed rechazando cualquier dependencia no fijada, hash alterado o sdist.
-  - Staging aislado y recuperable: `InstallOffline()` no modifica `site-packages` activo en el lugar. Realiza staging en `.site-packages.tmp.<pid>` en el mismo filesystem, pre-sembrado con paquetes base del intérprete (`pip`, `setuptools`), audita los 36 paquetes `.dist-info`, y ejecuta swap de directorios de dos pasos con backup en `.site-packages.old.<pid>`.
+  - Staging aislado y recuperable: `InstallOffline()` no modifica `site-packages` activo en el lugar. Realiza staging en `.site-packages.tmp.<unique>` en el mismo filesystem, pre-sembrado con paquetes base del intérprete (`pip`, `setuptools`), audita los 36 paquetes `.dist-info`, y ejecuta swap de directorios de dos pasos con backup en `.site-packages.old.<unique>`.
   - Verificaciones post-activación y rollback automático: comprobación de consistencia con `pip check`, auditoría de distribuciones instaladas con `importlib.metadata`, y sonda de imports con MPS. Si cualquier verificación falla, se dispara rollback automático restaurando el `site-packages` anterior intacto.
+  - Reconciliación persistente de backups (`ReconcilePendingArtifacts`): si una ejecución previa fue interrumpida abruptamente (SIGKILL, fallo de alimentación) dejando `site-packages` ausente o vacío con un backup `.site-packages.old.*` pendiente, la nueva ejecución reconcilia y restaura automáticamente el backup antes de comenzar. Si coexisten con datos, rechaza fail-closed (`ErrCodeWheelPendingBackupFound`) impidiendo la eliminación o sobreescritura accidental del backup.
+  - Protección de concurrencia dual: cerrojo en memoria por ruta canónica (`sync.Mutex`) contra goroutines concurrentes y cerrojo de archivo consultivo (`syscall.Flock` no bloqueante en `.install.lock`) contra procesos paralelos, rechazando colisiones con `ErrCodeWheelConcurrentInstall`.
+  - Comprobación estricta de rollback: cada `os.Rename` en todas las ramas de activación y rollback es verificado explícitamente; ante fallo de restauración se preserva el backup en disco, se retorna `ErrCodeWheelRollbackFailed` y se emite el comando de recuperación manual.
   - Publicación transaccional de wheelhouse en `deploy/installer/fetch-wheelhouse.sh`: reemplazo del movimiento archivo por archivo por máquina de estados explícita (`INIT` -> `PREPARING` -> `STAGED` -> `BACKING_UP` -> `BACKED_UP` -> `ACTIVATING` -> `ACTIVATED` -> `VERIFYING` -> `COMMITTED`), staging atómico en `.wheelhouse.tmp.$$`, backup en `.wheelhouse.old.$$`, y rollback basado en evidencia del filesystem ante terminación anormal.
   - Contención estricta de red: `PIP_CONFIG_FILE=/dev/null`, `PIP_NO_INDEX=1` y proxy blackhole a `127.0.0.1:9`.
   - Auditoría de licencias y límite legal AGPL-3.0: documentado que la separación de procesos por Unix socket no constituye una exención legal automática de AGPL-3.0 para distribución comercial sin código fuente; aprobación jurídica y comercial mantenida como bloqueo independiente.
   - Se mantiene estrictamente `MODEL_REDISTRIBUTION_APPROVED=false`. No se incluyen pesos YOLO.
 - **Tests obligatorios:**
-  - Suite adversarial completa de 18 escenarios en `internal/installer/wheelhouse_test.go`:
+  - Suite adversarial completa de 27 escenarios en `internal/installer/wheelhouse_test.go` (18 escenarios base + 9 escenarios de seguridad final):
     1. Pin exacto de las 36 dependencias con `--hash=sha256:`.
     2. Cambio de versión de un wheel rechazado.
     3. Wheel externo no declarado rechazado.
@@ -202,14 +205,24 @@ This document establishes the official engineering roadmap to transition GEO CAM
     16. Aceleración MPS y fallback CPU validados en hardware real.
     17. Aislamiento total de Internet durante provisioning.
     18. Compatibilidad de los 36 artefactos reales con CPython 3.11.9 y darwin-arm64.
+    - **Casos A–I de Revisión de Seguridad Final:**
+      - Case A: Backup pendiente de ejecución anterior restaurado / reconciliado.
+      - Case B: Colisión de nombres en staging y backup (protección contra sobreescritura/borrado).
+      - Case C: Fallo al renombrar staging dispara rollback automático hacia el backup.
+      - Case D: Fallo en la restauración de rollback preserva backup intacto en disco.
+      - Case E: Protección de ejecución concurrente (goroutines y flock de archivo).
+      - Case F: Interrupción entre renames deja backup intacto en disco.
+      - Case G: Reintento tras interrupción restaura estado anterior y completa instalación.
+      - Case H: Preservación criptográfica bit a bit del runtime previo tras rollback.
+      - Case I: Instalación limpia e idempotente sin artefactos residuales.
   - Suite de seguridad de rollback para wheelhouse (`deploy/installer/test-wheelhouse-rollback.sh`): 10 escenarios con inyección determinista de fallos aprobados al 100%.
   - Suite de seguridad de rollback para Python H2 (`deploy/installer/test-rollback-safety.sh`): 13 escenarios aprobados al 100%.
 - **Criterios de aceptación (DONE):**
   - Instalación determinista con barrera SHA-256 e imposibilidad de derivar versiones.
-  - Runtime anterior preservado intacto ante cualquier fallo o interrupción de señal.
+  - Runtime anterior preservado intacto ante cualquier fallo, colisión o interrupción de señal.
   - 100% de tests unitarios, de integración, de carreras y adversariales aprobados (`go test -count=1 -race ./internal/installer/...`).
   - Validación física real en Apple Silicon M4 completada en 21.38s con aceleración MPS funcional.
-- **Riesgos:** Ventana de intercambio no atómica inherente a POSIX documentada para reconciliación de arranque en H6. Bloqueo de licencia comercial Ultralytics AGPL-3.0 registrado independientemente.
+- **Riesgos:** Bloqueo de licencia comercial Ultralytics AGPL-3.0 registrado independientemente.
 - **Bloqueos:** Aprobación comercial/jurídica de licencia Ultralytics AGPL-3.0 (`LEGAL_COMMERCIAL_APPROVAL_PENDING=true`).
 - **Entregable:** Branch `feat/full-edge-offline-wheelhouse` con `WheelhouseManager` endurecido, lockfile, scripts transaccionales y suites completas de pruebas adversariales.
 

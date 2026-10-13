@@ -8,18 +8,21 @@
 ### Hito OFFLINE-H3: Hermetic Wheelhouse & Deterministic Python Dependencies (Current)
 - **Branch:** `feat/full-edge-offline-wheelhouse`
 - **Base:** `main @ 6f381a4d337ce2271823b92884ea4c5b6a1f03d1` (después del merge de H2 en PR #139)
-- **Objective:** Implementar un wheelhouse offline reproducible y determinista para macOS Apple Silicon (`darwin/arm64`) + CPython 3.11, resolviendo el árbol transitivo completo para PyTorch, Torchvision, Ultralytics y Pillow sin dependencias externas ni compilación local, con instalación determinista basada en hashes, staging aislado en el mismo filesystem, y publicación transaccional con rollback seguro.
+- **Objective:** Implementar un wheelhouse offline reproducible y determinista para macOS Apple Silicon (`darwin/arm64`) + CPython 3.11, resolviendo el árbol transitivo completo para PyTorch, Torchvision, Ultralytics y Pillow sin dependencias externas ni compilación local, con instalación determinista basada en hashes, staging aislado en el mismo filesystem, y publicación transaccional con reconciliación de backups y rollback seguro.
 - **Implementación y Endurecimiento de Seguridad:**
   - `internal/installer/assets/wheelhouse-lock.json`: Lockfile formal e inmutable con 36 wheels binarios exactos (`173,935,126` bytes total), hashes SHA-256 criptográficos, tamaños, origen verificable y mapeo de licencias.
   - `internal/installer/wheelhouse.go`: Componente `WheelhouseManager` con:
     - Generación efímera de `requirements.lock.txt` con exact pins y hashes obligatorios (`--hash=sha256:`).
     - Invocación de pip con `--require-hashes --no-index --find-links=... --only-binary=:all: --no-cache-dir`.
-    - Staging aislado en `.site-packages.tmp.<pid>` en el mismo filesystem, pre-sembrado con herramientas base (`pip`, `setuptools`).
+    - Staging aislado en `.site-packages.tmp.<unique>` en el mismo filesystem, pre-sembrado con herramientas base (`pip`, `setuptools`).
+    - Reconciliación persistente de backups (`ReconcilePendingArtifacts`) para restaurar de forma segura backups `.site-packages.old.*` pendientes de ejecuciones interrumpidas antes de iniciar una nueva instalación.
+    - Protección de concurrencia dual: cerrojo en memoria (`sync.Mutex`) contra goroutines paralelas y cerrojo de archivo (`syscall.Flock` en `.install.lock`) contra procesos concurrentes.
+    - Comprobación estricta de todos los retornos de `os.Rename`; preservación no destructiva de backups ante fallo de restauración con emisión de comando de recuperación manual (`mv <backup> <target>`).
     - Auditoría de staging previa al swap (`AuditStagedDistributions`).
-    - Swap de directorios de dos pasos con backup en `.site-packages.old.<pid>` y rollback automático ante cualquier fallo.
+    - Swap de directorios de dos pasos con backup en `.site-packages.old.<unique>` y rollback automático ante cualquier fallo.
     - Verificaciones post-activación: `CheckPipConsistency` (`pip check`), `AuditInstalledDistributions` (`importlib.metadata`), y `VerifyImports`.
     - Aislamiento de entorno con `IsolateEnv()`, `PIP_CONFIG_FILE=/dev/null`, y proxy blackhole fail-closed (`127.0.0.1:9`).
-  - `internal/installer/wheelhouse_test.go`: Suite exhaustiva con 25 tests table-driven + suite completa de 18 escenarios adversariales bajo `-race` cubriendo validación de lock, detección de corrupción/mismatch, tags incompatibles, dependencias faltantes/duplicadas, aislamiento de pip/PYTHONPATH, fallos a mitad de instalación, preservación de `site-packages` previo ante fallos, detección de staging incompleto, fallos de swap y restauración de backup, además de prueba de integración física E2E en Apple Silicon M4.
+  - `internal/installer/wheelhouse_test.go`: Suite exhaustiva con 25 tests table-driven + 27 escenarios adversariales bajo `-race` cubriendo validación de lock, detección de corrupción/mismatch, tags incompatibles, dependencias faltantes/duplicadas, aislamiento de pip/PYTHONPATH, fallos a mitad de instalación, preservación de `site-packages` previo ante fallos, detección de staging incompleto, fallos de swap y restauración de backup, además de los 9 escenarios de seguridad final (Casos A–I: reconciliación de backups previos, colisiones de staging/backup, fallos de rename, preservación de backup en fallos de rollback, protección de concurrencia, interrupción entre renames, reintento post-interrupción, preservación bit a bit y ejecución idempotente), y prueba física E2E en Apple Silicon M4.
   - `deploy/installer/fetch-wheelhouse.sh`: Script transaccional con máquina de estados (`INIT`..`COMMITTED`), staging en `.wheelhouse.tmp.$$`, backup en `.wheelhouse.old.$$`, y rollback guiado por evidencia física del filesystem ante señales o terminación anormal.
   - `deploy/installer/test-wheelhouse-rollback.sh`: Suite de pruebas adversariales para el script de wheelhouse con 10/10 escenarios aprobados.
 - **Validación Física en Apple Silicon M4:**
