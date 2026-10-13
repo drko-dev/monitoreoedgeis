@@ -28,6 +28,7 @@ func newIsolatedService(t *testing.T) *Service {
 		t.Fatalf("seed empty config file: %v", err)
 	}
 	t.Setenv(config.ConfigFileEnv, configPath)
+	t.Setenv("GEOCAM_ALLOW_MOCK_MODELS", "1")
 	svc := NewService(dataDir, "")
 	svc.HealthAddr = "127.0.0.1:1" // reserved, always refused: daemon "not running"
 	return svc

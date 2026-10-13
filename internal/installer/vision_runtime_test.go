@@ -1,11 +1,15 @@
 package installer
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -13,14 +17,37 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 )
 
+func TestMain(m *testing.M) {
+	tmpDir, err := os.MkdirTemp("", "installer-test-env-*")
+	if err == nil {
+		defer os.RemoveAll(tmpDir)
+		emptyConfig := filepath.Join(tmpDir, "edge.env")
+		_ = os.WriteFile(emptyConfig, nil, 0o600)
+		_ = os.Setenv(config.ConfigFileEnv, emptyConfig)
+		_ = os.Setenv("GEOCAM_ALLOW_MOCK_MODELS", "1")
+	}
+	os.Exit(m.Run())
+}
+
 func mockCommandExecutor(responses map[string]struct {
 	out []byte
 	err error
 }) CommandExecutor {
+	patterns := make([]string, 0, len(responses))
+	for p := range responses {
+		patterns = append(patterns, p)
+	}
+	sort.Slice(patterns, func(i, j int) bool {
+		if len(patterns[i]) != len(patterns[j]) {
+			return len(patterns[i]) > len(patterns[j])
+		}
+		return patterns[i] < patterns[j]
+	})
 	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		cmdStr := name + " " + strings.Join(args, " ")
-		for pattern, resp := range responses {
+		for _, pattern := range patterns {
 			if strings.Contains(cmdStr, pattern) {
+				resp := responses[pattern]
 				return resp.out, resp.err
 			}
 		}
@@ -598,5 +625,145 @@ func TestImportModelValidationAndAtomicPlacement(t *testing.T) {
 	}
 	if string(content) != "pytorch_weights_data" {
 		t.Errorf("unexpected content in copied model: %s", string(content))
+	}
+}
+
+func TestValidateModelFileStrictIntegrity(t *testing.T) {
+	t.Setenv("GEOCAM_ALLOW_MOCK_MODELS", "0")
+	dir := t.TempDir()
+	res := NewVisionRuntimeResolver(dir)
+
+	spec := ModelSpec{
+		Name:              "test-model.pt",
+		Filename:          "test-model.pt",
+		MinSizeBytes:      100,
+		ExpectedSizeBytes: 100,
+		SHA256:            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", // dummy
+	}
+
+	// 1. Missing file
+	missingPath := filepath.Join(dir, "missing.pt")
+	state, reason := res.ValidateModelFile(missingPath, spec)
+	if state != ModelStateMissing {
+		t.Errorf("expected ModelStateMissing, got %s (%s)", state, reason)
+	}
+
+	// 2. Empty file (0 bytes)
+	emptyPath := filepath.Join(dir, "empty.pt")
+	if err := os.WriteFile(emptyPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state, reason = res.ValidateModelFile(emptyPath, spec)
+	if state != ModelStateCorrupted || !strings.Contains(reason, "empty") {
+		t.Errorf("expected ModelStateCorrupted with empty message, got %s (%s)", state, reason)
+	}
+
+	// 3. Truncated 20-byte stub
+	stubPath := filepath.Join(dir, "stub.pt")
+	if err := os.WriteFile(stubPath, []byte("pytorch_weights_data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state, reason = res.ValidateModelFile(stubPath, spec)
+	if state != ModelStateCorrupted || !strings.Contains(reason, "below minimum threshold") {
+		t.Errorf("expected ModelStateCorrupted with below minimum threshold, got %s (%s)", state, reason)
+	}
+
+	// 4. Valid size and checksum
+	validData := bytes.Repeat([]byte("A"), 100)
+	h := sha256.Sum256(validData)
+	validSpec := ModelSpec{
+		Name:              "valid.pt",
+		Filename:          "valid.pt",
+		MinSizeBytes:      50,
+		ExpectedSizeBytes: 100,
+		SHA256:            hex.EncodeToString(h[:]),
+	}
+	validPath := filepath.Join(dir, "valid.pt")
+	if err := os.WriteFile(validPath, validData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state, reason = res.ValidateModelFile(validPath, validSpec)
+	if state != ModelStateValid {
+		t.Errorf("expected ModelStateValid, got %s (%s)", state, reason)
+	}
+
+	// 5. Checksum mismatch
+	validSpec.SHA256 = "0000000000000000000000000000000000000000000000000000000000000000"
+	state, reason = res.ValidateModelFile(validPath, validSpec)
+	if state != ModelStateCorrupted || !strings.Contains(reason, "checksum mismatch") {
+		t.Errorf("expected ModelStateCorrupted for checksum mismatch, got %s (%s)", state, reason)
+	}
+}
+
+func TestSelfHealModelAtomicReplacement(t *testing.T) {
+	t.Setenv("GEOCAM_ALLOW_MOCK_MODELS", "0")
+	dir := t.TempDir()
+	res := NewVisionRuntimeResolver(dir)
+	modelsDir := filepath.Join(dir, config.DefaultEdgeYOLOModelsDirName)
+	if err := os.MkdirAll(modelsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create corrupted stub
+	modelName := config.DefaultEdgeYOLOPersonModel
+	targetFile := filepath.Join(modelsDir, modelName)
+	if err := os.WriteFile(targetFile, []byte("pytorch_weights_data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	validData := bytes.Repeat([]byte("X"), 200)
+	h := sha256.Sum256(validData)
+	validSpec := ModelSpec{
+		Name:              modelName,
+		Filename:          modelName,
+		MinSizeBytes:      100,
+		ExpectedSizeBytes: 200,
+		SHA256:            hex.EncodeToString(h[:]),
+	}
+
+	// Attempt self heal with too short source -> must fail and leave original intact
+	shortSource := bytes.NewReader([]byte("short"))
+	err := res.SelfHealModel(context.Background(), modelName, shortSource, validSpec)
+	if err == nil {
+		t.Fatal("expected self heal to fail on short content")
+	}
+	content, _ := os.ReadFile(targetFile)
+	if string(content) != "pytorch_weights_data" {
+		t.Errorf("target file was altered despite failed self-heal")
+	}
+
+	// Successful self heal
+	goodSource := bytes.NewReader(validData)
+	if err := res.SelfHealModel(context.Background(), modelName, goodSource, validSpec); err != nil {
+		t.Fatalf("SelfHealModel failed: %v", err)
+	}
+
+	updated, err := os.ReadFile(targetFile)
+	if err != nil {
+		t.Fatalf("failed to read updated file: %v", err)
+	}
+	if !bytes.Equal(updated, validData) {
+		t.Errorf("updated content mismatch")
+	}
+}
+
+func TestImportModelCorruptedRejection(t *testing.T) {
+	t.Setenv("GEOCAM_ALLOW_MOCK_MODELS", "0")
+	dir := t.TempDir()
+	res := NewVisionRuntimeResolver(dir)
+
+	// Create a 20-byte stub
+	stubPath := filepath.Join(t.TempDir(), "stub.pt")
+	if err := os.WriteFile(stubPath, []byte("pytorch_weights_data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := res.ImportModel(context.Background(), config.DefaultEdgeYOLOPersonModel, stubPath)
+	if err == nil {
+		t.Fatal("expected ImportModel to fail for 20-byte stub under strict mode")
+	}
+	var safeErr *SafeError
+	if !errors.As(err, &safeErr) || safeErr.Code != "CORRUPTED_MODEL" {
+		t.Errorf("expected CORRUPTED_MODEL error code, got %v", err)
 	}
 }

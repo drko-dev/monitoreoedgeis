@@ -2,8 +2,11 @@ package installer
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,31 +24,77 @@ import (
 //go:embed assets/vision-worker/*
 var embeddedWorkerFS embed.FS
 
+//go:embed assets/models-manifest.json
+var embeddedManifestJSON []byte
+
+// ModelState describes the physical and structural integrity of a model file.
+type ModelState string
+
+const (
+	ModelStateValid        ModelState = "VALID"
+	ModelStateMissing      ModelState = "MISSING"
+	ModelStateCorrupted    ModelState = "CORRUPTED"
+	ModelStateIncompatible ModelState = "INCOMPATIBLE"
+)
+
+// ModelSpec defines metadata and integrity constraints for an AI weight file.
+type ModelSpec struct {
+	Name              string `json:"name"`
+	Filename          string `json:"filename"`
+	Version           string `json:"version"`
+	Purpose           string `json:"purpose"`
+	MinSizeBytes      int64  `json:"min_size_bytes"`
+	ExpectedSizeBytes int64  `json:"expected_size_bytes"`
+	SHA256            string `json:"sha256"`
+}
+
+// ModelsManifest defines the pinned manifest of official models.
+type ModelsManifest struct {
+	PackVersion          string            `json:"pack_version"`
+	WorkerCompatibility  string            `json:"worker_compatibility"`
+	RuntimeCompatibility map[string]string `json:"runtime_compatibility"`
+	Models               []ModelSpec       `json:"models"`
+}
+
+// LoadModelsManifest parses the embedded models-manifest.json.
+func LoadModelsManifest() (*ModelsManifest, error) {
+	if len(embeddedManifestJSON) == 0 {
+		return nil, errors.New("embedded models manifest is empty")
+	}
+	var manifest ModelsManifest
+	if err := json.Unmarshal(embeddedManifestJSON, &manifest); err != nil {
+		return nil, fmt.Errorf("failed to parse models manifest: %w", err)
+	}
+	return &manifest, nil
+}
+
 // VisionRuntimeStatus reflects the inspection and readiness state of the local
 // Full Edge vision runtime and its required detection models.
 type VisionRuntimeStatus struct {
-	PythonFound        bool     `json:"python_found"`
-	PythonPath         string   `json:"python_path"`
-	PythonVersion      string   `json:"python_version"`
-	VenvFound          bool     `json:"venv_found"`
-	VenvPath           string   `json:"venv_path"`
-	WorkerScriptPath   string   `json:"worker_script_path"`
-	PackagesReady      bool     `json:"packages_ready"`
-	TorchAvailable     bool     `json:"torch_available"`
-	TorchVersion       string   `json:"torch_version,omitempty"`
-	UltralyticsReady   bool     `json:"ultralytics_ready"`
-	UltralyticsVersion string   `json:"ultralytics_version,omitempty"`
-	PillowReady        bool     `json:"pillow_ready"`
-	Device             string   `json:"device"`
-	DeviceName         string   `json:"device_name"`
-	ModelsDir          string   `json:"models_dir"`
-	PersonModelFound   bool     `json:"person_model_found"`
-	VehicleModelFound  bool     `json:"vehicle_model_found"`
-	MissingModels      []string `json:"missing_models,omitempty"`
-	Ready              bool     `json:"ready"`
-	CanProvision       bool     `json:"can_provision"`
-	Stage              string   `json:"stage,omitempty"`
-	Message            string   `json:"message,omitempty"`
+	PythonFound        bool              `json:"python_found"`
+	PythonPath         string            `json:"python_path"`
+	PythonVersion      string            `json:"python_version"`
+	VenvFound          bool              `json:"venv_found"`
+	VenvPath           string            `json:"venv_path"`
+	WorkerScriptPath   string            `json:"worker_script_path"`
+	PackagesReady      bool              `json:"packages_ready"`
+	TorchAvailable     bool              `json:"torch_available"`
+	TorchVersion       string            `json:"torch_version,omitempty"`
+	UltralyticsReady   bool              `json:"ultralytics_ready"`
+	UltralyticsVersion string            `json:"ultralytics_version,omitempty"`
+	PillowReady        bool              `json:"pillow_ready"`
+	Device             string            `json:"device"`
+	DeviceName         string            `json:"device_name"`
+	ModelsDir          string            `json:"models_dir"`
+	PersonModelFound   bool              `json:"person_model_found"`
+	VehicleModelFound  bool              `json:"vehicle_model_found"`
+	MissingModels      []string          `json:"missing_models,omitempty"`
+	CorruptedModels    []string          `json:"corrupted_models,omitempty"`
+	ModelStates        map[string]string `json:"model_states,omitempty"`
+	Ready              bool              `json:"ready"`
+	CanProvision       bool              `json:"can_provision"`
+	Stage              string            `json:"stage,omitempty"`
+	Message            string            `json:"message,omitempty"`
 }
 
 type pythonProbeOutput struct {
@@ -143,6 +192,43 @@ func (r *VisionRuntimeResolver) stagedWorkerPath() string {
 	return filepath.Join(r.dataDir, "vision-worker", "worker.py")
 }
 
+// ValidateModelFile checks the physical and structural integrity of a model file against a ModelSpec.
+func (r *VisionRuntimeResolver) ValidateModelFile(path string, spec ModelSpec) (ModelState, string) {
+	info, err := r.stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ModelStateMissing, "file does not exist"
+		}
+		return ModelStateMissing, err.Error()
+	}
+	if !info.Mode().IsRegular() {
+		return ModelStateCorrupted, "not a regular file"
+	}
+	if info.Size() <= 0 {
+		return ModelStateCorrupted, "file is empty"
+	}
+	if os.Getenv("GEOCAM_ALLOW_MOCK_MODELS") == "1" {
+		return ModelStateValid, "valid"
+	}
+	if spec.MinSizeBytes > 0 && info.Size() < spec.MinSizeBytes {
+		return ModelStateCorrupted, fmt.Sprintf("file size %d is below minimum threshold %d bytes", info.Size(), spec.MinSizeBytes)
+	}
+	if spec.SHA256 != "" && spec.ExpectedSizeBytes > 0 && info.Size() == spec.ExpectedSizeBytes {
+		f, err := os.Open(path)
+		if err == nil {
+			defer f.Close()
+			h := sha256.New()
+			if _, err := io.Copy(h, f); err == nil {
+				calculated := hex.EncodeToString(h.Sum(nil))
+				if !strings.EqualFold(calculated, spec.SHA256) {
+					return ModelStateCorrupted, fmt.Sprintf("checksum mismatch: expected %s, got %s", spec.SHA256, calculated)
+				}
+			}
+		}
+	}
+	return ModelStateValid, "valid"
+}
+
 // Resolve inspects host python, venv, packages, and models.
 func (r *VisionRuntimeResolver) Resolve(ctx context.Context) (*VisionRuntimeStatus, error) {
 	status := &VisionRuntimeStatus{
@@ -156,19 +242,53 @@ func (r *VisionRuntimeResolver) Resolve(ctx context.Context) (*VisionRuntimeStat
 		modelsDir = filepath.Join(r.dataDir, config.DefaultEdgeYOLOModelsDirName)
 	}
 	status.ModelsDir = modelsDir
+	status.ModelStates = make(map[string]string)
 
 	personModel := config.DefaultEdgeYOLOPersonModel
 	vehicleModel := config.DefaultEdgeYOLOVehicleModel
 
-	if _, err := r.stat(filepath.Join(modelsDir, personModel)); err == nil {
+	manifest, _ := LoadModelsManifest()
+	var personSpec, vehicleSpec ModelSpec
+	if manifest != nil {
+		for _, m := range manifest.Models {
+			if m.Name == personModel || m.Filename == personModel {
+				personSpec = m
+			}
+			if m.Name == vehicleModel || m.Filename == vehicleModel {
+				vehicleSpec = m
+			}
+		}
+	}
+	if personSpec.MinSizeBytes == 0 {
+		personSpec = ModelSpec{Name: personModel, MinSizeBytes: 10_000_000}
+	}
+	if vehicleSpec.MinSizeBytes == 0 {
+		vehicleSpec = ModelSpec{Name: vehicleModel, MinSizeBytes: 3_000_000}
+	}
+
+	personPath := filepath.Join(modelsDir, personModel)
+	pState, _ := r.ValidateModelFile(personPath, personSpec)
+	status.ModelStates[personModel] = string(pState)
+	if pState == ModelStateValid {
 		status.PersonModelFound = true
+	} else if pState == ModelStateCorrupted {
+		status.PersonModelFound = false
+		status.CorruptedModels = append(status.CorruptedModels, personModel)
 	} else {
+		status.PersonModelFound = false
 		status.MissingModels = append(status.MissingModels, personModel)
 	}
 
-	if _, err := r.stat(filepath.Join(modelsDir, vehicleModel)); err == nil {
+	vehiclePath := filepath.Join(modelsDir, vehicleModel)
+	vState, _ := r.ValidateModelFile(vehiclePath, vehicleSpec)
+	status.ModelStates[vehicleModel] = string(vState)
+	if vState == ModelStateValid {
 		status.VehicleModelFound = true
+	} else if vState == ModelStateCorrupted {
+		status.VehicleModelFound = false
+		status.CorruptedModels = append(status.CorruptedModels, vehicleModel)
 	} else {
+		status.VehicleModelFound = false
 		status.MissingModels = append(status.MissingModels, vehicleModel)
 	}
 
@@ -283,6 +403,9 @@ func (r *VisionRuntimeResolver) Resolve(ctx context.Context) (*VisionRuntimeStat
 	if len(status.MissingModels) > 0 {
 		msgs = append(msgs, fmt.Sprintf("Modelos faltantes en %s: %s", status.ModelsDir, strings.Join(status.MissingModels, ", ")))
 	}
+	if len(status.CorruptedModels) > 0 {
+		msgs = append(msgs, fmt.Sprintf("Modelos corruptos detectados en %s: %s (archivo truncado o checksum inválido).", status.ModelsDir, strings.Join(status.CorruptedModels, ", ")))
+	}
 	if status.Ready {
 		status.Message = fmt.Sprintf("Listo para inferencia local (%s)", status.DeviceName)
 	} else if len(msgs) > 0 {
@@ -290,6 +413,58 @@ func (r *VisionRuntimeResolver) Resolve(ctx context.Context) (*VisionRuntimeStat
 	}
 
 	return status, nil
+}
+
+// SelfHealModel copies valid model content from source into target modelName atomically.
+func (r *VisionRuntimeResolver) SelfHealModel(ctx context.Context, modelName string, source io.Reader, spec ModelSpec) error {
+	modelsDir, hasDir, _ := r.getConfiguredDir()
+	if !hasDir || strings.TrimSpace(modelsDir) == "" {
+		modelsDir = filepath.Join(r.dataDir, config.DefaultEdgeYOLOModelsDirName)
+	}
+	if err := os.MkdirAll(modelsDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create models directory: %w", err)
+	}
+
+	destPath := filepath.Join(modelsDir, modelName)
+	tmpPath := filepath.Join(modelsDir, fmt.Sprintf(".%s.%d.tmp", modelName, time.Now().UnixNano()))
+
+	tmpFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+
+	hasher := sha256.New()
+	writer := io.MultiWriter(tmpFile, hasher)
+
+	written, copyErr := io.Copy(writer, source)
+	syncErr := tmpFile.Sync()
+	closeErr := tmpFile.Close()
+
+	if copyErr != nil || syncErr != nil || closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("failed while streaming model data: copy=%v, sync=%v, close=%v", copyErr, syncErr, closeErr)
+	}
+
+	allowMock := os.Getenv("GEOCAM_ALLOW_MOCK_MODELS") == "1"
+	if !allowMock && spec.MinSizeBytes > 0 && written < spec.MinSizeBytes {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("self-heal rejected: written size %d bytes is below required %d bytes", written, spec.MinSizeBytes)
+	}
+
+	if !allowMock && spec.SHA256 != "" && spec.ExpectedSizeBytes > 0 && written == spec.ExpectedSizeBytes {
+		calculated := hex.EncodeToString(hasher.Sum(nil))
+		if !strings.EqualFold(calculated, spec.SHA256) {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("self-heal rejected: sha256 mismatch (expected %s, got %s)", spec.SHA256, calculated)
+		}
+	}
+
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("atomic rename failed: %w", err)
+	}
+
+	return nil
 }
 
 // ImportModel validates and atomically copies a local .pt model file into the managed models directory.
@@ -322,10 +497,32 @@ func (r *VisionRuntimeResolver) ImportModel(ctx context.Context, modelName, sour
 			Recoverable: false,
 		}
 	}
+
 	if info.Size() <= 0 {
 		return nil, &SafeError{
 			Code:        "EMPTY_FILE",
 			SafeMessage: "Selected model file is empty.",
+			Recoverable: false,
+		}
+	}
+
+	minSize := int64(1)
+	if os.Getenv("GEOCAM_ALLOW_MOCK_MODELS") != "1" {
+		if manifest, _ := LoadModelsManifest(); manifest != nil {
+			for _, m := range manifest.Models {
+				if m.Name == modelName || m.Filename == modelName {
+					if m.MinSizeBytes > 0 {
+						minSize = m.MinSizeBytes
+					}
+					break
+				}
+			}
+		}
+	}
+	if info.Size() < minSize {
+		return nil, &SafeError{
+			Code:        "CORRUPTED_MODEL",
+			SafeMessage: fmt.Sprintf("El archivo de modelo seleccionado está truncado o corrupto (%d bytes, mínimo esperado %d bytes).", info.Size(), minSize),
 			Recoverable: false,
 		}
 	}
