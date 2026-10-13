@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Config is the full runtime configuration of the agent.
@@ -1004,7 +1005,7 @@ func loadFromEnvironment() (*Config, error) {
 		cfg.EdgeYOLOWorkerCmd = raw
 	}
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_WORKER_ARGS")); raw != "" {
-		cfg.EdgeYOLOWorkerArgs = strings.Fields(raw)
+		cfg.EdgeYOLOWorkerArgs = parseWorkerArgs(raw)
 	}
 	if raw := strings.TrimSpace(os.Getenv("GEOCAM_EDGE_YOLO_MODELS_DIR")); raw != "" {
 		cfg.EdgeYOLOModelsDir = raw
@@ -1253,4 +1254,53 @@ func parseRetentionEnv(cfg *Config) error {
 	}
 
 	return nil
+}
+
+// parseWorkerArgs parses GEOCAM_EDGE_YOLO_WORKER_ARGS supporting quoted paths,
+// escaped spaces, or existing single file paths containing spaces.
+func parseWorkerArgs(raw string) []string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+	if _, err := os.Stat(trimmed); err == nil {
+		return []string{trimmed}
+	}
+	var args []string
+	var current strings.Builder
+	inSingle := false
+	inDouble := false
+	escaped := false
+
+	for _, r := range trimmed {
+		if escaped {
+			current.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' && !inSingle {
+			escaped = true
+			continue
+		}
+		if r == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+		if r == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+		if unicode.IsSpace(r) && !inSingle && !inDouble {
+			if current.Len() > 0 {
+				args = append(args, current.String())
+				current.Reset()
+			}
+			continue
+		}
+		current.WriteRune(r)
+	}
+	if current.Len() > 0 {
+		args = append(args, current.String())
+	}
+	return args
 }

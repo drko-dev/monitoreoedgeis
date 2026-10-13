@@ -9,6 +9,7 @@ import { ErrorAlert } from './components/ErrorAlert';
 import { EnrollmentWizard } from './components/EnrollmentWizard';
 import { ProcessingModeSelector } from './components/ProcessingModeSelector';
 import { ProcessingModeReview } from './components/ProcessingModeReview';
+import { CommissioningView } from './components/CommissioningView';
 import { CameraDiscovery } from './components/CameraDiscovery';
 import { CameraCredentialsForm } from './components/CameraCredentialsForm';
 import { CameraOnboardingResultView } from './components/CameraOnboardingResult';
@@ -21,7 +22,7 @@ import { HelpLink } from './components/HelpLink';
 import { docsLinks } from './config/docsLinks';
 import './App.css';
 
-type ModeWizardStep = 'dashboard' | 'select' | 'review';
+type ModeWizardStep = 'dashboard' | 'select' | 'review' | 'commission';
 type CameraWizardStep = 'dashboard' | 'discover' | 'credentials' | 'result';
 
 export const App: React.FC = () => {
@@ -192,6 +193,8 @@ export const App: React.FC = () => {
           onApply={handleApply}
           onDone={handleModeDone}
         />
+      ) : isEnrolled && modeStep === 'commission' ? (
+        <CommissioningView onDone={() => { setModeStep('dashboard'); refresh(); }} />
       ) : isEnrolled && cameraStep === 'discover' ? (
         <CameraDiscovery
           scanState={cameraOnboarding.scanState}
@@ -228,8 +231,16 @@ export const App: React.FC = () => {
           </div>
 
           <div className="actions-bar">
+            {isEnrolled && (
+              <Button
+                variant="primary"
+                onClick={() => setModeStep('commission')}
+              >
+                {t('app.activateEdge')}
+              </Button>
+            )}
             <Button
-              variant="primary"
+              variant={isEnrolled ? 'secondary' : 'primary'}
               onClick={handleContinue}
               disabled={state?.state === 'BLOCKED'}
             >

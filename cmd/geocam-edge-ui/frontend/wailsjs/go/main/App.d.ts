@@ -45,3 +45,7 @@ export function PlanProcessingMode(arg1:installer.ProcessingModeRequest):Promise
 export function TestCameraCredentials(arg1:installer.TestCameraCredentialsRequest):Promise<installer.CameraValidationResult>;
 
 export function ValidateProcessingMode(arg1:installer.ProcessingModeRequest):Promise<installer.ProcessingModeOption>;
+
+export function GetCommissioningStatus():Promise<installer.CommissioningStatus>;
+
+export function CommissionDaemon():Promise<installer.CommissionResult>;
