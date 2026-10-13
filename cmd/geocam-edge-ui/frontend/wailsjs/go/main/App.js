@@ -46,6 +46,26 @@ export function GetFFmpegStatus() {
   return window['go']['main']['App']['GetFFmpegStatus']();
 }
 
+export function GetFullEdgePreparationStatus() {
+  return window['go']['main']['App']['GetFullEdgePreparationStatus']();
+}
+
+export function StartFullEdgePreparation(arg1) {
+  return window['go']['main']['App']['StartFullEdgePreparation'](arg1);
+}
+
+export function CancelFullEdgePreparation(arg1) {
+  return window['go']['main']['App']['CancelFullEdgePreparation'](arg1);
+}
+
+export function GetFullEdgePreparationDiagnostic(arg1) {
+  return window['go']['main']['App']['GetFullEdgePreparationDiagnostic'](arg1);
+}
+
+export function RecoverFullEdgeRuntime(arg1) {
+  return window['go']['main']['App']['RecoverFullEdgeRuntime'](arg1);
+}
+
 export function InstallFFmpeg() {
   return window['go']['main']['App']['InstallFFmpeg']();
 }
