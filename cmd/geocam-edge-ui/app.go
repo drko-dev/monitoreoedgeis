@@ -196,4 +196,3 @@ func (a *App) CommissionDaemon() (*installer.CommissionResult, error) {
 	res, err := a.installer.CommissionDaemon(a.ctx)
 	return res, structuredError(err)
 }
-

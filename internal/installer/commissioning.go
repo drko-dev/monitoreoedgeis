@@ -31,21 +31,21 @@ const (
 
 // CommissioningStatus represents the multi-stage operational readiness of the Edge host.
 type CommissioningStatus struct {
-	DaemonInstalled   bool                    `json:"daemon_installed"`
-	ServiceRegistered bool                    `json:"service_registered"`
-	DaemonRunning     bool                    `json:"daemon_running"`
-	HealthzOK         bool                    `json:"healthz_ok"`
-	ReadyzOK          bool                    `json:"readyz_ok"`
-	OperationalState  string                  `json:"operational_state"`
-	OperationalOK     bool                    `json:"operational_ok"`
-	SaaSSyncOK        bool                    `json:"saas_sync_ok"`
-	HeartbeatState    string                  `json:"heartbeat_state"`
-	ProcessingMode    string                  `json:"processing_mode"`
-	EffectiveProfile  string                  `json:"effective_profile"`
-	VisionWorkerReady bool                    `json:"vision_worker_ready"`
-	CameraCount       int                     `json:"camera_count"`
-	OverallReady      bool                    `json:"overall_ready"`
-	SafeMessage       string                  `json:"safe_message"`
+	DaemonInstalled   bool   `json:"daemon_installed"`
+	ServiceRegistered bool   `json:"service_registered"`
+	DaemonRunning     bool   `json:"daemon_running"`
+	HealthzOK         bool   `json:"healthz_ok"`
+	ReadyzOK          bool   `json:"readyz_ok"`
+	OperationalState  string `json:"operational_state"`
+	OperationalOK     bool   `json:"operational_ok"`
+	SaaSSyncOK        bool   `json:"saas_sync_ok"`
+	HeartbeatState    string `json:"heartbeat_state"`
+	ProcessingMode    string `json:"processing_mode"`
+	EffectiveProfile  string `json:"effective_profile"`
+	VisionWorkerReady bool   `json:"vision_worker_ready"`
+	CameraCount       int    `json:"camera_count"`
+	OverallReady      bool   `json:"overall_ready"`
+	SafeMessage       string `json:"safe_message"`
 }
 
 // CommissionOutcome represents the terminal result of the commissioning workflow.
