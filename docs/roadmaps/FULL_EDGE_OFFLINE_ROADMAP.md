@@ -107,26 +107,59 @@ This document establishes the official engineering roadmap to transition GEO CAM
 
 ---
 
-### Hito H2 — Python Embebido Standalone (macOS arm64)
+### Hito H2 — Python Embebido Standalone (macOS arm64) (COMPLETADO — Branch feat/full-edge-embedded-python)
 
 - **Objetivo:** Integrar un intérprete Python 3.11 standalone hermético para darwin-arm64, eliminando cualquier dependencia de Python de sistema o Homebrew.
-- **Dependencias:** H1 completado.
+- **Dependencias:** H1 completado y mergeado (#138).
 - **Archivos/Componentes involucrados:**
-  - `deploy/installer/fetch-runtime-deps.sh` (o script de preparación)
-  - `internal/installer/embedded_python.go`
-  - `internal/installer/embedded_python_test.go`
-- **Implementación esperada:**
-  - Detección y extracción de Python Standalone (ej. `python-build-standalone` 3.11.x) en el data dir de la aplicación.
-  - Validación de ejecución aislada sin tocar variables de entorno globales (`PYTHONPATH`, `PYTHONHOME`).
-  - Verificación de compatibilidad con aceleración Apple Silicon Metal (MPS).
-- **Tests obligatorios:**
-  - Test en máquina sin `/usr/bin/python3` en el PATH simulado.
-  - Test de ejecución de scripts básicos en sandbox temporal.
+  - `deploy/installer/fetch-runtime-deps.sh`: script de adquisición reproducible y staging con validación SHA-256 y Mach-O.
+  - `internal/installer/embedded_python.go`: gestor de runtime hermético `EmbeddedPythonManager`, sanitizador `IsolateEnv()`, verificador Mach-O `ValidateMachOArch()`, probador de versión/ABI `ProbeInterpreter()` y validador de biblioteca estándar `VerifyStandardLibrary()`.
+  - `internal/installer/assets/runtime-manifest.json`: metadatos fijados de CPython 3.11.9 Standalone para `darwin/arm64` (SHA-256 binario `906779570632e91fc62730f51b2b3ef0327d4992d989d6c9a2b6e7118836c170`, 50168 bytes).
+  - `internal/installer/embedded_python_test.go`: suite table-driven de 20 escenarios unitarios y de integración + prueba física con intérprete real verificado.
+- **Implementación completada:**
+  - Adopción de `astral-sh/python-build-standalone` CPython 3.11.9 (release tag `20240415`, PSF-2.0 license).
+  - Verificación criptográfica de archivo (`7af7058f...`, 17915401 bytes) y binario (`90677957...`, 50168 bytes).
+  - Aislamiento de entorno en subprocess: purga de `PYTHON*`, `VIRTUAL_ENV`, `__PYVENV_LAUNCHER__`, filtrado de Homebrew/Conda de `PATH`, inyección de `PYTHONNOUSERSITE=1` y ejecución con `-I`.
+  - Verificación de arquitectura Mach-O 64-bit arm64 (`macho.CpuArm64`).
+  - Verificación de carga hermética de la biblioteca estándar dentro de `sys.prefix`.
+- **Tests obligatorios (20 escenarios aprobados con -race):**
+  1. Python embebido válido (synthetic fixture).
+  2. Python ausente (`ErrArtifactMissing` / `PYTHON_NOT_FOUND`).
+  3. Hash incorrecto (`ErrArtifactCorrupted` / `PYTHON_HASH_MISMATCH`).
+  4. Tamaño incorrecto (`ErrArtifactCorrupted` / `PYTHON_SIZE_MISMATCH`).
+  5. Ejecutable sin permisos (`PYTHON_NOT_EXECUTABLE`).
+  6. Arquitectura incorrecta (`PYTHON_ARCH_INCOMPATIBLE`).
+  7. Versión incorrecta (`PYTHON_VERSION_INCOMPATIBLE`).
+  8. ABI incompatible (`PYTHON_ABI_INCOMPATIBLE`).
+  9. Distribución incompleta (`PYTHON_STDLIB_INCOMPLETE`).
+  10. Sin Python del sistema en PATH.
+  11. Homebrew ausente en PATH.
+  12. Python host incompatible ignorado.
+  13. PYTHONHOME/PYTHONPATH contaminados purgados.
+  14. Symlink externo rechazado (`SECURITY_ESCAPING_SYMLINK`).
+  15. Ejecución con timeout (`PYTHON_EXEC_TIMEOUT`).
+  16. Ejecución de biblioteca estándar (`STDLIB_VERIFIED`).
+  17. Preparación con red bloqueada (air-gapped).
+  18. Pack reubicado en ruta diferente.
+  19. Rutas con espacios.
+  20. Validación repetida e idempotente.
+  - Test de integración física: ejecución de intérprete CPython 3.11.9 real en Apple Silicon (`TestEmbeddedPython_RealPythonExecution`).
+  - Suite adversarial de empaquetado y extracción segura (14 escenarios en `secure_extractor_test.go`): path traversal, rutas absolutas, symlinks que escapan, hardlinks externos/peligrosos, mismatch de hash pre-extracción, cleanup ante extracción interrumpida, rollback ante fallo de swap, preservación de runtime previo válido, staging garantizado en el mismo filesystem, verificación completa de distribución (dylib + stdlib), validación física real, rollback ante fallo post-activación (Case 13) y preservación de backup ante fallo de rollback (Case 14).
+  - Suite de seguridad de rollback y máquinas de estado con inyección determinista de fallos (12 escenarios en `deploy/installer/test-rollback-safety.sh`): primera instalación, actualización limpia, fallo previo a activación, fallo al mover runtime anterior, fallo de activación con rollback automático, fallo al restaurar con preservación estricta de backup, fallo en verificación post-activación con rollback, interrupción de señales (SIGINT) entre renames con rollback, interrupción en cleanup sin reentrancia, idempotencia en ejecución repetida, preservación criptográfica exacta bit a bit, y garantía de no eliminación de backups no recuperados tras finalizar el proceso.
 - **Criterios de aceptación (DONE):**
-  - El intérprete embebido ejecuta y reporta versión 3.11.x sin intervención del sistema host.
-- **Riesgos:** Dependencias dinámicas de librerías del sistema macOS que difieran entre macOS 12, 13, 14 y 15.
+  - El intérprete embebido ejecuta y reporta versión 3.11.9 sin intervención del sistema host.
+  - Extractor seguro implementado en Go (`cmd/runtime-extractor` y `internal/installer/secure_extractor.go`) reemplaza `tar -xzf` con validación previa de entradas, límites contra tar-bombs y staging en el mismo filesystem con rollback atómico.
+  - Máquina de estados explícita (`INIT` -> `PREPARING` -> `STAGED` -> `BACKING_UP` -> `BACKED_UP` -> `ACTIVATING` -> `ACTIVATED` -> `VERIFYING` -> `COMMITTED`) implementada en `deploy/installer/fetch-runtime-deps.sh`.
+  - Preservación estricta de backups: el backup previo nunca se elimina hasta que la verificación post-activación tiene éxito; ante fallo de restauración, el backup se conserva intacto y se reporta en logs.
+  - Recuperación basada en evidencia física del filesystem: inspección de `[ -d "$backup_old" ]` en `cleanup()` para activar rollback ante interrupción en cualquier micro-ventana de transición (e.g. antes de asignar `STATE=BACKED_UP`).
+  - Verificación física inmediata de backup en disco tras el primer rename antes de avanzar hacia la activación.
+  - Delimitación explícita de la ventana no atómica del swap de dos renames en POSIX, documentando que fallos catastróficos no capturables (SIGKILL, kernel panic, corte eléctrico) requieren reconciliación de arranque persistente en H6.
+  - `runtime-manifest.json` marcado explícitamente como `template` para componentes no construidos (H3–H5).
+  - Estado formal `PYTHON_EXECUTABLE` no implica `RUNTIME_READY` o `INFERENCE_READY`.
+  - 100% de tests unitarios, de integración y adversariales aprobados bajo `go test -count=1 -race ./internal/installer/...` y `./deploy/installer/test-rollback-safety.sh` (13 escenarios en 12 categorías).
+- **Riesgos:** Mitigado aislamiento mediante flags `-I` y filtrado estricto de variables. Mitigado TOCTOU mediante staging en directorio oculto del mismo filesystem y rename atómico con rollback. Documentada la limitación de reemplazo de directorios de dos pasos en POSIX vs puntero único de H6.
 - **Bloqueos:** Ninguno.
-- **Entregable:** Módulo de gestión del intérprete embebido probado.
+- **Entregable:** Branch `feat/full-edge-embedded-python` con `EmbeddedPythonManager`, extractor seguro, script de fetch endurecido con máquina de estados, y suite de tests de rollback.
 
 ---
 

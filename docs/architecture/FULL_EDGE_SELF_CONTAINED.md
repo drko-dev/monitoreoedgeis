@@ -259,4 +259,103 @@ Implemented in `internal/installer/runtime_manifest.go` with full test coverage 
      - Activation is executed via atomic filesystem rename (`os.Rename`), ensuring the running service only ever consumes a fully verified, sealed runtime directory.
      - Binaries are marked read-only (`0555` / `0444`) post-staging.
 
+---
+
+## 9. Embedded Python Standalone Architecture (Milestone H2)
+
+Implemented in `internal/installer/embedded_python.go` with full test coverage in `internal/installer/embedded_python_test.go` and tooling in `deploy/installer/fetch-runtime-deps.sh`:
+
+### 9.1 Pinned Python Distribution & Provenance
+- **Distribution:** `astral-sh/python-build-standalone` (CPython 3.11.9 install-only standalone).
+- **Release Tag:** `20240415`.
+- **Target Platform & Architecture:** `darwin/arm64` (Apple Silicon M1, M2, M3, M4).
+- **macOS Minimum Version:** macOS 11.0 Big Sur (`minos 11.0`, SDK 14.2).
+- **License:** Python Software Foundation License (PSF-2.0, permissive, fully redistributable).
+- **Relocatability:** Compiled with `@executable_path/../lib/libpython3.11.dylib` and dynamic linking against system frameworks (`CoreFoundation`, `libSystem.B.dylib`), with zero dependencies on Homebrew, Xcode CLT, or host Python.
+- **Archive Cryptographic Pinned Metadata:**
+  - URL: `https://github.com/astral-sh/python-build-standalone/releases/download/20240415/cpython-3.11.9%2B20240415-aarch64-apple-darwin-install_only.tar.gz`
+  - Archive Size: `17915401` bytes.
+  - Archive SHA-256: `7af7058f7c268b4d87ed7e08c2c7844ef8460863b3e679db3afdce8bb1eedfae`.
+- **Physical Binary Pinned Metadata:**
+  - Relative Path: `python/bin/python3` (symlink) -> `python/bin/python3.11`.
+  - Binary Size: `50168` bytes.
+  - Binary SHA-256: `906779570632e91fc62730f51b2b3ef0327d4992d989d6c9a2b6e7118836c170`.
+  - Mach-O Format: Mach-O 64-bit executable arm64 (`CPU_TYPE_ARM64 = 0x0100000c`).
+
+### 9.2 Subprocess Isolation Contract (`IsolateEnv`)
+To ensure the standalone interpreter executes completely isolated from host configuration:
+1. **Environment Scrubbing:**
+   - Strips all `PYTHON*` variables (`PYTHONHOME`, `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONUSERBASE`, `PYTHONEXECUTABLE`, `PYTHONSAFEPATH`, `PYTHONOPTIMIZE`, `PYTHONDEBUG`, etc.).
+   - Strips `VIRTUAL_ENV` and `__PYVENV_LAUNCHER__`.
+   - Injects `PYTHONNOUSERSITE=1`.
+2. **PATH Sanitization:**
+   - Filters `PATH` segments, removing Homebrew (`/opt/homebrew`, `/usr/local/bin`, `/usr/local/sbin`, `Cellar`), Conda, miniconda, anaconda, pyenv, asdf, nvm, and cargo.
+   - Preserves only clean base system directories (`/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`).
+3. **Execution Flags:**
+   - Subprocess invocations pass isolated mode flags (`-I`) ensuring `sys.path` does not include user directories or host site-packages.
+4. **Standard Library Verification:**
+   - `VerifyStandardLibrary` executes an in-process verification script asserting that core standard library modules (`os`, `json`, `hashlib`, `platform`, `math`, `re`, `time`) resolve strictly within `sys.prefix`, never from host paths.
+
+### 9.3 Packaging Tooling (`deploy/installer/fetch-runtime-deps.sh`)
+- Reproducible, fail-closed fetching and staging tool.
+- Validates archive SHA-256 before extraction.
+- Invokes dedicated secure extractor (`cmd/runtime-extractor` via Go) instead of raw `tar -xzf`.
+- Stages within `$TARGET_DIR/.python.tmp.$$` on the exact same filesystem.
+- Sets executable permissions (`chmod -R +x python/bin`).
+- Moves atomically into destination runtime path with rollback on failure.
+- Supports `--verify-only` for offline build verification.
+
+### 9.4 Physical vs. Synthetic Validation Distinction
+- **Synthetic Test Fixtures:** 20 table-driven unit tests verify error handling (missing file, corrupted hash, truncated size, non-executable bits, wrong Mach-O architecture, wrong version, incompatible ABI, incomplete stdlib, escaping symlinks, execution timeout, air-gapped readiness, path relocatability, and paths with spaces) using synthetic fixtures without requiring large binaries in git.
+- **Physical Verification:** `TestEmbeddedPython_RealPythonExecution` executes against real CPython 3.11.9 Standalone Apple Silicon Mach-O binary, confirming probe execution, JSON serialization, and standard library hermetic loading.
+
+### 9.5 Security Hardening, State Machine & Rollback Safety Architecture
+To guarantee absolute reliability against archive corruption, filesystem errors, and process interruptions:
+1. **Entry-by-Entry Pre-Validation (`internal/installer/secure_extractor.go`):**
+   - Rejects absolute paths (`/usr/bin`, `\windows\sys`).
+   - Rejects path traversal components (`..`, `../`, `/../`).
+   - Rejects non-regular file types (device files, fifos, sockets).
+   - Enforces tar bomb resource constraints: 1 GB single file limit (`MaxFileSize`), 2 GB cumulative extracted bytes (`MaxTotalBytes`), and 50,000 maximum entries (`MaxEntries`).
+   - Verifies symlink targets: rejects absolute targets and targets that resolve outside the staging root.
+   - Refuses to write through existing symlinks (`os.Remove` before file creation).
+   - Validates hardlink targets to ensure they reference pre-existing files within staging.
+2. **Explicit State Machine in Activation Script (`deploy/installer/fetch-runtime-deps.sh`):**
+   - States: `INIT` -> `PREPARING` -> `STAGED` -> `BACKING_UP` -> `BACKED_UP` -> `ACTIVATING` -> `ACTIVATED` -> `VERIFYING` -> `COMMITTED`.
+   - Error states: `ROLLING_BACK`, `ROLLED_BACK`, `ROLLBACK_FAILED`.
+   - Staging occurs strictly in sibling hidden directory `$TARGET_DIR/.python.tmp.<pid>` on the exact same filesystem.
+   - Existing runtime is preserved in `$TARGET_DIR/.python.old.<pid>`.
+   - **Filesystem Evidence Recovery in `cleanup()`:** Shell signal traps can be triggered at arbitrary sub-statement boundaries (e.g., immediately after `mv target backup` succeeds, before memory variable `STATE="BACKED_UP"` is assigned). Instead of relying exclusively on memory `STATE`, `cleanup()` actively inspects the filesystem: if `[ -d "$backup_old" ] && [ "$STATE" != "COMMITTED" ]`, it infers ground truth that an active backup exists and initiates automatic rollback.
+   - **Physical Backup Confirmation:** The script physically verifies `[ -d "$backup_old" ]` immediately following the first rename, failing closed before staging can be activated.
+   - **Backup Preservation Guarantee:** Previous backup is NEVER deleted until post-activation verification succeeds (`STATE=COMMITTED`).
+   - **Rollback Resilience:** If activation or post-activation verification fails, rollback restores the backup. If rollback itself fails, the backup directory is SAFELY PRESERVED on disk and its path and recovery command are logged (`STATE=ROLLBACK_FAILED`).
+   - **Signal Shielding:** Signal traps (`INT`, `TERM`, `HUP`, `EXIT`) trigger automated rollback during the transition window and prevent destructive double cleanup (`IN_CLEANUP` re-entrancy lock).
+3. **Atomic Rename vs. Two-Step Directory Swap Distinction:**
+   - In POSIX filesystems without atomic exchange syscalls (e.g. Darwin), directory replacement requires a two-step sequence: `mv target backup` followed by `mv staging target`.
+   - Between step 1 and step 2, target is momentarily absent. This two-rename sequence is NOT a single atomic filesystem transaction.
+   - Mitigations: (1) Staging is verified 100% before step 1, (2) signals (`SIGINT`, `SIGTERM`, `SIGHUP`) are trapped to immediately restore backup, (3) backup physical presence is asserted before proceeding, (4) uncommitted backups trigger rollback via filesystem evidence, and (5) unrecovered backups are preserved if restoration fails.
+   - **Persistent Next-Boot Recovery Limitation (H6 Scope):** Uncatchable signals (`SIGKILL`), kernel panics, and abrupt power loss during the rename window bypass shell traps and leave `.python.old.<pid>` or `.python.tmp.<pid>` on disk. Handling crash recovery across unexpected process termination requires a persistent on-disk marker / startup reconciliation routine, formally scoped for Milestone H6 (Staging, Activation & Resilience).
+4. **Template Manifest vs. Release Separation:**
+   - Embedded manifest `assets/runtime-manifest.json` specifies `"manifest_type": "template"` to indicate that dependent components (wheels in H3, worker/ffmpeg in H4) are unbuilt specifications and not ready-for-inference releases.
+   - Formalized state: `PYTHON_EXECUTABLE` indicates interpreter availability, but explicitly does NOT imply `RUNTIME_READY` or `INFERENCE_READY`.
+
+### 9.6 Adversarial Test Suite Coverage (`secure_extractor_test.go` & `test-rollback-safety.sh`)
+Thirteen mandatory rollback safety failure modes across twelve categories are validated via deterministic fault injection (`deploy/installer/test-rollback-safety.sh`):
+1. **Case 1 (Fresh install):** Successful clean installation without leftover temporary files.
+2. **Case 2 (Valid previous runtime update):** Clean upgrade with backup deleted post-commit.
+3. **Case 3 (Error before activation):** Pre-activation failure leaves target untouched and cleans staging.
+4. **Case 4 (Error moving old runtime):** Failure backing up preserves existing runtime.
+5. **Case 5 (Error activating new runtime):** Activation failure triggers automatic rollback and restores valid runtime.
+6. **Case 6 (Error restoring backup):** Restoration failure preserves backup directory intact with manual recovery instructions.
+7. **Case 7 (Error in final verification):** Post-activation verification failure triggers rollback and restores previous runtime.
+8. **Case 8a (Interruption between renames):** SIGINT between renames (`STATE=BACKED_UP`) is trapped, initiating rollback and restoring valid runtime.
+9. **Case 8b (Interruption during BACKING_UP):** SIGINT immediately after first rename (before `STATE=BACKED_UP` variable assignment) triggers rollback via physical filesystem evidence and restores target runtime.
+10. **Case 9 (Interruption during cleanup):** Trap handler prevents re-entrancy and double cleanup crashes.
+11. **Case 10 (Repeated execution):** Idempotent execution skips redundant work when runtime is already verified.
+12. **Case 11 (Exact cryptographic preservation):** Canary files and dylibs remain bit-for-bit identical after rollback.
+13. **Case 12 (Absence of deletion of unrecovered backups):** Failed restoration never prunes backup on process exit.
+
+Go unit test suite in `secure_extractor_test.go` (14 cases) validates entry confinement, tar bomb bounds, same-filesystem staging, post-activation validation rollback (`Case 13`), and backup preservation upon rollback failure (`Case 14`).
+
+
+
 

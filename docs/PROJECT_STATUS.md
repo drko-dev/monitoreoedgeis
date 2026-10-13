@@ -5,16 +5,19 @@
 
 ## Current Active Initiative: Full Edge Self-Contained Offline Runtime
 
-### Hito OFFLINE-H1: Runtime Pack Specification & Manifest (Current)
-- **Branch:** `feat/full-edge-runtime-manifest`
-- **Base:** `main @ 911a0e8c62a9d7e33059de33501977e5551f9bf6` (después del merge de H0 en PR #137)
-- **Objective:** Definición e implementación del modelo formal de datos en Go y JSON para el `runtime-manifest.json`, integrando verificación criptográfica SHA-256 estricta, compatibilidad de plataforma y suite de tests table-driven de 18 escenarios adversariales.
+### Hito OFFLINE-H2: Embedded Python Standalone macOS ARM64 (Current)
+- **Branch:** `feat/full-edge-embedded-python`
+- **Base:** `main @ 0c8f64a6e3cf6be2de671bdfaef21a13ea695006` (después del merge de H1 en PR #138)
+- **Objective:** Implementar el soporte de CPython 3.11.9 Standalone hermético para macOS Apple Silicon (`darwin/arm64`), permitiendo la ejecución aislada del intérprete sin depender de `/usr/bin/python3`, Homebrew, venvs previos ni acceso a PyPI/red.
 - **Implementación:**
-  - `internal/installer/runtime_manifest.go`: Contrato de runtime manifest, tipado estricto, validadores (`ValidateSchema`, `ValidateCompatibility`, `ValidateArtifactsWithProgress`), resolución canónica de la raíz y de cada componente (`filepath.EvalSymlinks`), confinamiento físico sin comparación de prefijos de strings (`isPathConfined`), preservación de symlinks internos legítimos, rechazo de symlinks rotos/cíclicos/escapes (tanto hojas como directorios padre), deduplicación y normalización de sintaxis de rutas (`canonicalizeManifestPath`), prevención de operadores de versiones abiertas (`>=, <=, ~, ^, *`) y streaming de SHA-256 (`hashFileSHA256`).
-  - `internal/installer/types.go`: Implementación de `Unwrap() error` y campo `Err error` en `SafeError` para interoperabilidad idiomática con `errors.Is`.
-  - `internal/installer/assets/runtime-manifest.json`: Fixture y especificación inicial versionada para `darwin/arm64`.
-  - `internal/installer/runtime_manifest_test.go`: Suite de tests table-driven y suites especializadas de symlink security (escapes de padre, escapes de hoja, symlinks internos válidos, rotos, cíclicos, root symlink, duplicados normalizados) aprobadas bajo `-race`.
-- **Garantías TOCTOU (Milestone H6):** Documentado explícitamente que la validación en tiempo de inspección no elimina por sí sola condiciones de carrera TOCTOU concurrentes; la garantía fuerte de activación se alcanzará en H6 mediante staging en directorio aislado `0700` y swap atómico con `os.Rename`.
+  - `internal/installer/embedded_python.go`: Componente `EmbeddedPythonManager` para resolución de ruta, verificación criptográfica (SHA-256 y tamaño exacto), validación de arquitectura Mach-O 64-bit arm64 (`macho.CpuArm64`), validación de biblioteca dinámica `libpython3.11.dylib` (`ValidateMachODylib`), verificación de completitud de distribución (`os.py` y `lib-dynload`), estados formales de preparación (`PYTHON_EXECUTABLE` vs `RUNTIME_READY` vs `INFERENCE_READY`), purga de entorno de subprocess (`IsolateEnv()`), probador de versión/ABI (`ProbeInterpreter()`) y verificación de carga hermética de biblioteca estándar (`VerifyStandardLibrary()`).
+  - `internal/installer/secure_extractor.go` & `cmd/runtime-extractor`: Motor de extracción segura tar.gz en Go que valida entradas antes de escribir a disco (rechaza traversal `..`, rutas absolutas, symlinks/hardlinks que escapan, y tipos inesperados), impone límites contra tar bombs (1GB por archivo, 2GB acumulado), y garantiza staging atómico en el mismo filesystem con rollback post-activación y preservación estricta de backup.
+  - `internal/installer/assets/runtime-manifest.json`: Actualización con `"manifest_type": "template"` para distinguir especificaciones de componentes no construidos (H3–H5) de releases listas para inferencia, junto con metadatos reales verificados de Python (`90677957...`, 50168 bytes).
+  - `deploy/installer/fetch-runtime-deps.sh`: Script reproducible de adquisición y staging para `cpython-3.11.9+20240415-aarch64-apple-darwin-install_only.tar.gz` con máquina de estados explícita (`INIT` -> `PREPARING` -> `STAGED` -> `BACKING_UP` -> `BACKED_UP` -> `ACTIVATING` -> `ACTIVATED` -> `VERIFYING` -> `COMMITTED`), delegación a `runtime-extractor`, staging exclusivo en `$TARGET_DIR/.python.tmp.$$`, respaldo en `$TARGET_DIR/.python.old.$$`, verificación física de existencia de backup en disco, recuperación basada en evidencia del filesystem en `cleanup()`, preservación estricta de backup hasta confirmación, rollback automático ante fallo o interrupción por señales (INT, TERM, HUP), y preservación garantizada de backup no recuperado.
+  - `internal/installer/embedded_python_test.go`: Suite de 20 escenarios unitarios y de integración table-driven bajo `-race` + test de integración física con intérprete real verificado (`TestEmbeddedPython_RealPythonExecution`).
+  - `internal/installer/secure_extractor_test.go`: Suite adversarial de 14 escenarios comprobando path traversal, rutas absolutas, symlinks/hardlinks maliciosos, mismatch previo de hash, rollback ante error de movimiento, preservación de runtime anterior válido, garantía de mismo filesystem, completitud de la distribución, rollback ante fallo post-activación (Case 13) y preservación de backup (Case 14).
+  - `deploy/installer/test-rollback-safety.sh`: Suite de 13 pruebas de inyección determinista de fallos validando primera instalación, actualización limpia, fallo previo a activación, fallo al respaldar, fallo al activar, fallo de rollback con preservación estricta de backup, fallo de verificación post-activación, interrupción SIGINT entre renames (Case 8a), interrupción durante `BACKING_UP` recuperada por evidencia de filesystem (Case 8b), interrupción de cleanup sin reentrancia, idempotencia en ejecución repetida, preservación criptográfica exacta, y ausencia de eliminación de backups no recuperados tras la salida.
+- **Garantías TOCTOU y Límites de Atomicidad en POSIX (Milestone H6):** Documentado explícitamente que la validación en tiempo de inspección no elimina por sí sola condiciones de carrera TOCTOU concurrentes; la garantía fuerte de activación se alcanzará en H6 mediante staging en directorio aislado `0700`. Se documenta además que el reemplazo de directorios de dos pasos en POSIX (`mv target backup; mv staging target`) posee una ventana no atómica; fallos no interceptables por traps (SIGKILL, kernel panic, corte de energía) dejan directorios intermedios que requieren recuperación persistente en el arranque subsiguiente (alcance de H6).
 - **Known Technical Debt (Monitoreado):**
   - `internal/heartbeat/saas_outage_test.go`: `TestW5_TransientFailuresBackOffInsteadOfHammering` tiene potencial de flakiness por contención de scheduling debido a `fakeSaaS` inicializando en `modeOK` antes de `setMode(modeUnavailable)` con `recordingClock`. Registrado como deuda técnica conocida sin modificar la suite de heartbeat en este hito.
 - **Licensing Gate:** `MODEL_REDISTRIBUTION_APPROVED=false` estrictamente mantenido (`RUNTIME_OFFLINE_READY=true`, `MODEL_PACK_RELEASE_BLOCKED=true`).
@@ -22,6 +25,10 @@
   - Arquitectura detallada: `docs/architecture/FULL_EDGE_SELF_CONTAINED.md`
   - Roadmap maestro H0–H9: `docs/roadmaps/FULL_EDGE_OFFLINE_ROADMAP.md`
   - Estado de simplificación: `docs/architecture/GEO_CAM_SIMPLIFICATION_STATUS.md`
+
+### Hito OFFLINE-H1: Runtime Pack Specification & Manifest (MERGED)
+- **PR:** #138 (Merged en `0c8f64a6e3cf6be2de671bdfaef21a13ea695006`)
+- **Resumen:** Contrato formal de RuntimeManifest en Go y JSON, validadores de integridad SHA-256 estricta, compatibilidad de plataforma y resolución canónica componente por componente con confinamiento estricto de enlaces simbólicos.
 
 ### Hito OFFLINE-H0: Baseline y Arquitectura (MERGED)
 - **PR:** #137 (Merged en `911a0e8c62a9d7e33059de33501977e5551f9bf6`)
