@@ -95,19 +95,26 @@ func (w *Worker) SetOnStateChange(fn func()) { w.onStateChange = fn }
 // from the config package itself so vision has no import-cycle risk and its
 // tests need not construct a full agent config.
 type Config struct {
-	WorkerCmd         string
-	WorkerArgs        []string
-	ModelsDir         string
-	PersonModel       string
-	VehicleModel      string
-	PersonConfidence  float64
-	VehicleConfidence float64
-	NMSIoU            float64
-	Device            string
-	ImgSize           int
-	SocketPath        string
-	StartTimeout      time.Duration
-	InferTimeout      time.Duration
+	WorkerCmd  string
+	WorkerArgs []string
+	// Hermetic enables the Runtime Pack-only process contract. When true, the
+	// command, worker entrypoint, and media tools must resolve inside RuntimePackRoot;
+	// ProcessEnv replaces, rather than extends, the parent environment.
+	Hermetic            bool
+	RuntimePackRoot     string
+	ProcessEnv          []string
+	ModelPackAuthorized bool
+	ModelsDir           string
+	PersonModel         string
+	VehicleModel        string
+	PersonConfidence    float64
+	VehicleConfidence   float64
+	NMSIoU              float64
+	Device              string
+	ImgSize             int
+	SocketPath          string
+	StartTimeout        time.Duration
+	InferTimeout        time.Duration
 }
 
 // NewWorker builds a Worker. It does not start the subprocess — call Start.
@@ -157,12 +164,24 @@ func (w *Worker) setError(err error) {
 // state forever, visible under /status, rather than crashing the agent.
 func (w *Worker) Start(ctx context.Context) error {
 	if w.cfg.WorkerCmd == "" {
+		if w.cfg.Hermetic {
+			w.setError(ErrHermeticRuntimePackInvalid)
+			w.setState(StateError)
+			return ErrHermeticRuntimePackInvalid
+		}
 		w.setState(StateNotConfigured)
 		w.logger.Warn("edge vision worker not started: GEOCAM_EDGE_YOLO_WORKER_CMD is not configured")
 		w.stopCh = make(chan struct{})
 		w.doneCh = make(chan struct{})
 		close(w.doneCh)
 		return nil
+	}
+	if w.cfg.Hermetic {
+		if err := w.validateHermeticConfig(); err != nil {
+			w.setError(err)
+			w.setState(StateError)
+			return err
+		}
 	}
 	w.stopCh = make(chan struct{})
 	w.doneCh = make(chan struct{})
@@ -353,7 +372,7 @@ func (w *Worker) spawnAndHandshake(ctx context.Context) error {
 		"--device", w.cfg.Device,
 		"--imgsz", itoa(w.cfg.ImgSize),
 	)
-	cmd := exec.Command(w.cfg.WorkerCmd, args...)
+	cmd := w.newExecCommand(args)
 	cmd.Stdout = w.logWriter("stdout")
 	cmd.Stderr = w.logWriter("stderr")
 	if err := cmd.Start(); err != nil {
@@ -392,6 +411,14 @@ func (w *Worker) spawnAndHandshake(ctx context.Context) error {
 	w.modelsLoaded = resp.ModelsLoaded
 	w.mu.Unlock()
 	return nil
+}
+
+func (w *Worker) newExecCommand(args []string) *exec.Cmd {
+	cmd := exec.Command(w.cfg.WorkerCmd, args...)
+	if w.cfg.Hermetic {
+		cmd.Env = append([]string(nil), w.cfg.ProcessEnv...)
+	}
+	return cmd
 }
 
 // ensureSocketDir creates the parent directory of the vision worker's Unix

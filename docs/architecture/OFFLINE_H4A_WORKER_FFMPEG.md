@@ -11,6 +11,11 @@ No product process launch path is wired to the new contract in this phase.
 `MODEL_REDISTRIBUTION_APPROVED=false` remains a release gate. No YOLO weights or
 PyTorch wheels are added or downloaded.
 
+H4A was committed as `d2b3405d4bff39ee877df2efc98f6e412465a29d` and submitted
+as PR #143 against approved issue #142. H4B is being prepared on a separate
+branch based on that commit. H4A's contract tests passed; its GitHub checks are
+independent of H4B.
+
 ## Existing components verified
 
 - `internal/installer/runtime_manifest.go`: `RuntimeManifest.Binaries` already
@@ -56,16 +61,48 @@ PyTorch wheels are added or downloaded.
   escaping/broken symlinks and traversal are rejected by the existing
   artifact validator.
 - `BuildRuntimePackWorkerLaunchSpec`: creates metadata for the bundled Python
-  (`-I` isolated mode) and worker entrypoint, bundled media paths, persistent
+  (`-I -B` isolated mode) and worker entrypoint, bundled media paths, persistent
   caller-authorized models directory, a pack-only PATH, explicit FFmpeg
   variables and a bounded startup timeout. It also requires bundled Python to
   be a regular executable file. It does not execute the command.
 
-The launch environment is a proposed replacement environment, not an overlay:
-the later integration must assign it to `exec.Cmd.Env` instead of appending to
-the host environment. The current `internal/vision.Worker` does not consume this
-spec yet. H4B must wire it only after confirming the active runtime activation
-root and ownership of the persistent model directory.
+## H4B worker integration seam
+
+`internal/vision.Worker` now has an explicit hermetic mode. In that mode it
+validates that Python, the Worker entrypoint, FFmpeg and FFprobe are contained
+in the Runtime Pack; rejects unknown/duplicate environment variables and
+`PYTHONPATH`/`PYTHONHOME`; checks the persistent model directory; and assigns
+the allowlisted environment as a full replacement on `exec.Cmd.Env`. It
+requires `-I`, an authorized model pack and a preverified runtime pack. Invalid
+or incomplete configuration fails before a process starts. The legacy Worker
+path remains unchanged when hermetic mode is not selected.
+
+`internal/agent.buildBundledVisionSink` is an explicit adapter from the
+installer launch-contract interface to the existing supervisor. It is not
+called by current `newVisionSink`: no runtime pack selector or pack activation
+path is wired into production setup yet. This preserves legacy behavior and
+prevents a template manifest from silently enabling Full Edge. The contract
+builder currently marks model authorization false, so the adapter returns an
+authorization error before constructing a worker until a separately
+approved/verified model pack is available.
+
+The launch environment is a replacement, not an overlay. Python runs with
+`-I -B`; `PATH` points only to the bundled media directory. `HOME` and `TMPDIR`
+are explicitly scoped to worker state. Existing supervision continues to own
+startup timeout, handshake, cancellation, structured stdout/stderr logging,
+error state and restart backoff. A process handshake is not an inference
+certification.
+
+This does **not** yet make Full Edge's Go video decoder hermetic. The active
+camera pipeline constructs `processing.FFmpegDecoderConfig` from
+`config.VideoFFmpegPath` (`internal/agent/agent.go`, `newCameraPipeline` in
+`internal/processing/pipeline.go`); an empty path becomes `ffmpeg` and is
+resolved through the Go process PATH in `internal/processing/ffmpeg_decoder.go`.
+The Worker child environment cannot constrain that separate Go subprocess.
+Production Runtime Pack selection must provide the verified absolute bundled
+FFmpeg path to the video pipeline and fail closed in bundled mode. This wiring
+is still pending; no claim is made that Homebrew/host FFmpeg is excluded from
+the current Full Edge camera decoder.
 
 SHA-256 plus size establish that files match the manifest; they do not prove
 publisher identity or legal provenance. A release still requires reviewed
@@ -96,26 +133,38 @@ the H3-packaged Python, dependency paths and compatibility tuple into the same
 release manifest, then prove that `-I` still resolves the installed bundled
 site-packages correctly. Do not enable the launch spec until that is verified.
 
-H4B remains responsible for real artifact sourcing and redistribution review,
-release assembly, atomic installation/activation and rollback behavior,
-worker wiring, macOS ARM64 execution validation, and actual offline integration
-certification. H7A's future harness should be integrated deliberately; its
-package and workflow are not imported or modified here.
+H3 remains open as PR #140. No H3 files or wheelhouse code are copied into this
+branch. H3 must provide the compatible bundled Python and offline dependency
+layout; H4 integration must pass that verified pack specification into the
+adapter and prove imports resolve under `-I`. The current adapter is a seam,
+not an active runtime wiring.
+
+Packaging is also blocked on actual authorized FFmpeg/FFprobe artifacts. The
+release assembler is not changed to insert fabricated or unverified assets.
+Once provenance, real hashes/sizes and redistribution terms are approved, H4
+must add the pack to assembly and verify it before signing/releasing. Atomic
+activation/rollback and physical macOS ARM64 validation remain pending. H7A's
+future harness should be integrated deliberately; its package/workflow are not
+imported or modified here.
 
 ## Evidence and remaining work
 
 Automated tests create tiny temporary synthetic files with computed checksums;
-they are contract tests, not real FFmpeg/Python binaries. They exercise missing
-FFmpeg, absent FFprobe declaration, hash and size mismatch, wrong architecture,
-non-executable mode, path traversal, external symlink, host PATH presence,
-release-vs-template gate, bundled Python selection, isolated argument contract,
-and persistent models path validation.
+they are contract tests, not real FFmpeg/Python binaries. H4A tests exercise
+missing FFmpeg, absent FFprobe declaration, hash and size mismatch, wrong
+architecture, non-executable mode, path traversal, external symlink, host PATH
+presence, release-vs-template gate, bundled Python selection and isolated args.
+H4B tests exercise the supervisor's explicit environment replacement, host
+Python/Homebrew/FFmpeg exclusion, containment, environment allowlisting,
+missing models and the authorization gate. Existing fake-worker tests continue
+to cover the legacy handshake, timeout, cancellation and restart lifecycle.
 
-Not validated in H4A: real FFmpeg/FFprobe builds or hashes; artifact source or
-redistribution rights; actual macOS binary execution or `-version`; Homebrew
-absence on a clean machine; real Python/runtime imports; actual env replacement
-or Worker timeout/cancellation; model availability/authorization; install
-interruption, rollback and preservation; no-network operation; physical
-Apple-Silicon/MPS inference. These require H3/H4B artifacts and the later
-certification environment. The release must remain blocked from distributing
-FFmpeg until its provenance, checksum and redistribution terms are approved.
+Not implemented/validated: hermetic FFmpeg selection for the Go camera decoder;
+release-pack assembly; real FFmpeg/FFprobe builds, hashes, source or redistribution
+rights; actual macOS binary execution or `-version`; real Python/runtime imports
+with H3 wheels; process startup/handshake using a bundled Python; model pack
+availability, authorization or loadability; pack assembly, interrupted install,
+rollback/preservation; external-network isolation; physical Apple-Silicon/MPS
+inference. Contract tests do not prove offline installation or `INFERENCE_READY`.
+Distribution remains blocked until H3 integration and artifact provenance,
+checksums, compatibility and redistribution terms are approved.
