@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { VisionRuntimeStatus } from '../types/installer';
-import { fetchVisionRuntimeStatus, prepareVisionRuntime } from '../services/api';
+import { fetchVisionRuntimeStatus, prepareVisionRuntime, selectAndImportModel } from '../services/api';
 
 export function useVisionRuntime() {
   const [status, setStatus] = useState<VisionRuntimeStatus | null>(null);
@@ -45,6 +45,27 @@ export function useVisionRuntime() {
     }
   }, []);
 
+  const importSingleModel = useCallback(async (modelName: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await selectAndImportModel(modelName);
+      setStatus(res);
+      return res;
+    } catch (err: unknown) {
+      const msg =
+        err && typeof err === 'object' && 'safe_message' in err
+          ? (err as { safe_message: string }).safe_message
+          : err instanceof Error
+          ? err.message
+          : String(err);
+      setError(msg);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     check();
   }, [check]);
@@ -56,5 +77,6 @@ export function useVisionRuntime() {
     error,
     check,
     prepare,
+    importSingleModel,
   };
 }

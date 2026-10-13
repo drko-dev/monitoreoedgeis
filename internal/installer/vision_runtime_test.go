@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/config"
 )
@@ -301,6 +302,7 @@ func TestVisionRuntimeProvisionerSuccess(t *testing.T) {
 	}{
 		"sys.version_info": {out: []byte("3.11.4\n"), err: nil},
 		"-m venv":          {out: []byte(""), err: nil},
+		"pip --version":    {out: []byte("pip 24.0 from ...\n"), err: nil},
 		"pip install":      {out: []byte("Successfully installed"), err: nil},
 		"-c":               {out: append(probeResp, '\n'), err: nil},
 	})
@@ -421,5 +423,174 @@ func TestDynamicReEvaluationAfterPlacingModels(t *testing.T) {
 			}
 			break
 		}
+	}
+}
+
+func TestPythonCandidateScoringPrioritizesHomebrewOverSystem(t *testing.T) {
+	dataDir := t.TempDir()
+	res := NewVisionRuntimeResolver(dataDir)
+	res.goos = "darwin"
+	res.userHomeDir = func() (string, error) { return "/Users/fakeuser", nil }
+
+	res.stat = func(name string) (os.FileInfo, error) {
+		// Both Homebrew python and /usr/bin/python3 exist
+		if name == "/opt/homebrew/bin/python3.11" || name == "/usr/bin/python3" {
+			return mockFileInfo{name: filepath.Base(name), isDir: false}, nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	res.execCmd = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "/opt/homebrew/bin/python3.11" {
+			return []byte("3.11.8\n"), nil
+		}
+		if name == "/usr/bin/python3" {
+			return []byte("3.9.6\n"), nil
+		}
+		return nil, errors.New("not found")
+	}
+
+	bestPy, ver := res.findBasePython(context.Background())
+	if bestPy != "/opt/homebrew/bin/python3.11" {
+		t.Errorf("expected Homebrew python /opt/homebrew/bin/python3.11, got %q (ver: %s)", bestPy, ver)
+	}
+	if ver != "3.11.8" {
+		t.Errorf("expected version 3.11.8, got %s", ver)
+	}
+}
+
+func TestPythonCandidateIncompatibleRejected(t *testing.T) {
+	dataDir := t.TempDir()
+	res := NewVisionRuntimeResolver(dataDir)
+	res.goos = "darwin"
+	res.stat = func(name string) (os.FileInfo, error) {
+		if name == "/opt/homebrew/bin/python3" {
+			return mockFileInfo{name: "python3", isDir: false}, nil
+		}
+		return nil, os.ErrNotExist
+	}
+	res.execCmd = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		// Python 3.14 is incompatible (torch wheels do not exist)
+		return []byte("3.14.0\n"), nil
+	}
+
+	bestPy, _ := res.findBasePython(context.Background())
+	if bestPy != "" {
+		t.Errorf("expected no base python found for incompatible 3.14, got %q", bestPy)
+	}
+}
+
+func TestVisionRuntimeProvisionerTransientPipTimeoutRetry(t *testing.T) {
+	dataDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "edge.env")
+	if err := os.WriteFile(configPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.ConfigFileEnv, configPath)
+
+	res := NewVisionRuntimeResolver(dataDir)
+	res.lookPath = func(file string) (string, error) {
+		return "/opt/homebrew/bin/python3.11", nil
+	}
+
+	attempts := 0
+	res.execCmd = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		cmdStr := name + " " + strings.Join(args, " ")
+		if strings.Contains(cmdStr, "sys.version_info") {
+			return []byte("3.11.8\n"), nil
+		}
+		if strings.Contains(cmdStr, "-m venv") {
+			return []byte(""), nil
+		}
+		if strings.Contains(cmdStr, "pip --version") {
+			return []byte("pip 24.0\n"), nil
+		}
+		if strings.Contains(cmdStr, "pip install --upgrade") {
+			return []byte("pip upgraded\n"), nil
+		}
+		if strings.Contains(cmdStr, "requirements.txt") {
+			attempts++
+			return nil, errors.New("pip._vendor.urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='files.pythonhosted.org', port=443): Read timed out.")
+		}
+		return nil, errors.New("unhandled mock")
+	}
+
+	provisioner := NewVisionRuntimeProvisioner(res)
+	provisioner.timeAfter = func(d time.Duration) <-chan time.Time {
+		ch := make(chan time.Time, 1)
+		ch <- time.Now()
+		return ch
+	}
+	_, err := provisioner.Provision(context.Background())
+	if err == nil {
+		t.Fatal("expected Provision to fail after pip retries exhausted")
+	}
+	var safeErr *SafeError
+	if !errors.As(err, &safeErr) {
+		t.Fatalf("expected SafeError, got %v", err)
+	}
+	if safeErr.Code != "PIP_TIMEOUT" {
+		t.Errorf("expected PIP_TIMEOUT code, got %s", safeErr.Code)
+	}
+	if attempts != 3 {
+		t.Errorf("expected exactly 3 attempts for transient pip error, got %d", attempts)
+	}
+}
+
+func TestImportModelValidationAndAtomicPlacement(t *testing.T) {
+	dataDir := t.TempDir()
+	res := NewVisionRuntimeResolver(dataDir)
+
+	// Disallowed model name
+	_, err := res.ImportModel(context.Background(), "malicious.pt", "/tmp/fake.pt")
+	if err == nil {
+		t.Fatal("expected error for disallowed model name")
+	}
+	var safeErr *SafeError
+	if !errors.As(err, &safeErr) || safeErr.Code != "INVALID_MODEL_NAME" {
+		t.Errorf("expected INVALID_MODEL_NAME error, got %v", err)
+	}
+
+	// Missing source file
+	_, err = res.ImportModel(context.Background(), config.DefaultEdgeYOLOPersonModel, "/tmp/non-existent-file.pt")
+	if err == nil {
+		t.Fatal("expected error for non-existent source file")
+	}
+	if !errors.As(err, &safeErr) || safeErr.Code != "FILE_NOT_FOUND" {
+		t.Errorf("expected FILE_NOT_FOUND error, got %v", err)
+	}
+
+	// Empty source file
+	emptyFile := filepath.Join(t.TempDir(), "empty.pt")
+	if err := os.WriteFile(emptyFile, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = res.ImportModel(context.Background(), config.DefaultEdgeYOLOPersonModel, emptyFile)
+	if err == nil {
+		t.Fatal("expected error for empty file")
+	}
+	if !errors.As(err, &safeErr) || safeErr.Code != "EMPTY_FILE" {
+		t.Errorf("expected EMPTY_FILE error, got %v", err)
+	}
+
+	// Valid model import
+	validFile := filepath.Join(t.TempDir(), "valid.pt")
+	if err := os.WriteFile(validFile, []byte("pytorch_weights_data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	status, err := res.ImportModel(context.Background(), config.DefaultEdgeYOLOPersonModel, validFile)
+	if err != nil {
+		t.Fatalf("expected successful import, got %v", err)
+	}
+	if !status.PersonModelFound {
+		t.Errorf("expected PersonModelFound=true after import")
+	}
+	destPath := filepath.Join(dataDir, config.DefaultEdgeYOLOModelsDirName, config.DefaultEdgeYOLOPersonModel)
+	content, err := os.ReadFile(destPath)
+	if err != nil {
+		t.Fatalf("failed to read copied model at %s: %v", destPath, err)
+	}
+	if string(content) != "pytorch_weights_data" {
+		t.Errorf("unexpected content in copied model: %s", string(content))
 	}
 }

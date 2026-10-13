@@ -30,6 +30,10 @@ export function GetVisionRuntimeStatus():Promise<installer.VisionRuntimeStatus>;
 
 export function PrepareVisionRuntime():Promise<installer.VisionRuntimeStatus>;
 
+export function ImportModel(arg1:string, arg2:string):Promise<installer.VisionRuntimeStatus>;
+
+export function SelectAndImportModel(arg1:string):Promise<installer.VisionRuntimeStatus>;
+
 export function TestSaaSConnection(arg1:string):Promise<installer.ServerCheckResult>;
 
 export function GetSystemReport():Promise<installer.SystemReport>;

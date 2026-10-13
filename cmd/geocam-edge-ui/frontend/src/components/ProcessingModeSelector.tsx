@@ -81,6 +81,17 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
     }
   };
 
+  const handleImportModel = async (modelName: string) => {
+    try {
+      await hookVision.importSingleModel(modelName);
+      if (onRefreshModes) {
+        onRefreshModes();
+      }
+    } catch {
+      // error handled in hook
+    }
+  };
+
   const selectedOption = options.find((o) => o.mode === selected);
   const isSelectedUnavailable = selectedOption?.capability === 'UNAVAILABLE';
   const fullEdgeOption = options.find((o) => o.mode === 'full_edge');
@@ -280,9 +291,24 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
                       models: (currentVision.missing_models || []).join(', '),
                     })}
                   </p>
-                  <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                  <p style={{ margin: '0 0 0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                     {t('vision.missingModelsHelp')}
                   </p>
+                  {currentVision.missing_models && currentVision.missing_models.length > 0 && (
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      {currentVision.missing_models.map((model) => (
+                        <Button
+                          key={model}
+                          variant="secondary"
+                          onClick={() => handleImportModel(model)}
+                          loading={hookVision.loading}
+                          disabled={hookVision.loading}
+                        >
+                          {t('vision.importModel', { model })}
+                        </Button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -313,14 +339,27 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
             <div
               style={{
                 marginTop: '0.75rem',
-                padding: '0.5rem',
+                padding: '0.75rem',
                 backgroundColor: 'rgba(239, 68, 68, 0.15)',
                 borderRadius: 'var(--radius-sm)',
                 fontSize: '0.85rem',
                 color: 'var(--danger)',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                gap: '0.5rem',
               }}
             >
-              <p style={{ margin: 0 }}>{t('vision.prepareFailed', { error: currentVisionError })}</p>
+              <p style={{ margin: 0, flex: '1 1 200px' }}>{t('vision.prepareFailed', { error: currentVisionError })}</p>
+              <Button
+                variant="secondary"
+                onClick={handlePrepare}
+                loading={provisioningV}
+                disabled={provisioningV}
+              >
+                {t('vision.retry')}
+              </Button>
             </div>
           )}
         </div>

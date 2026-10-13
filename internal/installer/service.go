@@ -282,6 +282,16 @@ func (s *Service) PrepareVisionRuntime(ctx context.Context) (*VisionRuntimeStatu
 	return s.visionProvisioner.Provision(ctx)
 }
 
+// ImportModel copies and validates a local model file into the managed models directory.
+func (s *Service) ImportModel(ctx context.Context, modelName, sourcePath string) (*VisionRuntimeStatus, error) {
+	s.visionMu.Lock()
+	defer s.visionMu.Unlock()
+	if s.visionResolver == nil {
+		s.visionResolver = NewVisionRuntimeResolver(s.DataDir)
+	}
+	return s.visionResolver.ImportModel(ctx, modelName, sourcePath)
+}
+
 func (s *Service) checkFFmpeg() (bool, string) {
 	status := s.ResolveFFmpeg(context.Background())
 	return status.Ready, status.FFprobePath
