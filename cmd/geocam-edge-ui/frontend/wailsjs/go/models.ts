@@ -515,5 +515,143 @@ export namespace installer {
 	    }
 	}
 
+	export class RuntimeCertification {
+	    certification_id: string;
+	    runtime_pack_version: string;
+	    runtime_manifest_sha256: string;
+	    platform: string;
+	    evidence_level: string;
+	    runtime_pack_verified: boolean;
+	    dependencies_verified: boolean;
+	    vision_worker_ready: boolean;
+	    ffmpeg_verified: boolean;
+	    ffprobe_verified: boolean;
+	    model_pack_version: string;
+	    model_manifest_sha256: string;
+	    model_authorized: boolean;
+	    model_integrity_verified: boolean;
+	    inference_smoke_test_passed: boolean;
+	    certified_at: string;
+
+	    static createFrom(source: any = {}) {
+	        return new RuntimeCertification(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.certification_id = source["certification_id"];
+	        this.runtime_pack_version = source["runtime_pack_version"];
+	        this.runtime_manifest_sha256 = source["runtime_manifest_sha256"];
+	        this.platform = source["platform"];
+	        this.evidence_level = source["evidence_level"];
+	        this.runtime_pack_verified = source["runtime_pack_verified"];
+	        this.dependencies_verified = source["dependencies_verified"];
+	        this.vision_worker_ready = source["vision_worker_ready"];
+	        this.ffmpeg_verified = source["ffmpeg_verified"];
+	        this.ffprobe_verified = source["ffprobe_verified"];
+	        this.model_pack_version = source["model_pack_version"];
+	        this.model_manifest_sha256 = source["model_manifest_sha256"];
+	        this.model_authorized = source["model_authorized"];
+	        this.model_integrity_verified = source["model_integrity_verified"];
+	        this.inference_smoke_test_passed = source["inference_smoke_test_passed"];
+	        this.certified_at = source["certified_at"];
+	    }
+	}
+
+	export class FullEdgePreparationSnapshot {
+	    state: string;
+	    stage: string;
+	    progress_percent: number;
+	    operation_id: string;
+	    can_start: boolean;
+	    retryable: boolean;
+	    cancellation_allowed: boolean;
+	    recovery_available: boolean;
+	    error_code: string;
+	    safe_message: string;
+	    diagnostics_available: boolean;
+	    certification?: RuntimeCertification;
+
+	    static createFrom(source: any = {}) {
+	        return new FullEdgePreparationSnapshot(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.state = source["state"];
+	        this.stage = source["stage"];
+	        this.progress_percent = source["progress_percent"];
+	        this.operation_id = source["operation_id"];
+	        this.can_start = source["can_start"];
+	        this.retryable = source["retryable"];
+	        this.cancellation_allowed = source["cancellation_allowed"];
+	        this.recovery_available = source["recovery_available"];
+	        this.error_code = source["error_code"];
+	        this.safe_message = source["safe_message"];
+	        this.diagnostics_available = source["diagnostics_available"];
+	        this.certification = this.convertValues(source["certification"], RuntimeCertification);
+	    }
+
+	    private convertValues(a: any, classs: any, asMap: boolean = false): any {
+	        if (!a) return a;
+	        if (a.slice) return (a as any[]).map(elem => this.convertValues(elem, classs));
+	        if ("object" === typeof a) {
+	            if (asMap) {
+	                for (const key of Object.keys(a)) a[key] = new classs(a[key]);
+	                return a;
+	            }
+	            return new classs(a);
+	        }
+	        return a;
+	    }
+	}
+
+	export class PreparationCheckResult {
+	    name: string;
+	    status: string;
+	    detail: string;
+
+	    static createFrom(source: any = {}) {
+	        return new PreparationCheckResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.status = source["status"];
+	        this.detail = source["detail"];
+	    }
+	}
+
+	export class FullEdgePreparationDiagnostic {
+	    code: string;
+	    summary: string;
+	    checks?: PreparationCheckResult[];
+
+	    static createFrom(source: any = {}) {
+	        return new FullEdgePreparationDiagnostic(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.code = source["code"];
+	        this.summary = source["summary"];
+	        this.checks = this.convertValues(source["checks"], PreparationCheckResult);
+	    }
+
+	    private convertValues(a: any, classs: any, asMap: boolean = false): any {
+	        if (!a) return a;
+	        if (a.slice) return (a as any[]).map(elem => this.convertValues(elem, classs));
+	        if ("object" === typeof a) {
+	            if (asMap) {
+	                for (const key of Object.keys(a)) a[key] = new classs(a[key]);
+	                return a;
+	            }
+	            return new classs(a);
+	        }
+	        return a;
+	    }
+	}
+
 }
 

@@ -24,6 +24,16 @@ export function GetSaaSURL():Promise<string>;
 
 export function GetFFmpegStatus():Promise<installer.DependencyStatus>;
 
+export function GetFullEdgePreparationStatus():Promise<installer.FullEdgePreparationSnapshot>;
+
+export function StartFullEdgePreparation(arg1:string):Promise<installer.FullEdgePreparationSnapshot>;
+
+export function CancelFullEdgePreparation(arg1:string):Promise<installer.FullEdgePreparationSnapshot>;
+
+export function GetFullEdgePreparationDiagnostic(arg1:string):Promise<installer.FullEdgePreparationDiagnostic>;
+
+export function RecoverFullEdgeRuntime(arg1:string):Promise<installer.FullEdgePreparationSnapshot>;
+
 export function InstallFFmpeg():Promise<installer.DependencyStatus>;
 
 export function GetVisionRuntimeStatus():Promise<installer.VisionRuntimeStatus>;

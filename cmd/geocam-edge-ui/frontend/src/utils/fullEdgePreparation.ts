@@ -1,0 +1,113 @@
+import type { FullEdgePreparationSnapshot } from '../types/installer';
+import type { TranslationKey } from '../i18n/translations';
+
+export const preparationStages = [
+  'runtime_pack_detected',
+  'preparation_pending',
+  'verifying_integrity',
+  'installing_dependencies',
+  'preparing_worker',
+  'verifying_media',
+  'validating_model',
+] as const;
+
+const sha256Pattern = /^[a-f0-9]{64}$/i;
+
+const preparationStates = new Set([
+  'initial', 'runtime_pack_detected', 'preparation_pending', 'verifying_integrity',
+  'installing_dependencies', 'preparing_worker', 'verifying_media', 'validating_model',
+  'runtime_ready', 'recoverable_error', 'blocked_error', 'cancelled',
+  'recovery_pending', 'recovering', 'recovered',
+]);
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+export function isFullEdgePreparationSnapshot(value: unknown): value is FullEdgePreparationSnapshot {
+  if (!value || typeof value !== 'object') return false;
+  const snapshot = value as Partial<FullEdgePreparationSnapshot>;
+  return typeof snapshot.state === 'string' && preparationStates.has(snapshot.state) &&
+    Number.isInteger(snapshot.progress_percent) && snapshot.progress_percent! >= 0 && snapshot.progress_percent! <= 100 &&
+    typeof snapshot.can_start === 'boolean' && typeof snapshot.retryable === 'boolean' &&
+    typeof snapshot.cancellation_allowed === 'boolean' && typeof snapshot.recovery_available === 'boolean' &&
+    typeof snapshot.diagnostics_available === 'boolean';
+}
+
+export function isCertifiedReady(snapshot: FullEdgePreparationSnapshot | null): boolean {
+  if (!snapshot || snapshot.state !== 'runtime_ready' || snapshot.progress_percent !== 100) return false;
+  const certificate = snapshot.certification;
+  if (!certificate || typeof certificate !== 'object') return false;
+  return Boolean(
+    nonEmptyString(certificate.certification_id) &&
+    nonEmptyString(certificate.runtime_pack_version) &&
+    typeof certificate.runtime_manifest_sha256 === 'string' && sha256Pattern.test(certificate.runtime_manifest_sha256) &&
+    nonEmptyString(certificate.platform) &&
+    certificate.evidence_level === 'verified' &&
+    certificate.runtime_pack_verified === true &&
+    certificate.dependencies_verified === true &&
+    certificate.vision_worker_ready === true &&
+    certificate.ffmpeg_verified === true &&
+    certificate.ffprobe_verified === true &&
+    nonEmptyString(certificate.model_pack_version) &&
+    typeof certificate.model_manifest_sha256 === 'string' && sha256Pattern.test(certificate.model_manifest_sha256) &&
+    certificate.model_authorized === true &&
+    certificate.model_integrity_verified === true &&
+    certificate.inference_smoke_test_passed === true &&
+    typeof certificate.certified_at === 'string' && Number.isFinite(Date.parse(certificate.certified_at)),
+  );
+}
+
+export function isPreparationActive(state: string | undefined): boolean {
+  return state === 'preparation_pending' || state === 'verifying_integrity' ||
+    state === 'installing_dependencies' || state === 'preparing_worker' ||
+    state === 'verifying_media' || state === 'validating_model' || state === 'recovering';
+}
+
+export function canStartPreparation(snapshot: FullEdgePreparationSnapshot | null): boolean {
+  if (!snapshot || isPreparationActive(snapshot.state) || isCertifiedReady(snapshot)) return false;
+  return snapshot.can_start === true && (snapshot.state === 'runtime_pack_detected' ||
+    (snapshot.state === 'recoverable_error' && snapshot.retryable));
+}
+
+export function canCancelPreparation(snapshot: FullEdgePreparationSnapshot | null): boolean {
+  return Boolean(snapshot?.cancellation_allowed === true && isPreparationActive(snapshot.state));
+}
+
+export function canRecoverPreparation(snapshot: FullEdgePreparationSnapshot | null): boolean {
+  return Boolean(snapshot?.recovery_available === true && snapshot.state === 'recovery_pending');
+}
+
+export function preparationErrorKey(errorCode?: string): TranslationKey {
+  switch (errorCode) {
+    case 'HASH_MISMATCH': return 'preparation.errorHashMismatch';
+    case 'DEPENDENCY_MISSING': return 'preparation.errorDependencyMissing';
+    case 'INSUFFICIENT_DISK': return 'preparation.errorDiskSpace';
+    case 'ARCHITECTURE_UNSUPPORTED': return 'preparation.errorArchitecture';
+    case 'LICENSE_NOT_APPROVED': return 'preparation.errorLicense';
+    case 'MODEL_UNAUTHORIZED': return 'preparation.errorModelUnauthorized';
+    case 'PREPARATION_NOT_INTEGRATED': return 'preparation.notIntegrated';
+    case 'RECOVERY_PENDING': return 'preparation.recoveryPending';
+    case 'CANCELLED': return 'preparation.cancelled';
+    default: return 'preparation.errorGeneric';
+  }
+}
+
+export function isProgressValid(snapshot: FullEdgePreparationSnapshot): boolean {
+  return Number.isInteger(snapshot.progress_percent) && snapshot.progress_percent >= 0 && snapshot.progress_percent <= 100;
+}
+
+
+const stackTraceMarker = /(?:^\s*at\s+|goroutine \d+|Traceback \(most recent call last\)|\n\s*File \u0022|panic:)/i;
+const sensitiveValue = /(?:password|passwd|token|secret|authorization|bearer)\s*[:=]\s*\S+/ig;
+const absolutePath = /(?:\/Users\/|\/home\/|\/private\/|\/var\/|\/tmp\/)\S+/g;
+
+// Diagnostics remain useful but must not leak stack traces, host paths, or secrets.
+export function safeDiagnosticText(value: string | undefined, fallback: string): string {
+  if (!value || stackTraceMarker.test(value) || /[\r\n\t]/.test(value)) return fallback;
+  return value
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(sensitiveValue, '[REDACTED]')
+    .replace(absolutePath, '[PATH]')
+    .slice(0, 240);
+}

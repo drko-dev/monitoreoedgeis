@@ -13,14 +13,16 @@ import (
 // to the Wails frontend. It contains NO arbitrary command execution, NO raw filesystem
 // bindings, and NO secret access.
 type App struct {
-	ctx       context.Context
-	installer *installer.Service
+	ctx         context.Context
+	installer   *installer.Service
+	preparation installer.FullEdgePreparationAPI
 }
 
 // NewApp creates a new desktop App instance backed by the Go installer facade.
 func NewApp() *App {
 	return &App{
-		installer: installer.NewService("", ""),
+		installer:   installer.NewService("", ""),
+		preparation: installer.UnavailableFullEdgePreparation{},
 	}
 }
 
@@ -59,6 +61,64 @@ func (a *App) InstallFFmpeg() (*installer.DependencyStatus, error) {
 func (a *App) GetVisionRuntimeStatus() (*installer.VisionRuntimeStatus, error) {
 	res, err := a.installer.GetVisionRuntimeStatus(a.ctx)
 	return res, structuredError(err)
+}
+
+// GetFullEdgePreparationStatus reads the opt-in offline Runtime Pack flow.
+// Unlike GetVisionRuntimeStatus, this never probes host Python or FFmpeg.
+func (a *App) GetFullEdgePreparationStatus() (installer.FullEdgePreparationSnapshot, error) {
+	snapshot, err := a.preparationAPI().Status(a.requestContext())
+	return validatedPreparationSnapshot(snapshot, err)
+}
+
+// StartFullEdgePreparation starts the offline flow using an idempotency key.
+// The default adapter is intentionally unavailable until H3/H4/H6 are integrated.
+func (a *App) StartFullEdgePreparation(requestID string) (installer.FullEdgePreparationSnapshot, error) {
+	snapshot, err := a.preparationAPI().Start(a.requestContext(), requestID)
+	return validatedPreparationSnapshot(snapshot, err)
+}
+
+func (a *App) CancelFullEdgePreparation(operationID string) (installer.FullEdgePreparationSnapshot, error) {
+	snapshot, err := a.preparationAPI().Cancel(a.requestContext(), operationID)
+	return validatedPreparationSnapshot(snapshot, err)
+}
+
+func (a *App) GetFullEdgePreparationDiagnostic(operationID string) (installer.FullEdgePreparationDiagnostic, error) {
+	return a.preparationAPI().Diagnostic(a.requestContext(), operationID)
+}
+
+func (a *App) RecoverFullEdgeRuntime(operationID string) (installer.FullEdgePreparationSnapshot, error) {
+	snapshot, err := a.preparationAPI().Recover(a.requestContext(), operationID)
+	return validatedPreparationSnapshot(snapshot, err)
+}
+
+func validatedPreparationSnapshot(snapshot installer.FullEdgePreparationSnapshot, err error) (installer.FullEdgePreparationSnapshot, error) {
+	if err != nil {
+		return snapshot, structuredError(err)
+	}
+	if installer.ValidateFullEdgePreparationSnapshot(snapshot) != nil {
+		return installer.FullEdgePreparationSnapshot{
+			State:                installer.PreparationBlockedError,
+			ProgressPercent:      0,
+			ErrorCode:            "INVALID_PREPARATION_STATUS",
+			SafeMessage:          "Full Edge preparation status failed validation.",
+			DiagnosticsAvailable: true,
+		}, nil
+	}
+	return snapshot, nil
+}
+
+func (a *App) preparationAPI() installer.FullEdgePreparationAPI {
+	if a.preparation == nil {
+		return installer.UnavailableFullEdgePreparation{}
+	}
+	return a.preparation
+}
+
+func (a *App) requestContext() context.Context {
+	if a.ctx == nil {
+		return context.Background()
+	}
+	return a.ctx
 }
 
 // PrepareVisionRuntime provisions the Full Edge python environment safely.
