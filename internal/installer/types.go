@@ -74,6 +74,7 @@ type SafeError struct {
 	SafeMessage string `json:"safe_message"`
 	Recoverable bool   `json:"recoverable"`
 	Details     string `json:"details,omitempty"`
+	Err         error  `json:"-"`
 }
 
 func (e *SafeError) Error() string {
@@ -84,6 +85,13 @@ func (e *SafeError) Error() string {
 		return e.SafeMessage + ": " + e.Details
 	}
 	return e.SafeMessage
+}
+
+func (e *SafeError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 // Common reason codes for InstallerState

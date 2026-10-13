@@ -71,9 +71,8 @@ This document establishes the official engineering roadmap to transition GEO CAM
   - Modelos Go: `RuntimeManifest`, `PythonSpec`, `WorkerSpec`, `BinarySpec`, `DependencySpec`, `CompatibilitySpec`, `ArtifactsValidationReport`, `ArtifactValidationResult`.
   - Parsers y validadores: `ParseRuntimeManifest`, `LoadRuntimeManifest`, `LoadEmbeddedRuntimeManifest`, `ValidateRuntimeManifest`.
   - Verificación exhaustiva: `ValidateSchema()`, `ValidateCompatibility()`, `ValidateArtifacts()`, `ValidateArtifactsWithProgress()`.
-  - Reglas de seguridad: rechazo estricto de rutas absolutas, rechazo de path traversal (`..`), resolución de symlinks fuera del pack root con `filepath.EvalSymlinks`, prevención de duplicados y prohibición de operadores de versiones abiertas (`>=, <=, ~, ^, *`).
-  - Streaming de hash SHA-256 (`hashFileSHA256`) sin buffer en memoria.
-- **Tests obligatorios (18 escenarios ejecutados y aprobados con -race):**
+  - Reglas de seguridad: resolución canónica de la raíz y de cada componente (`filepath.EvalSymlinks`), confinamiento físico sin comparación de prefijos de strings (`isPathConfined`), preservación de symlinks internos legítimos, rechazo de symlinks rotos/cíclicos/escapes (tanto hojas como directorios padre), deduplicación y normalización de sintaxis de rutas (`canonicalizeManifestPath`), prevención de operadores de versiones abiertas (`>=, <=, ~, ^, *`) y streaming de SHA-256 (`hashFileSHA256`).
+- **Tests obligatorios (suite table-driven y seguridad de symlinks ejecutados con -race):**
   1. Manifiesto válido (synthetic fixture).
   2. JSON corrupto / malformado.
   3. Schema_version desconocido / no soportado.
@@ -89,7 +88,14 @@ This document establishes the official engineering roadmap to transition GEO CAM
   13. Rutas absolutas (`/bin/python`).
   14. Path traversal (`../../etc/passwd`).
   15. Duplicados (binary names, dependency filenames, relative paths).
-  16. Symlink que sale del pack root (`ErrArtifactSecurity`).
+  16. Seguridad de symlinks:
+      - Symlink de hoja que escapa (`TestRuntimeManifest_Case16_LeafSymlinkEscape`).
+      - Symlink de directorio padre que escapa (`TestRuntimeManifest_ParentSymlinkEscape`).
+      - Symlinks internos legítimos confinados (`TestRuntimeManifest_ValidInternalSymlinks`).
+      - Symlinks rotos en hoja y directorio padre (`TestRuntimeManifest_BrokenSymlink`).
+      - Ciclos de symlinks en hojas y directorios (`TestRuntimeManifest_CyclicSymlink`).
+      - Semántica de raíz como symlink válida/rota/cíclica (`TestRuntimeManifest_SymlinkRoot`).
+      - Normalización de rutas duplicadas (`TestRuntimeManifest_DuplicateNormalizedPaths`).
   17. Archivo grande validado mediante streaming.
   18. Manifiesto con entradas en distinto orden.
 - **Criterios de aceptación (DONE):**

@@ -141,6 +141,7 @@ func ParseRuntimeManifest(data []byte) (*RuntimeManifest, error) {
 			Code:        "MANIFEST_EMPTY",
 			SafeMessage: "El manifiesto de runtime está vacío.",
 			Recoverable: false,
+			Err:         ErrManifestSchemaInvalid,
 		}
 	}
 
@@ -151,6 +152,7 @@ func ParseRuntimeManifest(data []byte) (*RuntimeManifest, error) {
 			SafeMessage: fmt.Sprintf("%v: %v", ErrManifestInvalidJSON, err),
 			Recoverable: false,
 			Details:     err.Error(),
+			Err:         ErrManifestInvalidJSON,
 		}
 	}
 
@@ -171,6 +173,7 @@ func LoadRuntimeManifest(path string) (*RuntimeManifest, error) {
 				Code:        "MANIFEST_NOT_FOUND",
 				SafeMessage: fmt.Sprintf("%v: %s", ErrManifestNotFound, cleanPath),
 				Recoverable: true,
+				Err:         ErrManifestNotFound,
 			}
 		}
 		return nil, &SafeError{
@@ -178,6 +181,7 @@ func LoadRuntimeManifest(path string) (*RuntimeManifest, error) {
 			SafeMessage: "Error al leer el archivo de manifiesto de runtime.",
 			Recoverable: true,
 			Details:     err.Error(),
+			Err:         err,
 		}
 	}
 	return ParseRuntimeManifest(data)
@@ -240,6 +244,41 @@ func validateSHA256(h, fieldName string) error {
 	return nil
 }
 
+// canonicalizeManifestPath normalizes a relative manifest path by trimming spaces,
+// converting separators to forward slashes, cleaning redundant elements, and stripping any leading './'.
+func canonicalizeManifestPath(p string) string {
+	trimmed := strings.TrimSpace(p)
+	cleaned := filepath.Clean(filepath.ToSlash(trimmed))
+	return strings.TrimPrefix(cleaned, "./")
+}
+
+// isPathConfined verifies that targetPath is physically inside or equal to baseDir.
+// It uses filepath.Rel and component-level verification rather than string prefix checks,
+// preventing partial prefix matches (e.g. /app/runtime matching /app/runtime_escape).
+func isPathConfined(baseDir, targetPath string) (bool, error) {
+	cleanBase := filepath.Clean(baseDir)
+	cleanTarget := filepath.Clean(targetPath)
+	rel, err := filepath.Rel(cleanBase, cleanTarget)
+	if err != nil {
+		return false, err
+	}
+	if rel == "." {
+		return true, nil
+	}
+	if filepath.IsAbs(rel) {
+		return false, nil
+	}
+	parts := strings.FieldsFunc(rel, func(r rune) bool {
+		return r == '/' || r == '\\'
+	})
+	for _, part := range parts {
+		if part == ".." {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // ValidateSchema verifies all metadata, fields, and constraints of the manifest.
 func (m *RuntimeManifest) ValidateSchema() error {
 	if m == nil {
@@ -255,6 +294,7 @@ func (m *RuntimeManifest) ValidateSchema() error {
 			Code:        "UNSUPPORTED_SCHEMA_VERSION",
 			SafeMessage: fmt.Sprintf("%v: schema_version %q no soportada (esperada %q)", ErrManifestSchemaInvalid, m.SchemaVersion, CurrentSchemaVersion),
 			Recoverable: false,
+			Err:         ErrManifestSchemaInvalid,
 		}
 	}
 
@@ -263,6 +303,7 @@ func (m *RuntimeManifest) ValidateSchema() error {
 			Code:        "INVALID_RUNTIME_VERSION",
 			SafeMessage: fmt.Sprintf("%v: runtime_version es obligatorio", ErrManifestSchemaInvalid),
 			Recoverable: false,
+			Err:         ErrManifestSchemaInvalid,
 		}
 	}
 
@@ -272,6 +313,7 @@ func (m *RuntimeManifest) ValidateSchema() error {
 			Code:        "INVALID_PLATFORM",
 			SafeMessage: fmt.Sprintf("%v: platform %q no es válida (esperada: darwin, linux, windows)", ErrManifestSchemaInvalid, m.Platform),
 			Recoverable: false,
+			Err:         ErrManifestSchemaInvalid,
 		}
 	}
 
@@ -281,6 +323,7 @@ func (m *RuntimeManifest) ValidateSchema() error {
 			Code:        "INVALID_ARCHITECTURE",
 			SafeMessage: fmt.Sprintf("%v: architecture %q no es válida (esperada: arm64, amd64)", ErrManifestSchemaInvalid, m.Architecture),
 			Recoverable: false,
+			Err:         ErrManifestSchemaInvalid,
 		}
 	}
 
@@ -290,6 +333,7 @@ func (m *RuntimeManifest) ValidateSchema() error {
 			Code:        "INVALID_PYTHON_VERSION",
 			SafeMessage: fmt.Sprintf("%v: python.version %q inválida (debe ser Python 3.x)", ErrManifestSchemaInvalid, m.Python.Version),
 			Recoverable: false,
+			Err:         ErrManifestSchemaInvalid,
 		}
 	}
 	if strings.TrimSpace(m.Python.ABI) == "" {
@@ -297,6 +341,7 @@ func (m *RuntimeManifest) ValidateSchema() error {
 			Code:        "INVALID_PYTHON_ABI",
 			SafeMessage: fmt.Sprintf("%v: python.abi no puede estar vacío", ErrManifestSchemaInvalid),
 			Recoverable: false,
+			Err:         ErrManifestSchemaInvalid,
 		}
 	}
 	if err := validateRelativePath(m.Python.RelativeBinaryPath, "python.relative_binary_path"); err != nil {
@@ -310,8 +355,14 @@ func (m *RuntimeManifest) ValidateSchema() error {
 			Code:        "INVALID_SIZE",
 			SafeMessage: fmt.Sprintf("%v: python.size_bytes debe ser mayor a 0 (%d)", ErrManifestSchemaInvalid, m.Python.SizeBytes),
 			Recoverable: false,
+			Err:         ErrManifestSchemaInvalid,
 		}
 	}
+
+	// Global artifact path tracker for cross-spec collision detection
+	seenAllArtifactPaths := make(map[string]string)
+	canonPyPath := canonicalizeManifestPath(m.Python.RelativeBinaryPath)
+	seenAllArtifactPaths[canonPyPath] = "python.relative_binary_path"
 
 	// Worker spec validation
 	if strings.TrimSpace(m.Worker.Version) == "" {
@@ -319,11 +370,23 @@ func (m *RuntimeManifest) ValidateSchema() error {
 			Code:        "INVALID_WORKER_VERSION",
 			SafeMessage: fmt.Sprintf("%v: worker.version no puede estar vacío", ErrManifestSchemaInvalid),
 			Recoverable: false,
+			Err:         ErrManifestSchemaInvalid,
 		}
 	}
 	if err := validateRelativePath(m.Worker.Entrypoint, "worker.entrypoint"); err != nil {
 		return err
 	}
+	canonWorkerPath := canonicalizeManifestPath(m.Worker.Entrypoint)
+	if prev, exists := seenAllArtifactPaths[canonWorkerPath]; exists {
+		return &SafeError{
+			Code:        "DUPLICATE_ARTIFACT_PATH",
+			SafeMessage: fmt.Sprintf("%v: worker.entrypoint (%q) colisiona con %s", ErrManifestSchemaInvalid, m.Worker.Entrypoint, prev),
+			Recoverable: false,
+			Err:         ErrManifestSchemaInvalid,
+		}
+	}
+	seenAllArtifactPaths[canonWorkerPath] = "worker.entrypoint"
+
 	if err := validateSHA256(m.Worker.SHA256, "worker.sha256"); err != nil {
 		return err
 	}
@@ -332,6 +395,7 @@ func (m *RuntimeManifest) ValidateSchema() error {
 			Code:        "INVALID_SIZE",
 			SafeMessage: fmt.Sprintf("%v: worker.size_bytes debe ser mayor a 0 (%d)", ErrManifestSchemaInvalid, m.Worker.SizeBytes),
 			Recoverable: false,
+			Err:         ErrManifestSchemaInvalid,
 		}
 	}
 
@@ -339,39 +403,55 @@ func (m *RuntimeManifest) ValidateSchema() error {
 	seenBinaryNames := make(map[string]bool)
 	seenBinaryPaths := make(map[string]bool)
 	for i, b := range m.Binaries {
-		if strings.TrimSpace(b.Name) == "" {
+		cleanName := strings.TrimSpace(b.Name)
+		if cleanName == "" {
 			return &SafeError{
 				Code:        "INVALID_BINARY_NAME",
 				SafeMessage: fmt.Sprintf("%v: binaries[%d].name no puede estar vacío", ErrManifestSchemaInvalid, i),
 				Recoverable: false,
+				Err:         ErrManifestSchemaInvalid,
 			}
 		}
-		if seenBinaryNames[b.Name] {
+		if seenBinaryNames[cleanName] {
 			return &SafeError{
 				Code:        "DUPLICATE_BINARY",
 				SafeMessage: fmt.Sprintf("%v: binary duplicado con nombre %q", ErrManifestSchemaInvalid, b.Name),
 				Recoverable: false,
+				Err:         ErrManifestSchemaInvalid,
 			}
 		}
-		seenBinaryNames[b.Name] = true
+		seenBinaryNames[cleanName] = true
 
 		if err := validateRelativePath(b.RelativePath, fmt.Sprintf("binaries[%d].relative_path", i)); err != nil {
 			return err
 		}
-		if seenBinaryPaths[b.RelativePath] {
+		canonBinPath := canonicalizeManifestPath(b.RelativePath)
+		if seenBinaryPaths[canonBinPath] {
 			return &SafeError{
 				Code:        "DUPLICATE_BINARY_PATH",
 				SafeMessage: fmt.Sprintf("%v: relative_path duplicado en binaries (%q)", ErrManifestSchemaInvalid, b.RelativePath),
 				Recoverable: false,
+				Err:         ErrManifestSchemaInvalid,
 			}
 		}
-		seenBinaryPaths[b.RelativePath] = true
+		seenBinaryPaths[canonBinPath] = true
+
+		if prev, exists := seenAllArtifactPaths[canonBinPath]; exists {
+			return &SafeError{
+				Code:        "DUPLICATE_ARTIFACT_PATH",
+				SafeMessage: fmt.Sprintf("%v: binaries[%d].relative_path (%q) colisiona con %s", ErrManifestSchemaInvalid, i, b.RelativePath, prev),
+				Recoverable: false,
+				Err:         ErrManifestSchemaInvalid,
+			}
+		}
+		seenAllArtifactPaths[canonBinPath] = fmt.Sprintf("binaries[%d] (%s)", i, b.Name)
 
 		if strings.TrimSpace(b.Version) == "" {
 			return &SafeError{
 				Code:        "INVALID_BINARY_VERSION",
 				SafeMessage: fmt.Sprintf("%v: binaries[%d].version no puede estar vacío", ErrManifestSchemaInvalid, i),
 				Recoverable: false,
+				Err:         ErrManifestSchemaInvalid,
 			}
 		}
 		if err := validateSHA256(b.SHA256, fmt.Sprintf("binaries[%d].sha256", i)); err != nil {
@@ -382,6 +462,7 @@ func (m *RuntimeManifest) ValidateSchema() error {
 				Code:        "INVALID_SIZE",
 				SafeMessage: fmt.Sprintf("%v: binaries[%d].size_bytes debe ser mayor a 0", ErrManifestSchemaInvalid, i),
 				Recoverable: false,
+				Err:         ErrManifestSchemaInvalid,
 			}
 		}
 	}
@@ -391,21 +472,24 @@ func (m *RuntimeManifest) ValidateSchema() error {
 	seenDepFiles := make(map[string]bool)
 	seenDepPaths := make(map[string]bool)
 	for i, d := range m.Dependencies {
-		if strings.TrimSpace(d.Name) == "" {
+		cleanName := strings.TrimSpace(d.Name)
+		if cleanName == "" {
 			return &SafeError{
 				Code:        "INVALID_DEP_NAME",
 				SafeMessage: fmt.Sprintf("%v: dependencies[%d].name no puede estar vacío", ErrManifestSchemaInvalid, i),
 				Recoverable: false,
+				Err:         ErrManifestSchemaInvalid,
 			}
 		}
-		if seenDepNames[d.Name] {
+		if seenDepNames[cleanName] {
 			return &SafeError{
 				Code:        "DUPLICATE_DEPENDENCY",
 				SafeMessage: fmt.Sprintf("%v: dependencia duplicada con nombre %q", ErrManifestSchemaInvalid, d.Name),
 				Recoverable: false,
+				Err:         ErrManifestSchemaInvalid,
 			}
 		}
-		seenDepNames[d.Name] = true
+		seenDepNames[cleanName] = true
 
 		// Exact version pin enforcement: open ranges (<, >, =, ~) are strictly forbidden
 		if strings.TrimSpace(d.Version) == "" || looseRangeRegex.MatchString(d.Version) {
@@ -414,36 +498,52 @@ func (m *RuntimeManifest) ValidateSchema() error {
 				SafeMessage: fmt.Sprintf("%v: dependencies[%d].version %q debe ser una versión exacta fija sin rangos ni operadores",
 					ErrManifestSchemaInvalid, i, d.Version),
 				Recoverable: false,
+				Err:         ErrManifestSchemaInvalid,
 			}
 		}
 
-		if strings.TrimSpace(d.Filename) == "" {
+		cleanDepFilename := filepath.Base(strings.TrimSpace(d.Filename))
+		if cleanDepFilename == "" || cleanDepFilename == "." {
 			return &SafeError{
 				Code:        "INVALID_DEP_FILENAME",
 				SafeMessage: fmt.Sprintf("%v: dependencies[%d].filename no puede estar vacío", ErrManifestSchemaInvalid, i),
 				Recoverable: false,
+				Err:         ErrManifestSchemaInvalid,
 			}
 		}
-		if seenDepFiles[d.Filename] {
+		if seenDepFiles[cleanDepFilename] {
 			return &SafeError{
 				Code:        "DUPLICATE_DEP_FILENAME",
 				SafeMessage: fmt.Sprintf("%v: filename duplicado en dependencies (%q)", ErrManifestSchemaInvalid, d.Filename),
 				Recoverable: false,
+				Err:         ErrManifestSchemaInvalid,
 			}
 		}
-		seenDepFiles[d.Filename] = true
+		seenDepFiles[cleanDepFilename] = true
 
 		if err := validateRelativePath(d.RelativePath, fmt.Sprintf("dependencies[%d].relative_path", i)); err != nil {
 			return err
 		}
-		if seenDepPaths[d.RelativePath] {
+		canonDepPath := canonicalizeManifestPath(d.RelativePath)
+		if seenDepPaths[canonDepPath] {
 			return &SafeError{
 				Code:        "DUPLICATE_DEP_PATH",
 				SafeMessage: fmt.Sprintf("%v: relative_path duplicado en dependencies (%q)", ErrManifestSchemaInvalid, d.RelativePath),
 				Recoverable: false,
+				Err:         ErrManifestSchemaInvalid,
 			}
 		}
-		seenDepPaths[d.RelativePath] = true
+		seenDepPaths[canonDepPath] = true
+
+		if prev, exists := seenAllArtifactPaths[canonDepPath]; exists {
+			return &SafeError{
+				Code:        "DUPLICATE_ARTIFACT_PATH",
+				SafeMessage: fmt.Sprintf("%v: dependencies[%d].relative_path (%q) colisiona con %s", ErrManifestSchemaInvalid, i, d.RelativePath, prev),
+				Recoverable: false,
+				Err:         ErrManifestSchemaInvalid,
+			}
+		}
+		seenAllArtifactPaths[canonDepPath] = fmt.Sprintf("dependencies[%d] (%s)", i, d.Name)
 
 		if err := validateSHA256(d.SHA256, fmt.Sprintf("dependencies[%d].sha256", i)); err != nil {
 			return err
@@ -453,6 +553,7 @@ func (m *RuntimeManifest) ValidateSchema() error {
 				Code:        "INVALID_SIZE",
 				SafeMessage: fmt.Sprintf("%v: dependencies[%d].size_bytes debe ser mayor a 0", ErrManifestSchemaInvalid, i),
 				Recoverable: false,
+				Err:         ErrManifestSchemaInvalid,
 			}
 		}
 	}
@@ -463,6 +564,7 @@ func (m *RuntimeManifest) ValidateSchema() error {
 			Code:        "INVALID_COMPATIBILITY",
 			SafeMessage: fmt.Sprintf("%v: compatibility.edge_min_version es obligatorio", ErrManifestSchemaInvalid),
 			Recoverable: false,
+			Err:         ErrManifestSchemaInvalid,
 		}
 	}
 	if strings.TrimSpace(m.Compatibility.ModelsPackMinVersion) == "" {
@@ -470,6 +572,7 @@ func (m *RuntimeManifest) ValidateSchema() error {
 			Code:        "INVALID_COMPATIBILITY",
 			SafeMessage: fmt.Sprintf("%v: compatibility.models_pack_min_version es obligatorio", ErrManifestSchemaInvalid),
 			Recoverable: false,
+			Err:         ErrManifestSchemaInvalid,
 		}
 	}
 
@@ -491,6 +594,7 @@ func (m *RuntimeManifest) ValidateCompatibility(targetPlatform, targetArch strin
 			SafeMessage: fmt.Sprintf("%v: plataforma del manifiesto %q no coincide con la plataforma destino %q",
 				ErrManifestIncompatible, m.Platform, targetPlatform),
 			Recoverable: false,
+			Err:         ErrManifestIncompatible,
 		}
 	}
 	if m.Architecture != targetArch {
@@ -499,6 +603,7 @@ func (m *RuntimeManifest) ValidateCompatibility(targetPlatform, targetArch strin
 			SafeMessage: fmt.Sprintf("%v: arquitectura del manifiesto %q no coincide con la arquitectura destino %q",
 				ErrManifestIncompatible, m.Architecture, targetArch),
 			Recoverable: false,
+			Err:         ErrManifestIncompatible,
 		}
 	}
 	return nil
@@ -545,11 +650,20 @@ func (m *RuntimeManifest) allArtifacts() []artifactTarget {
 }
 
 // ValidateArtifacts scans and cryptographically verifies all physical files in a runtime pack directory.
+//
+// Security & TOCTOU Architectural Consideration:
+// Path validation resolves and verifies physical locations component-by-component,
+// strictly forbidding escaping symlinks, cyclic links, broken links, or path traversal at check time.
+// However, path validation alone does not eliminate Time-of-Check to Time-of-Use (TOCTOU) risks
+// under concurrent modification by other processes. Absolute activation safety is guaranteed in
+// Milestone H6 (Staging & Activation) through private directory isolation (0700 permissions)
+// and atomic filesystem swap (os.Rename).
 func (m *RuntimeManifest) ValidateArtifacts(rootDir string) (*ArtifactsValidationReport, error) {
 	return m.ValidateArtifactsWithProgress(rootDir, nil)
 }
 
 // ValidateArtifactsWithProgress verifies all files in rootDir, optionally notifying progress.
+// It verifies the physical canonical path of each component against the canonicalized root.
 func (m *RuntimeManifest) ValidateArtifactsWithProgress(
 	rootDir string,
 	progress func(current, total int, path string),
@@ -572,7 +686,8 @@ func (m *RuntimeManifest) ValidateArtifactsWithProgress(
 		}
 	}
 
-	rootInfo, err := os.Stat(absRoot)
+	// Canonicalize the root itself by evaluating all symbolic links in its path
+	canonicalRoot, err := filepath.EvalSymlinks(absRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, &SafeError{
@@ -583,7 +698,18 @@ func (m *RuntimeManifest) ValidateArtifactsWithProgress(
 		}
 		return nil, &SafeError{
 			Code:        "ROOT_DIR_ERROR",
-			SafeMessage: "Error al acceder al directorio raíz del runtime.",
+			SafeMessage: fmt.Sprintf("Error al acceder al directorio raíz del runtime: %v", err),
+			Recoverable: false,
+			Details:     err.Error(),
+		}
+	}
+	canonicalRoot = filepath.Clean(canonicalRoot)
+
+	rootInfo, err := os.Stat(canonicalRoot)
+	if err != nil {
+		return nil, &SafeError{
+			Code:        "ROOT_DIR_ERROR",
+			SafeMessage: fmt.Sprintf("Error al verificar directorio raíz del runtime: %v", err),
 			Recoverable: true,
 			Details:     err.Error(),
 		}
@@ -591,7 +717,7 @@ func (m *RuntimeManifest) ValidateArtifactsWithProgress(
 	if !rootInfo.IsDir() {
 		return nil, &SafeError{
 			Code:        "ROOT_NOT_A_DIRECTORY",
-			SafeMessage: fmt.Sprintf("La ruta del runtime no es un directorio: %s", absRoot),
+			SafeMessage: fmt.Sprintf("La ruta del runtime no es un directorio: %s", canonicalRoot),
 			Recoverable: false,
 		}
 	}
@@ -613,22 +739,108 @@ func (m *RuntimeManifest) ValidateArtifactsWithProgress(
 			ExpectedSize: target.ExpectedSize,
 		}
 
-		fullPath := filepath.Clean(filepath.Join(absRoot, target.RelativePath))
-
-		// Confinement check: path must remain inside absRoot
-		rel, err := filepath.Rel(absRoot, fullPath)
-		if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
-			res.Error = fmt.Sprintf("%v: ruta escapa del directorio raíz", ErrArtifactSecurity)
+		cleanRel := canonicalizeManifestPath(target.RelativePath)
+		if err := validateRelativePath(cleanRel, "relative_path"); err != nil {
+			res.Error = fmt.Sprintf("%v: ruta no permitida (%q)", ErrArtifactSecurity, target.RelativePath)
 			report.Results = append(report.Results, res)
 			return report, &SafeError{
 				Code:        "SECURITY_TRAVERSAL",
 				SafeMessage: fmt.Sprintf("%v: %s", ErrArtifactSecurity, target.RelativePath),
 				Recoverable: false,
+				Err:         ErrArtifactSecurity,
 			}
 		}
 
-		// Inspection & symlink protection
-		lInfo, err := os.Lstat(fullPath)
+		parts := strings.FieldsFunc(cleanRel, func(r rune) bool {
+			return r == '/' || r == '\\'
+		})
+		if len(parts) == 0 {
+			res.Error = fmt.Sprintf("%v: ruta vacía", ErrArtifactSecurity)
+			report.Results = append(report.Results, res)
+			return report, &SafeError{
+				Code:        "SECURITY_TRAVERSAL",
+				SafeMessage: fmt.Sprintf("%v: ruta vacía", ErrArtifactSecurity),
+				Recoverable: false,
+				Err:         ErrArtifactSecurity,
+			}
+		}
+
+		// Resolve each path component physically, ensuring no parent or leaf symlink escapes canonicalRoot
+		currentPhysical := canonicalRoot
+		for partIdx, part := range parts {
+			isLeaf := (partIdx == len(parts)-1)
+			candidate := filepath.Join(currentPhysical, part)
+
+			// Check existence before following symlink
+			_, err := os.Lstat(candidate)
+			if err != nil {
+				if os.IsNotExist(err) {
+					res.Error = fmt.Sprintf("%v: archivo no encontrado (%s)", ErrArtifactMissing, target.RelativePath)
+					report.Results = append(report.Results, res)
+					return report, &SafeError{
+						Code:        "ARTIFACT_MISSING",
+						SafeMessage: fmt.Sprintf("%v: %s", ErrArtifactMissing, target.RelativePath),
+						Recoverable: true,
+						Err:         ErrArtifactMissing,
+					}
+				}
+				res.Error = err.Error()
+				report.Results = append(report.Results, res)
+				return report, &SafeError{
+					Code:        "ARTIFACT_ACCESS_ERROR",
+					SafeMessage: fmt.Sprintf("Error al verificar archivo %s", target.RelativePath),
+					Recoverable: true,
+					Details:     err.Error(),
+					Err:         err,
+				}
+			}
+
+			// Evaluate symbolic links on candidate to obtain real physical target
+			resolvedPart, err := filepath.EvalSymlinks(candidate)
+			if err != nil {
+				res.Error = fmt.Sprintf("%v: symlink inválido, roto o cíclico en %s", ErrArtifactSecurity, target.RelativePath)
+				report.Results = append(report.Results, res)
+				return report, &SafeError{
+					Code:        "SECURITY_BROKEN_SYMLINK",
+					SafeMessage: fmt.Sprintf("%v: symlink inválido en %s", ErrArtifactSecurity, target.RelativePath),
+					Recoverable: false,
+					Err:         ErrArtifactSecurity,
+				}
+			}
+
+			// Confinement check: resolved component MUST remain strictly inside canonicalRoot
+			confined, err := isPathConfined(canonicalRoot, resolvedPart)
+			if err != nil || !confined {
+				res.Error = fmt.Sprintf("%v: symlink escapa del runtime pack", ErrArtifactSecurity)
+				report.Results = append(report.Results, res)
+				return report, &SafeError{
+					Code:        "SECURITY_ESCAPING_SYMLINK",
+					SafeMessage: fmt.Sprintf("%v: symlink en %s apunta fuera del directorio autorizado", ErrArtifactSecurity, target.RelativePath),
+					Recoverable: false,
+					Err:         ErrArtifactSecurity,
+				}
+			}
+
+			// For intermediate path components, ensure it is a directory
+			if !isLeaf {
+				partStat, err := os.Stat(resolvedPart)
+				if err != nil || !partStat.IsDir() {
+					res.Error = fmt.Sprintf("%v: componente intermedio en %s no es un directorio", ErrArtifactCorrupted, target.RelativePath)
+					report.Results = append(report.Results, res)
+					return report, &SafeError{
+						Code:        "ARTIFACT_NOT_DIRECTORY",
+						SafeMessage: fmt.Sprintf("%v: componente intermedio en %s no es un directorio", ErrArtifactCorrupted, target.RelativePath),
+						Recoverable: false,
+						Err:         ErrArtifactCorrupted,
+					}
+				}
+			}
+
+			currentPhysical = resolvedPart
+		}
+
+		// Inspect the physical target file
+		targetFileInfo, err := os.Stat(currentPhysical)
 		if err != nil {
 			if os.IsNotExist(err) {
 				res.Error = fmt.Sprintf("%v: archivo no encontrado", ErrArtifactMissing)
@@ -637,6 +849,7 @@ func (m *RuntimeManifest) ValidateArtifactsWithProgress(
 					Code:        "ARTIFACT_MISSING",
 					SafeMessage: fmt.Sprintf("%v: %s", ErrArtifactMissing, target.RelativePath),
 					Recoverable: true,
+					Err:         ErrArtifactMissing,
 				}
 			}
 			res.Error = err.Error()
@@ -646,55 +859,19 @@ func (m *RuntimeManifest) ValidateArtifactsWithProgress(
 				SafeMessage: fmt.Sprintf("Error al verificar archivo %s", target.RelativePath),
 				Recoverable: true,
 				Details:     err.Error(),
+				Err:         err,
 			}
 		}
 
-		var targetFileInfo os.FileInfo
-		if lInfo.Mode()&os.ModeSymlink != 0 {
-			// Symlink handling: ensure resolved target also stays strictly within absRoot
-			resolvedPath, err := filepath.EvalSymlinks(fullPath)
-			if err != nil {
-				res.Error = fmt.Sprintf("%v: symlink roto o inaccesible", ErrArtifactSecurity)
-				report.Results = append(report.Results, res)
-				return report, &SafeError{
-					Code:        "SECURITY_BROKEN_SYMLINK",
-					SafeMessage: fmt.Sprintf("%v: symlink inválido en %s", ErrArtifactSecurity, target.RelativePath),
-					Recoverable: false,
-				}
+		if !targetFileInfo.Mode().IsRegular() {
+			res.Error = fmt.Sprintf("%v: no es un archivo regular", ErrArtifactCorrupted)
+			report.Results = append(report.Results, res)
+			return report, &SafeError{
+				Code:        "ARTIFACT_NOT_REGULAR",
+				SafeMessage: fmt.Sprintf("%v: %s no es un archivo regular", ErrArtifactCorrupted, target.RelativePath),
+				Recoverable: false,
+				Err:         ErrArtifactCorrupted,
 			}
-
-			relResolved, err := filepath.Rel(absRoot, resolvedPath)
-			if err != nil || strings.HasPrefix(relResolved, "..") || filepath.IsAbs(relResolved) {
-				res.Error = fmt.Sprintf("%v: symlink escapa del runtime pack", ErrArtifactSecurity)
-				report.Results = append(report.Results, res)
-				return report, &SafeError{
-					Code:        "SECURITY_ESCAPING_SYMLINK",
-					SafeMessage: fmt.Sprintf("%v: symlink en %s apunta fuera del directorio autorizado", ErrArtifactSecurity, target.RelativePath),
-					Recoverable: false,
-				}
-			}
-
-			targetFileInfo, err = os.Stat(resolvedPath)
-			if err != nil || !targetFileInfo.Mode().IsRegular() {
-				res.Error = fmt.Sprintf("%v: el destino del symlink no es un archivo regular", ErrArtifactCorrupted)
-				report.Results = append(report.Results, res)
-				return report, &SafeError{
-					Code:        "ARTIFACT_NOT_REGULAR",
-					SafeMessage: fmt.Sprintf("%v: el destino de %s no es un archivo regular", ErrArtifactCorrupted, target.RelativePath),
-					Recoverable: false,
-				}
-			}
-		} else {
-			if !lInfo.Mode().IsRegular() {
-				res.Error = fmt.Sprintf("%v: no es un archivo regular", ErrArtifactCorrupted)
-				report.Results = append(report.Results, res)
-				return report, &SafeError{
-					Code:        "ARTIFACT_NOT_REGULAR",
-					SafeMessage: fmt.Sprintf("%v: %s no es un archivo regular", ErrArtifactCorrupted, target.RelativePath),
-					Recoverable: false,
-				}
-			}
-			targetFileInfo = lInfo
 		}
 
 		res.ActualSize = targetFileInfo.Size()
@@ -707,11 +884,12 @@ func (m *RuntimeManifest) ValidateArtifactsWithProgress(
 				SafeMessage: fmt.Sprintf("%v: tamaño de %s (%d bytes) no coincide con el manifest (%d bytes)",
 					ErrArtifactCorrupted, target.RelativePath, res.ActualSize, target.ExpectedSize),
 				Recoverable: false,
+				Err:         ErrArtifactCorrupted,
 			}
 		}
 
-		// Streaming SHA-256 calculation
-		fileHash, err := hashFileSHA256(fullPath)
+		// Streaming SHA-256 calculation on the physical file
+		fileHash, err := hashFileSHA256(currentPhysical)
 		if err != nil {
 			res.Error = err.Error()
 			report.Results = append(report.Results, res)
@@ -720,6 +898,7 @@ func (m *RuntimeManifest) ValidateArtifactsWithProgress(
 				SafeMessage: fmt.Sprintf("Error calculando hash SHA-256 de %s", target.RelativePath),
 				Recoverable: true,
 				Details:     err.Error(),
+				Err:         err,
 			}
 		}
 
@@ -733,6 +912,7 @@ func (m *RuntimeManifest) ValidateArtifactsWithProgress(
 				SafeMessage: fmt.Sprintf("%v: hash de %s no coincide con el manifest",
 					ErrArtifactCorrupted, target.RelativePath),
 				Recoverable: false,
+				Err:         ErrArtifactCorrupted,
 			}
 		}
 

@@ -239,20 +239,24 @@ Implemented in `internal/installer/runtime_manifest.go` with full test coverage 
    - Exact pinned versions for all dependencies (prohibiting open ranges like `>=`, `<=`, `~`, `^`, `*`).
    - Standard 64-character lowercase/uppercase hexadecimal SHA-256 digests.
    - Size-in-bytes positive constraints (`size_bytes > 0`).
+   - Duplicate normalization (`canonicalizeManifestPath`): rejects duplicate paths written with different syntax (e.g. `./bin/ffmpeg`, `bin//ffmpeg`, `bin/foo/../ffmpeg`), duplicate filenames, and cross-spec collisions (e.g. worker entrypoint colliding with Python binary path).
 
-2. **Security & Path Confinement:**
-   - Absolute paths are strictly rejected (`ErrArtifactSecurity`).
-   - Path traversal attempts (`..`, `../`, nested `foo/../../bar`) are rejected with `ErrArtifactSecurity`.
-   - Symlink protection: symlinks are inspected via `filepath.EvalSymlinks`, ensuring the target resolves strictly within the runtime root directory. Broken symlinks or symlinks pointing outside the pack root fail closed with `ErrArtifactSecurity`.
+2. **Security, Root Canonicalization & Component-by-Component Path Confinement:**
+   - **Root Canonicalization:** The runtime root directory is resolved via `filepath.EvalSymlinks(absRoot)`. Broken symlinks or symlink cycles in the root path fail closed immediately (`ROOT_DIR_ERROR`).
+   - **Component-by-Component Physical Resolution:** Rather than inspecting only the final leaf node, validation evaluates every intermediate directory component. If any parent directory (e.g. `runtime/python -> /tmp/external-python`) is an external symlink, the escape is detected immediately and rejected with `ErrArtifactSecurity` (`SECURITY_ESCAPING_SYMLINK`).
+   - **Confinement via Component Validation:** Confinement checks use `filepath.Rel` decomposed into path elements, strictly avoiding flawed string prefix comparisons (which would falsely allow `/app/runtime_escape` under `/app/runtime`).
+   - **Legitimate Internal Symlinks Preserved:** Symlinks pointing strictly within the authorized canonical root (both intermediate directory links and leaf files) are permitted, provided the resolved target is a regular file matching the pinned size and SHA-256.
+   - **Broken & Cyclic Link Rejection:** Broken links and cyclic symlink loops (`linkA -> linkB -> linkA`) fail closed with `ErrArtifactSecurity` (`SECURITY_BROKEN_SYMLINK`).
 
 3. **Streaming Verification:**
    - File checksum calculation uses streaming `io.Copy` into `crypto/sha256.New()`, avoiding buffering entire large archives (e.g., PyTorch wheel or Python binary) in memory.
 
 4. **TOCTOU (Time-of-Check to Time-of-Use) Architectural Guarantee:**
-   - While `ValidateArtifacts` verifies files at inspection time, concurrent processes could mutate files between check and execution.
-   - To eliminate TOCTOU risks in Milestone H6 (Staging & Activation):
-     - Unpacking and validation MUST occur in an isolated staging directory (`$GEOCAM_DATA_DIR/vision-runtime.tmp.<pid>`) with restrictive permissions (`0700`).
+   - **Explicit Limitation at Inspection Time:** Path validation and physical canonicalization in `ValidateArtifacts` guarantee strict confinement, integrity, and safety at inspection time. However, filesystem validation alone does not eliminate Time-of-Check to Time-of-Use (TOCTOU) race conditions if an untrusted concurrent process modifies files after inspection.
+   - **Activation Guarantee (Milestone H6):** Strong activation integrity will be guaranteed in Milestone H6 (Staging & Activation):
+     - Unpacking and validation MUST occur in an isolated temporary staging directory (`$GEOCAM_DATA_DIR/vision-runtime.tmp.<pid>`) with restrictive permissions (`0700`).
      - Validation must pass completely before activation.
-     - Activation is executed via atomic filesystem rename (`os.Rename`), ensuring the running service only ever points to a sealed, fully verified runtime directory.
+     - Activation is executed via atomic filesystem rename (`os.Rename`), ensuring the running service only ever consumes a fully verified, sealed runtime directory.
      - Binaries are marked read-only (`0555` / `0444`) post-staging.
+
 

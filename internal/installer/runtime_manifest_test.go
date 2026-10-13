@@ -657,8 +657,8 @@ func TestRuntimeManifest_Case15_DuplicatesRejected(t *testing.T) {
 	})
 }
 
-// 16. Symlink que sale del pack root (ErrArtifactSecurity)
-func TestRuntimeManifest_Case16_EscapingSymlinkRejected(t *testing.T) {
+// 16. Symlink security tests: leaf escape, parent escape, valid internal symlinks, broken symlinks, cyclic links, root symlinks
+func TestRuntimeManifest_Case16_LeafSymlinkEscape(t *testing.T) {
 	tmpDir := t.TempDir()
 	outsideDir := t.TempDir()
 	m := setupPhysicalFiles(t, tmpDir)
@@ -680,37 +680,311 @@ func TestRuntimeManifest_Case16_EscapingSymlinkRejected(t *testing.T) {
 
 	report, err := m.ValidateArtifacts(tmpDir)
 	if err == nil {
-		t.Fatal("expected error for escaping symlink, got nil")
+		t.Fatal("expected error for escaping leaf symlink, got nil")
 	}
 	if !errors.Is(err, ErrArtifactSecurity) {
-		var safeErr *SafeError
-		if !errors.As(err, &safeErr) || safeErr.Code != "SECURITY_ESCAPING_SYMLINK" {
-			t.Errorf("expected SECURITY_ESCAPING_SYMLINK, got: %v", err)
-		}
+		t.Fatalf("expected ErrArtifactSecurity, got: %v", err)
+	}
+	var safeErr *SafeError
+	if !errors.As(err, &safeErr) || safeErr.Code != "SECURITY_ESCAPING_SYMLINK" {
+		t.Errorf("expected SECURITY_ESCAPING_SYMLINK, got: %v", err)
 	}
 	if report == nil {
-		t.Fatal("expected report")
+		t.Fatal("expected non-nil report")
+	}
+}
+
+func TestRuntimeManifest_ParentSymlinkEscape(t *testing.T) {
+	tmpDir := t.TempDir()
+	outsideDir := t.TempDir()
+	m := setupPhysicalFiles(t, tmpDir)
+
+	// Move python directory to outsideDir
+	pyDir := filepath.Join(tmpDir, "python")
+	outsidePy := filepath.Join(outsideDir, "external_python")
+	if err := os.Rename(pyDir, outsidePy); err != nil {
+		t.Fatalf("failed to move python dir: %v", err)
 	}
 
-	// Also test broken symlink
-	brokenTarget := filepath.Join(tmpDir, "non_existent_target")
-	if err := os.Remove(workerPath); err != nil {
-		t.Fatalf("failed to remove worker: %v", err)
-	}
-	if err := os.Symlink(brokenTarget, workerPath); err != nil {
-		t.Fatalf("failed to create symlink: %v", err)
+	// Symlink tmpDir/python -> outsidePy
+	if err := os.Symlink(outsidePy, pyDir); err != nil {
+		t.Fatalf("failed to create parent symlink: %v", err)
 	}
 
-	_, err = m.ValidateArtifacts(tmpDir)
+	// Now python/bin/python3 exists in outsideDir and matches size/hash,
+	// but must be rejected because the parent directory escapes the pack root!
+	_, err := m.ValidateArtifacts(tmpDir)
 	if err == nil {
-		t.Fatal("expected error for broken symlink, got nil")
+		t.Fatal("expected error for escaping parent directory symlink, got nil")
 	}
 	if !errors.Is(err, ErrArtifactSecurity) {
-		var safeErr *SafeError
-		if !errors.As(err, &safeErr) || safeErr.Code != "SECURITY_BROKEN_SYMLINK" {
-			t.Errorf("expected SECURITY_BROKEN_SYMLINK, got: %v", err)
-		}
+		t.Fatalf("expected ErrArtifactSecurity, got: %v", err)
 	}
+	var safeErr *SafeError
+	if !errors.As(err, &safeErr) || safeErr.Code != "SECURITY_ESCAPING_SYMLINK" {
+		t.Errorf("expected SECURITY_ESCAPING_SYMLINK, got: %v", err)
+	}
+}
+
+func TestRuntimeManifest_ValidInternalSymlinks(t *testing.T) {
+	t.Run("valid internal leaf symlink", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		m := setupPhysicalFiles(t, tmpDir)
+
+		// Move worker file to real target inside pack root
+		realWorkerPath := filepath.Join(tmpDir, "worker", "real_worker.py")
+		origWorkerPath := filepath.Join(tmpDir, m.Worker.Entrypoint)
+		if err := os.Rename(origWorkerPath, realWorkerPath); err != nil {
+			t.Fatalf("failed to rename worker: %v", err)
+		}
+
+		// Create internal relative symlink worker/worker.py -> real_worker.py
+		if err := os.Symlink("real_worker.py", origWorkerPath); err != nil {
+			t.Fatalf("failed to create internal symlink: %v", err)
+		}
+
+		report, err := m.ValidateArtifacts(tmpDir)
+		if err != nil {
+			t.Fatalf("expected valid internal symlink to succeed, got error: %v", err)
+		}
+		if report.ValidArtifacts != report.TotalArtifacts {
+			t.Errorf("expected all %d artifacts valid, got %d", report.TotalArtifacts, report.ValidArtifacts)
+		}
+	})
+
+	t.Run("valid internal intermediate directory symlink", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		m := setupPhysicalFiles(t, tmpDir)
+
+		// Rename python directory to internal_python_target within tmpDir
+		realPyDir := filepath.Join(tmpDir, "internal_python_target")
+		origPyDir := filepath.Join(tmpDir, "python")
+		if err := os.Rename(origPyDir, realPyDir); err != nil {
+			t.Fatalf("failed to rename python dir: %v", err)
+		}
+
+		// Create internal symlink python -> internal_python_target
+		if err := os.Symlink("internal_python_target", origPyDir); err != nil {
+			t.Fatalf("failed to create internal dir symlink: %v", err)
+		}
+
+		report, err := m.ValidateArtifacts(tmpDir)
+		if err != nil {
+			t.Fatalf("expected valid internal directory symlink to succeed, got error: %v", err)
+		}
+		if report.ValidArtifacts != report.TotalArtifacts {
+			t.Errorf("expected all artifacts valid, got %d", report.ValidArtifacts)
+		}
+	})
+}
+
+func TestRuntimeManifest_BrokenSymlink(t *testing.T) {
+	t.Run("broken leaf symlink", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		m := setupPhysicalFiles(t, tmpDir)
+
+		workerPath := filepath.Join(tmpDir, m.Worker.Entrypoint)
+		if err := os.Remove(workerPath); err != nil {
+			t.Fatalf("failed to remove worker: %v", err)
+		}
+		if err := os.Symlink(filepath.Join(tmpDir, "missing_target"), workerPath); err != nil {
+			t.Fatalf("failed to create broken symlink: %v", err)
+		}
+
+		_, err := m.ValidateArtifacts(tmpDir)
+		if err == nil {
+			t.Fatal("expected error for broken leaf symlink, got nil")
+		}
+		if !errors.Is(err, ErrArtifactSecurity) {
+			t.Fatalf("expected ErrArtifactSecurity, got: %v", err)
+		}
+	})
+
+	t.Run("broken parent directory symlink", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		m := setupPhysicalFiles(t, tmpDir)
+
+		pyDir := filepath.Join(tmpDir, "python")
+		if err := os.RemoveAll(pyDir); err != nil {
+			t.Fatalf("failed to remove py dir: %v", err)
+		}
+		if err := os.Symlink(filepath.Join(tmpDir, "non_existent_dir"), pyDir); err != nil {
+			t.Fatalf("failed to create broken parent symlink: %v", err)
+		}
+
+		_, err := m.ValidateArtifacts(tmpDir)
+		if err == nil {
+			t.Fatal("expected error for broken parent symlink, got nil")
+		}
+		if !errors.Is(err, ErrArtifactSecurity) {
+			t.Fatalf("expected ErrArtifactSecurity, got: %v", err)
+		}
+	})
+}
+
+func TestRuntimeManifest_CyclicSymlink(t *testing.T) {
+	t.Run("cyclic leaf symlink", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		m := setupPhysicalFiles(t, tmpDir)
+
+		workerPath := filepath.Join(tmpDir, m.Worker.Entrypoint)
+		linkB := filepath.Join(tmpDir, "worker", "link_b")
+		if err := os.Remove(workerPath); err != nil {
+			t.Fatalf("failed to remove worker: %v", err)
+		}
+
+		// Create cycle: worker.py -> link_b -> worker.py
+		if err := os.Symlink("link_b", workerPath); err != nil {
+			t.Fatalf("failed to create symlink: %v", err)
+		}
+		if err := os.Symlink("worker.py", linkB); err != nil {
+			t.Fatalf("failed to create symlink: %v", err)
+		}
+
+		_, err := m.ValidateArtifacts(tmpDir)
+		if err == nil {
+			t.Fatal("expected error for cyclic symlink, got nil")
+		}
+		if !errors.Is(err, ErrArtifactSecurity) {
+			t.Fatalf("expected ErrArtifactSecurity, got: %v", err)
+		}
+	})
+
+	t.Run("cyclic directory symlink", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		m := setupPhysicalFiles(t, tmpDir)
+
+		pyDir := filepath.Join(tmpDir, "python")
+		dirB := filepath.Join(tmpDir, "dir_b")
+		if err := os.RemoveAll(pyDir); err != nil {
+			t.Fatalf("failed to remove pyDir: %v", err)
+		}
+
+		// Create cycle: python -> dir_b -> python
+		if err := os.Symlink("dir_b", pyDir); err != nil {
+			t.Fatalf("failed to create symlink: %v", err)
+		}
+		if err := os.Symlink("python", dirB); err != nil {
+			t.Fatalf("failed to create symlink: %v", err)
+		}
+
+		_, err := m.ValidateArtifacts(tmpDir)
+		if err == nil {
+			t.Fatal("expected error for cyclic directory symlink, got nil")
+		}
+		if !errors.Is(err, ErrArtifactSecurity) {
+			t.Fatalf("expected ErrArtifactSecurity, got: %v", err)
+		}
+	})
+}
+
+func TestRuntimeManifest_SymlinkRoot(t *testing.T) {
+	t.Run("valid symlink root resolves and passes", func(t *testing.T) {
+		baseDir := t.TempDir()
+		realRoot := filepath.Join(baseDir, "real_runtime_root")
+		symlinkRoot := filepath.Join(baseDir, "symlink_runtime_root")
+
+		m := setupPhysicalFiles(t, realRoot)
+
+		if err := os.Symlink(realRoot, symlinkRoot); err != nil {
+			t.Fatalf("failed to create symlink root: %v", err)
+		}
+
+		report, err := m.ValidateArtifacts(symlinkRoot)
+		if err != nil {
+			t.Fatalf("expected symlink root to resolve and validate, got: %v", err)
+		}
+		if report.ValidArtifacts != report.TotalArtifacts {
+			t.Errorf("expected all artifacts valid, got %d", report.ValidArtifacts)
+		}
+	})
+
+	t.Run("broken symlink root fails closed", func(t *testing.T) {
+		baseDir := t.TempDir()
+		brokenRoot := filepath.Join(baseDir, "broken_symlink_root")
+		if err := os.Symlink(filepath.Join(baseDir, "non_existent"), brokenRoot); err != nil {
+			t.Fatalf("failed to create broken symlink root: %v", err)
+		}
+
+		m := createValidSyntheticManifest()
+		_, err := m.ValidateArtifacts(brokenRoot)
+		if err == nil {
+			t.Fatal("expected error for broken symlink root, got nil")
+		}
+	})
+
+	t.Run("cyclic symlink root fails closed", func(t *testing.T) {
+		baseDir := t.TempDir()
+		rootA := filepath.Join(baseDir, "root_a")
+		rootB := filepath.Join(baseDir, "root_b")
+
+		if err := os.Symlink("root_b", rootA); err != nil {
+			t.Fatalf("failed to create symlink: %v", err)
+		}
+		if err := os.Symlink("root_a", rootB); err != nil {
+			t.Fatalf("failed to create symlink: %v", err)
+		}
+
+		m := createValidSyntheticManifest()
+		_, err := m.ValidateArtifacts(rootA)
+		if err == nil {
+			t.Fatal("expected error for cyclic symlink root, got nil")
+		}
+	})
+}
+
+func TestRuntimeManifest_DuplicateNormalizedPaths(t *testing.T) {
+	t.Run("binary relative path duplicate with leading dot-slash", func(t *testing.T) {
+		m := createValidSyntheticManifest()
+		m.Binaries = append(m.Binaries, BinarySpec{
+			Name:         "ffmpeg-dup",
+			RelativePath: "./" + m.Binaries[0].RelativePath, // "./bin/ffmpeg" vs "bin/ffmpeg"
+			Version:      "7.1.0",
+			SHA256:       m.Binaries[0].SHA256,
+			SizeBytes:    100,
+		})
+
+		err := m.ValidateSchema()
+		if err == nil {
+			t.Fatal("expected error for duplicate normalized binary path, got nil")
+		}
+		if !errors.Is(err, ErrManifestSchemaInvalid) {
+			t.Fatalf("expected ErrManifestSchemaInvalid, got: %v", err)
+		}
+	})
+
+	t.Run("dependency relative path duplicate with redundant slashes", func(t *testing.T) {
+		m := createValidSyntheticManifest()
+		m.Dependencies = append(m.Dependencies, DependencySpec{
+			Name:         "torch-dup",
+			Version:      "2.4.1",
+			Filename:     "different.whl",
+			RelativePath: "wheelhouse//torch-2.4.0-cp311-none-macosx_11_0_arm64.whl",
+			SHA256:       m.Dependencies[0].SHA256,
+			SizeBytes:    200,
+		})
+
+		err := m.ValidateSchema()
+		if err == nil {
+			t.Fatal("expected error for duplicate normalized dependency path, got nil")
+		}
+		if !errors.Is(err, ErrManifestSchemaInvalid) {
+			t.Fatalf("expected ErrManifestSchemaInvalid, got: %v", err)
+		}
+	})
+
+	t.Run("cross-spec collision between worker entrypoint and python path", func(t *testing.T) {
+		m := createValidSyntheticManifest()
+		m.Worker.Entrypoint = "./" + m.Python.RelativeBinaryPath
+
+		err := m.ValidateSchema()
+		if err == nil {
+			t.Fatal("expected error for cross-spec collision, got nil")
+		}
+		if !errors.Is(err, ErrManifestSchemaInvalid) {
+			t.Fatalf("expected ErrManifestSchemaInvalid, got: %v", err)
+		}
+	})
 }
 
 // 17. Archivo grande validado mediante streaming (hashFileSHA256)
