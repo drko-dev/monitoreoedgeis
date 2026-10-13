@@ -3,7 +3,8 @@
 # for macOS Apple Silicon (darwin-arm64) used by GEO CAM Edge.
 #
 # Usage:
-#   fetch-wheelhouse.sh [--target-dir <dir>] [--lock <lockfile>] [--verify-only] [--force]
+#   fetch-wheelhouse.sh [--target-dir <dir>] [--lock <lockfile>] [--verify-only]
+#                       [--fault-inject <stage>] [--force]
 #
 # Security & Reliability Guarantees:
 #   - Pinned exact release (36 wheels, no 'latest').
@@ -11,11 +12,16 @@
 #   - Fails closed on SHA-256 checksum or size mismatch.
 #   - Stages in hidden temporary directory on same filesystem before activation.
 #   - Preserves existing valid wheelhouse on error.
+#   - Explicit transactional state machine manages backup, activation, verification, and commit.
+#   - Automatic rollback restores previous valid wheelhouse if activation or post-verification fails.
+#   - Filesystem-evidence recovery recovers active uncommitted backups on abnormal exit.
+#   - Unrecovered backups are never deleted.
 set -euo pipefail
 
 TARGET_DIR="runtime/wheelhouse"
 LOCK_FILE="internal/installer/assets/wheelhouse-lock.json"
 VERIFY_ONLY="false"
+FAULT_INJECT=""
 FORCE="false"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,12 +41,16 @@ while [[ $# -gt 0 ]]; do
       VERIFY_ONLY="true"
       shift
       ;;
+    --fault-inject)
+      FAULT_INJECT="$2"
+      shift 2
+      ;;
     --force)
       FORCE="true"
       shift
       ;;
     -h|--help)
-      echo "usage: $0 [--target-dir <dir>] [--lock <lockfile>] [--verify-only] [--force]"
+      echo "usage: $0 [--target-dir <dir>] [--lock <lockfile>] [--verify-only] [--fault-inject <stage>] [--force]"
       exit 0
       ;;
     *)
@@ -121,21 +131,135 @@ if [ "$FORCE" != "true" ] && verify_wheelhouse "$TARGET_DIR"; then
   exit 0
 fi
 
-echo "Synchronizing wheelhouse to $TARGET_DIR using lock $LOCK_FILE..."
-mkdir -p "$TARGET_DIR"
+# Ensure parent of TARGET_DIR exists so staging and backups occur on the exact SAME filesystem
+mkdir -p "$(dirname "$TARGET_DIR")"
 
-staging_dir="${TARGET_DIR}.tmp.$$"
-mkdir -p "$staging_dir"
+# State machine variables
+STATE="INIT"
+IN_CLEANUP=""
+
+staging_tmp="${TARGET_DIR}.tmp.$$"
+backup_old="${TARGET_DIR}.old.$$"
+broken_tmp="${TARGET_DIR}.broken.$$"
+
+perform_rollback() {
+  local reason="$1"
+  echo "::warning::Initiating wheelhouse rollback due to: $reason (prior state: $STATE)" >&2
+  STATE="ROLLING_BACK"
+
+  # Move aside target if it was created during activation
+  if [ -e "$TARGET_DIR" ] || [ -L "$TARGET_DIR" ]; then
+    rm -rf "$broken_tmp" 2>/dev/null || true
+    mv "$TARGET_DIR" "$broken_tmp" 2>/dev/null || rm -rf "$TARGET_DIR" 2>/dev/null || true
+  fi
+
+  # Fault injection for simulated restore failure
+  if [ "${FAULT_INJECT}" = "restore_fail" ]; then
+    STATE="ROLLBACK_FAILED"
+    echo "::error::FAULT_INJECTION: simulated failure during wheelhouse backup restoration" >&2
+    echo "::error::CRITICAL: Backup restoration failed. Previous valid wheelhouse is SAFE and PRESERVED at: $backup_old" >&2
+    echo "::error::Manual recovery command: mv \"$backup_old\" \"$TARGET_DIR\"" >&2
+    return 1
+  fi
+
+  if [ -d "$backup_old" ]; then
+    if mv "$backup_old" "$TARGET_DIR"; then
+      STATE="ROLLED_BACK"
+      echo "::notice::Rollback successful: previous valid wheelhouse restored to $TARGET_DIR" >&2
+      [ -d "$broken_tmp" ] && rm -rf "$broken_tmp" 2>/dev/null || true
+      return 0
+    else
+      STATE="ROLLBACK_FAILED"
+      echo "::error::CRITICAL: Failed to restore backup from $backup_old to $TARGET_DIR" >&2
+      echo "::error::The previous valid wheelhouse is SAFE and PRESERVED at: $backup_old" >&2
+      echo "::error::Manual recovery command: mv \"$backup_old\" \"$TARGET_DIR\"" >&2
+      return 1
+    fi
+  else
+    echo "::notice::No backup found at $backup_old (fresh installation); nothing to rollback" >&2
+    return 0
+  fi
+}
 
 cleanup() {
-  rm -rf "$staging_dir" 2>/dev/null || true
+  local sig="${1:-EXIT}"
+  local exit_code="${2:-$?}"
+  # Disable traps immediately to prevent re-entrant calls
+  trap - EXIT INT TERM HUP
+  [ -z "$IN_CLEANUP" ] || return $exit_code
+  IN_CLEANUP=1
+
+  # If triggered by a signal, ensure exit_code reflects signal termination
+  if [ "$sig" != "EXIT" ] && [ "$exit_code" -eq 0 ]; then
+    case "$sig" in
+      INT)  exit_code=130 ;;
+      TERM) exit_code=143 ;;
+      HUP)  exit_code=129 ;;
+      *)    exit_code=1 ;;
+    esac
+  fi
+
+  if [ "${FAULT_INJECT}" = "sigint_in_cleanup" ]; then
+    echo "::notice::Fault injection: simulated signal during cleanup" >&2
+  fi
+
+  # Filesystem evidence recovery:
+  # Regardless of the memory STATE variable, if an uncommitted backup physically exists on disk,
+  # it indicates that a previous valid wheelhouse was moved and must be restored!
+  if [ -d "$backup_old" ] && [ "$STATE" != "COMMITTED" ]; then
+    echo "::warning::Abnormal termination with active backup found on filesystem at $backup_old (state: $STATE, sig: $sig, exit code: $exit_code). Attempting rollback..." >&2
+    if perform_rollback "filesystem_evidence_${STATE}_${sig}_${exit_code}"; then
+      rm -rf "$staging_tmp" "$broken_tmp" 2>/dev/null || true
+    else
+      echo "::error::CRITICAL: Backup preserved at: $backup_old" >&2
+    fi
+    exit $exit_code
+  fi
+
+  case "$STATE" in
+    COMMITTED)
+      rm -rf "$staging_tmp" 2>/dev/null || true
+      [ -d "$backup_old" ] && rm -rf "$backup_old" 2>/dev/null || true
+      ;;
+    ROLLED_BACK)
+      rm -rf "$staging_tmp" "$broken_tmp" 2>/dev/null || true
+      ;;
+    ROLLBACK_FAILED)
+      echo "::error::EMERGENCY: Rollback could not be completed automatically." >&2
+      echo "::error::The previous valid wheelhouse is SAFE and PRESERVED at: $backup_old" >&2
+      echo "::error::Manual recovery command: mv \"$backup_old\" \"$TARGET_DIR\"" >&2
+      rm -rf "$staging_tmp" 2>/dev/null || true
+      ;;
+    BACKED_UP|ACTIVATING|ACTIVATED|VERIFYING|ROLLING_BACK)
+      echo "::warning::Abnormal termination in state '$STATE' (sig: $sig, exit code: $exit_code). Attempting rollback..." >&2
+      if perform_rollback "trap_${sig}_${exit_code}"; then
+        rm -rf "$staging_tmp" "$broken_tmp" 2>/dev/null || true
+      else
+        echo "::error::CRITICAL: Backup preserved at: $backup_old" >&2
+      fi
+      ;;
+    *)
+      # INIT, PREPARING, STAGED: target was NEVER modified!
+      rm -rf "$staging_tmp" 2>/dev/null || true
+      ;;
+  esac
+
+  exit $exit_code
 }
-trap cleanup EXIT INT TERM
+
+trap 'cleanup INT 130' INT
+trap 'cleanup TERM 143' TERM
+trap 'cleanup HUP 129' HUP
+trap 'cleanup EXIT $?' EXIT
+
+STATE="PREPARING"
+echo "Synchronizing wheelhouse to $TARGET_DIR using lock $LOCK_FILE..."
+mkdir -p "$staging_tmp"
 
 CACHE_DIR="${GEOCAM_RUNTIME_CACHE_DIR:-$HOME/.cache/geocam-edge/wheelhouse}"
 mkdir -p "$CACHE_DIR"
 
-# Download / copy each wheel
+# Download / copy each wheel into staging directory
 "$PY_BIN" -c "
 import json, os, urllib.request, hashlib, sys
 
@@ -168,8 +292,6 @@ for idx, dep in enumerate(lock.get('dependencies', [])):
         print(f'[{idx+1}/{total}] Cached: {fname}')
     else:
         # Pinned PyPI download
-        # PyPI files URL pattern: https://files.pythonhosted.org/packages/...
-        # Alternatively query PyPI JSON API for exact filename download url
         import urllib.request, json as jmod
         pkg_name = dep['name']
         ver = dep['version']
@@ -206,15 +328,74 @@ for idx, dep in enumerate(lock.get('dependencies', [])):
         # Cache file
         with open(target_path, 'rb') as src, open(cached_path, 'wb') as dst:
             dst.write(src.read())
-" "$LOCK_FILE" "$staging_dir" "$CACHE_DIR"
+" "$LOCK_FILE" "$staging_tmp" "$CACHE_DIR"
 
-# Verify staging directory
-if ! verify_wheelhouse "$staging_dir"; then
-  fail "Staged wheelhouse validation failed"
+# Verify entire staged wheelhouse BEFORE touching target
+echo "Verifying complete staged wheelhouse..."
+if ! verify_wheelhouse "$staging_tmp"; then
+  fail "Staged wheelhouse validation failed; target wheelhouse was NOT modified"
+fi
+STATE="STAGED"
+
+# Fault injection: error before activation
+if [ "${FAULT_INJECT}" = "before_activate" ]; then
+  fail "FAULT_INJECTION: simulated error before activation"
 fi
 
-# Move staged files into target directory
-mv "$staging_dir"/* "$TARGET_DIR"/
-rmdir "$staging_dir" 2>/dev/null || true
+# Directory swap with rollback protection
+if [ -e "$TARGET_DIR" ] || [ -L "$TARGET_DIR" ]; then
+  STATE="BACKING_UP"
+  if [ "${FAULT_INJECT}" = "move_old_fail" ]; then
+    fail "FAULT_INJECTION: simulated error moving old wheelhouse to backup"
+  fi
+
+  echo "Backing up previous wheelhouse to $backup_old..."
+  if ! mv "$TARGET_DIR" "$backup_old"; then
+    fail "Failed to backup previous wheelhouse from $TARGET_DIR to $backup_old"
+  fi
+
+  if [ ! -d "$backup_old" ]; then
+    fail "Failed to verify backup creation: $backup_old does not exist on filesystem"
+  fi
+
+  STATE="BACKED_UP"
+fi
+
+# Activate new wheelhouse
+STATE="ACTIVATING"
+if [ "${FAULT_INJECT}" = "activate_fail" ] || [ "${FAULT_INJECT}" = "restore_fail" ]; then
+  echo "::error::FAULT_INJECTION: simulated failure triggering rollback (stage: ${FAULT_INJECT})" >&2
+  perform_rollback "fault_inject_${FAULT_INJECT}" || true
+  fail "Activation failed (fault injected: ${FAULT_INJECT}); rollback initiated"
+fi
+
+echo "Activating new wheelhouse to $TARGET_DIR..."
+if ! mv "$staging_tmp" "$TARGET_DIR"; then
+  echo "::error::Activation rename failed; initiating rollback" >&2
+  perform_rollback "activation_rename_failed"
+  fail "Activation failed: could not rename $staging_tmp to $TARGET_DIR"
+fi
+STATE="ACTIVATED"
+
+# Post-activation verification on active TARGET_DIR
+STATE="VERIFYING"
+if [ "${FAULT_INJECT}" = "verify_fail" ]; then
+  echo "::error::FAULT_INJECTION: simulated verification failure on active target" >&2
+  perform_rollback "fault_inject_verify_fail"
+  fail "Post-activation verification failed"
+fi
+
+echo "Verifying activated wheelhouse in $TARGET_DIR..."
+if ! verify_wheelhouse "$TARGET_DIR"; then
+  echo "::error::Target wheelhouse verification failed post-activation; rolling back!" >&2
+  perform_rollback "post_activation_verify_failed"
+  fail "Active wheelhouse verification failed"
+fi
+
+# Commit
+STATE="COMMITTED"
+if [ -d "$backup_old" ]; then
+  rm -rf "$backup_old" 2>/dev/null || true
+fi
 
 echo "SUCCESS: Wheelhouse synchronized and verified in $TARGET_DIR"

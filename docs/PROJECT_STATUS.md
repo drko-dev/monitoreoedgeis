@@ -8,20 +8,29 @@
 ### Hito OFFLINE-H3: Hermetic Wheelhouse & Deterministic Python Dependencies (Current)
 - **Branch:** `feat/full-edge-offline-wheelhouse`
 - **Base:** `main @ 6f381a4d337ce2271823b92884ea4c5b6a1f03d1` (después del merge de H2 en PR #139)
-- **Objective:** Implementar un wheelhouse offline reproducible y determinista para macOS Apple Silicon (`darwin/arm64`) + CPython 3.11, resolviendo el árbol transitivo completo para PyTorch, Torchvision, Ultralytics y Pillow sin dependencias externas ni compilación local.
-- **Implementación:**
+- **Objective:** Implementar un wheelhouse offline reproducible y determinista para macOS Apple Silicon (`darwin/arm64`) + CPython 3.11, resolviendo el árbol transitivo completo para PyTorch, Torchvision, Ultralytics y Pillow sin dependencias externas ni compilación local, con instalación determinista basada en hashes, staging aislado en el mismo filesystem, y publicación transaccional con rollback seguro.
+- **Implementación y Endurecimiento de Seguridad:**
   - `internal/installer/assets/wheelhouse-lock.json`: Lockfile formal e inmutable con 36 wheels binarios exactos (`173,935,126` bytes total), hashes SHA-256 criptográficos, tamaños, origen verificable y mapeo de licencias.
-  - `internal/installer/wheelhouse.go`: Componente `WheelhouseManager` que implementa validación estricta de artefactos, confinamiento canónico de symlinks, comprobación de compatibilidad de tags PEP 427 (`cp311`, `abi3`, `universal2`, `arm64`), rechazo estricto de distribuciones fuente (.tar.gz, .zip), aprovisionamiento de pip 100% offline (`--no-index --find-links=... --only-binary=:all: --disable-pip-version-check`), aislamiento de entorno con `IsolateEnv()`, `PIP_CONFIG_FILE=/dev/null`, fail-closed ante conexiones externas con proxy blackhole, sonda de imports (`VerifyImports`) y smoke test del Vision Worker (`backend.py`).
-  - `internal/installer/wheelhouse_test.go`: Suite exhaustiva de 25 escenarios table-driven bajo `-race` cubriendo validación de lock, detección de corrupción/mismatch, tags incompatibles, dependencias faltantes/duplicadas, aislamiento de pip/PYTHONPATH, fallos a mitad de instalación y preservación de runtime, además de prueba de integración física E2E en hardware real Apple Silicon M4.
-  - `deploy/installer/fetch-wheelhouse.sh`: Script reproducible de packaging para sincronizar y verificar la integridad del wheelhouse durante el empaquetado de release sin contacto de red en tiempo de provisioning del cliente.
-  - `internal/installer/assets/runtime-manifest.json`: Actualización de la sección `dependencies` con los 36 wheels reales del lockfile manteniendo `"manifest_type": "template"`.
+  - `internal/installer/wheelhouse.go`: Componente `WheelhouseManager` con:
+    - Generación efímera de `requirements.lock.txt` con exact pins y hashes obligatorios (`--hash=sha256:`).
+    - Invocación de pip con `--require-hashes --no-index --find-links=... --only-binary=:all: --no-cache-dir`.
+    - Staging aislado en `.site-packages.tmp.<pid>` en el mismo filesystem, pre-sembrado con herramientas base (`pip`, `setuptools`).
+    - Auditoría de staging previa al swap (`AuditStagedDistributions`).
+    - Swap de directorios de dos pasos con backup en `.site-packages.old.<pid>` y rollback automático ante cualquier fallo.
+    - Verificaciones post-activación: `CheckPipConsistency` (`pip check`), `AuditInstalledDistributions` (`importlib.metadata`), y `VerifyImports`.
+    - Aislamiento de entorno con `IsolateEnv()`, `PIP_CONFIG_FILE=/dev/null`, y proxy blackhole fail-closed (`127.0.0.1:9`).
+  - `internal/installer/wheelhouse_test.go`: Suite exhaustiva con 25 tests table-driven + suite completa de 18 escenarios adversariales bajo `-race` cubriendo validación de lock, detección de corrupción/mismatch, tags incompatibles, dependencias faltantes/duplicadas, aislamiento de pip/PYTHONPATH, fallos a mitad de instalación, preservación de `site-packages` previo ante fallos, detección de staging incompleto, fallos de swap y restauración de backup, además de prueba de integración física E2E en Apple Silicon M4.
+  - `deploy/installer/fetch-wheelhouse.sh`: Script transaccional con máquina de estados (`INIT`..`COMMITTED`), staging en `.wheelhouse.tmp.$$`, backup en `.wheelhouse.old.$$`, y rollback guiado por evidencia física del filesystem ante señales o terminación anormal.
+  - `deploy/installer/test-wheelhouse-rollback.sh`: Suite de pruebas adversariales para el script de wheelhouse con 10/10 escenarios aprobados.
 - **Validación Física en Apple Silicon M4:**
-  - 36 wheels instalados completamente offline en 20.6 segundos.
+  - 36 wheels instalados completamente offline en 21.38 segundos.
   - Verificación exitosa de imports críticos: `torch 2.4.0`, `torchvision 0.19.0`, `ultralytics 8.3.1`, `pillow 10.4.0`, `opencv 4.11.0`, `numpy 1.26.4`.
   - Detección de aceleración de hardware: `torch.backends.mps.is_available() == True`.
   - Operaciones tensoriales en MPS y CPU validadas exitosamente.
   - Smoke test del Worker: importación limpia de `backend.py` y resolución de dispositivos (`auto` -> `cpu`, `mps` -> `mps`).
-- **Licensing Gate:** `MODEL_REDISTRIBUTION_APPROVED=false` estrictamente mantenido. Ultralytics (AGPL-3.0) confinado como daemon externo sobre socket Unix.
+- **Licensing Gate & Límite Legal AGPL-3.0:**
+  - `MODEL_REDISTRIBUTION_APPROVED=false` estrictamente mantenido. Pesos YOLO (.pt) excluidos.
+  - Se documenta explícitamente que la separación por Unix socket no constituye una exención legal automática de copyleft bajo AGPL-3.0 para distribución comercial sin código fuente; la aprobación comercial/jurídica permanece como bloqueo independiente (`LEGAL_COMMERCIAL_APPROVAL_PENDING=true`).
 - **Documentos de Referencia:**
   - Arquitectura detallada: `docs/architecture/FULL_EDGE_SELF_CONTAINED.md` (Sección 10)
   - Roadmap maestro H0–H9: `docs/roadmaps/FULL_EDGE_OFFLINE_ROADMAP.md` (Hito H3)

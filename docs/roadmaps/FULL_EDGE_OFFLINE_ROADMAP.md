@@ -163,33 +163,55 @@ This document establishes the official engineering roadmap to transition GEO CAM
 
 ---
 
-### Hito H3 — Dependencias Offline y Wheelhouse (COMPLETADO)
+### Hito H3 — Dependencias Offline, Determinismo y Seguridad Transaccional (COMPLETADO)
 
-- **Objetivo:** Proveer e integrar un wheelhouse hermético con versiones exactas (pinned) de PyTorch, Torchvision, Ultralytics, Pillow y dependencias transitivas, instalables con `--no-index`.
+- **Objetivo:** Proveer e integrar un wheelhouse hermético con versiones exactas (pinned) de PyTorch, Torchvision, Ultralytics, Pillow y dependencias transitivas, garantizando instalación verdaderamente determinista, staging aislado, y publicación transaccional con rollback seguro.
 - **Dependencias:** H2 completado.
 - **Archivos/Componentes involucrados:**
   - `internal/installer/wheelhouse.go`
   - `internal/installer/assets/wheelhouse-lock.json`
   - `internal/installer/wheelhouse_test.go`
   - `deploy/installer/fetch-wheelhouse.sh`
+  - `deploy/installer/test-wheelhouse-rollback.sh`
 - **Implementación realizada:**
   - Lockfile determinista `assets/wheelhouse-lock.json` con 36 wheels binarios exactos (173.9 MB total), hashes SHA-256 reales, tamaños y metadatos de tags PEP 427.
-  - Componente Go `WheelhouseManager` con validación exhaustiva de integridad, confinamiento canónico de symlinks, comprobación de tags de plataforma (`cp311`, `abi3`, `universal2`, `arm64`) y rechazo estricto de distribuciones fuente (.tar.gz, .zip).
-  - Protocolo de aprovisionamiento 100% offline invocando `pip install --no-index --find-links=<wheelhouse> --only-binary=:all: --disable-pip-version-check --no-cache-dir`.
-  - Contención estricta de red: `PIP_CONFIG_FILE=/dev/null`, `PIP_NO_INDEX=1` y proxy blackhole a `127.0.0.1:9` para fail-closed ante cualquier intento de apertura de socket externo.
-  - Aislamiento de entorno con `IsolateEnv()` suprimiendo `PYTHONPATH`, `PYTHONHOME`, `VIRTUAL_ENV` y Homebrew.
-  - Sonda de verificación de imports (`VerifyImports`) y prueba de aceleración de hardware Apple Silicon Metal Performance Shaders (`torch.backends.mps.is_available()`) con ejecución tensorial real y fallback a CPU.
-  - Smoke test del Vision Worker (`backend.py`) validando resolución de dispositivo sin necesidad de cámaras reales ni pesos en git.
+  - Instalación verdaderamente determinista con barrera criptográfica obligatoria: generación efímera de `requirements.lock.txt` con exact pins (`name==version --hash=sha256:...`) e invocación de pip con `--require-hashes --no-index --find-links=<wheelhouse> --only-binary=:all: --no-cache-dir`. Pip opera en modo fail-closed rechazando cualquier dependencia no fijada, hash alterado o sdist.
+  - Staging aislado y recuperable: `InstallOffline()` no modifica `site-packages` activo en el lugar. Realiza staging en `.site-packages.tmp.<pid>` en el mismo filesystem, pre-sembrado con paquetes base del intérprete (`pip`, `setuptools`), audita los 36 paquetes `.dist-info`, y ejecuta swap de directorios de dos pasos con backup en `.site-packages.old.<pid>`.
+  - Verificaciones post-activación y rollback automático: comprobación de consistencia con `pip check`, auditoría de distribuciones instaladas con `importlib.metadata`, y sonda de imports con MPS. Si cualquier verificación falla, se dispara rollback automático restaurando el `site-packages` anterior intacto.
+  - Publicación transaccional de wheelhouse en `deploy/installer/fetch-wheelhouse.sh`: reemplazo del movimiento archivo por archivo por máquina de estados explícita (`INIT` -> `PREPARING` -> `STAGED` -> `BACKING_UP` -> `BACKED_UP` -> `ACTIVATING` -> `ACTIVATED` -> `VERIFYING` -> `COMMITTED`), staging atómico en `.wheelhouse.tmp.$$`, backup en `.wheelhouse.old.$$`, y rollback basado en evidencia del filesystem ante terminación anormal.
+  - Contención estricta de red: `PIP_CONFIG_FILE=/dev/null`, `PIP_NO_INDEX=1` y proxy blackhole a `127.0.0.1:9`.
+  - Auditoría de licencias y límite legal AGPL-3.0: documentado que la separación de procesos por Unix socket no constituye una exención legal automática de AGPL-3.0 para distribución comercial sin código fuente; aprobación jurídica y comercial mantenida como bloqueo independiente.
+  - Se mantiene estrictamente `MODEL_REDISTRIBUTION_APPROVED=false`. No se incluyen pesos YOLO.
 - **Tests obligatorios:**
-  - Suite de 25 escenarios unitarios y de integración table-driven cubriendo lock válido/inválido, wheels ausentes/corruptos, hash/size mismatch, versiones/ABI incompatibles, wheels de otra arquitectura, dependencias transitivas faltantes, duplicadas, sdist rechazados, aislamiento de pip config, network fail-closed, host/brew ausentes, PYTHONPATH contaminado, idempotencia, fallos de instalación, y preservación del runtime previo.
-  - Prueba física E2E en hardware real (Apple Silicon M4) instalando los 36 wheels en ~20s, validando imports y aceleración MPS.
+  - Suite adversarial completa de 18 escenarios en `internal/installer/wheelhouse_test.go`:
+    1. Pin exacto de las 36 dependencias con `--hash=sha256:`.
+    2. Cambio de versión de un wheel rechazado.
+    3. Wheel externo no declarado rechazado.
+    4. Dependencia transitiva ausente detectada.
+    5. Hash alterado rechazado fail-closed.
+    6. Instalación interrumpida preserva site-packages anterior.
+    7. Fallo a mitad de pip install limpia staging.
+    8. Site-packages anterior con canario preservado intacto ante fallos.
+    9. Staging incompleto detectado previo a swap.
+    10. Fallo al activar wheelhouse (swap fail) con rollback.
+    11. Restauración de backup tras fallo post-activación.
+    12. Preparación repetida e idempotente.
+    13. `pip check` validando ausencia de requerimientos rotos.
+    14. Instalación física offline real en Apple Silicon Mac M4 (~21s).
+    15. Imports críticos verificados (torch, torchvision, ultralytics, pillow, cv2, numpy).
+    16. Aceleración MPS y fallback CPU validados en hardware real.
+    17. Aislamiento total de Internet durante provisioning.
+    18. Compatibilidad de los 36 artefactos reales con CPython 3.11.9 y darwin-arm64.
+  - Suite de seguridad de rollback para wheelhouse (`deploy/installer/test-wheelhouse-rollback.sh`): 10 escenarios con inyección determinista de fallos aprobados al 100%.
+  - Suite de seguridad de rollback para Python H2 (`deploy/installer/test-rollback-safety.sh`): 13 escenarios aprobados al 100%.
 - **Criterios de aceptación (DONE):**
-  - Instalación exitosa sin tráfico saliente de red (comprobado vía blackhole proxy).
-  - Duración de preparación reducida drásticamente (18-20s en M4).
-  - 100% de tests unitarios, de integración y adversariales aprobados bajo `go test -count=1 -race ./internal/installer/...`.
-- **Riesgos:** Mitigado tamaño mediante lockfile estricto y descarga exclusiva en packaging. `MODEL_REDISTRIBUTION_APPROVED=false` estrictamente mantenido.
-- **Bloqueos:** Ninguno.
-- **Entregable:** Branch `feat/full-edge-offline-wheelhouse` con `WheelhouseManager`, lockfile, suite de tests y script de sincronización.
+  - Instalación determinista con barrera SHA-256 e imposibilidad de derivar versiones.
+  - Runtime anterior preservado intacto ante cualquier fallo o interrupción de señal.
+  - 100% de tests unitarios, de integración, de carreras y adversariales aprobados (`go test -count=1 -race ./internal/installer/...`).
+  - Validación física real en Apple Silicon M4 completada en 21.38s con aceleración MPS funcional.
+- **Riesgos:** Ventana de intercambio no atómica inherente a POSIX documentada para reconciliación de arranque en H6. Bloqueo de licencia comercial Ultralytics AGPL-3.0 registrado independientemente.
+- **Bloqueos:** Aprobación comercial/jurídica de licencia Ultralytics AGPL-3.0 (`LEGAL_COMMERCIAL_APPROVAL_PENDING=true`).
+- **Entregable:** Branch `feat/full-edge-offline-wheelhouse` con `WheelhouseManager` endurecido, lockfile, scripts transaccionales y suites completas de pruebas adversariales.
 
 ---
 

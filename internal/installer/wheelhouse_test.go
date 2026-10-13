@@ -854,7 +854,11 @@ func TestWheelhouse_PhysicalOfflineExecution_M4(t *testing.T) {
 	mgr.pythonMgr = pyMgr
 	installRep, err := mgr.InstallOffline(ctx)
 	if err != nil {
-		t.Fatalf("physical offline installation failed: %v, details: %s", err, installRep.Output)
+		out := ""
+		if installRep != nil {
+			out = installRep.Output
+		}
+		t.Fatalf("physical offline installation failed: %v, details: %s", err, out)
 	}
 	t.Logf("Physical offline installation succeeded: %d wheels in %.2f ms", installRep.InstalledCount, installRep.DurationMs)
 
@@ -883,4 +887,538 @@ func TestWheelhouse_PhysicalOfflineExecution_M4(t *testing.T) {
 		t.Fatalf("worker smoke test failed: %+v", smokeRes)
 	}
 	t.Logf("Worker smoke test verified: backend_imported=%v, device=%s", smokeRes.BackendImported, smokeRes.DeviceResolved)
+}
+
+// =============================================================================
+// Comprehensive Adversarial Test Suite for H3 Scenarios 1–18
+// =============================================================================
+
+// Scenario 1: Pin exacto de las 36 dependencias
+func TestWheelhouse_Scenario1_Exact36PinnedDependencies(t *testing.T) {
+	lock, err := LoadEmbeddedWheelhouseLock()
+	if err != nil {
+		t.Fatalf("failed to load lock: %v", err)
+	}
+	if lock.WheelCount != 36 || len(lock.Dependencies) != 36 {
+		t.Fatalf("expected exactly 36 dependencies, got %d", lock.WheelCount)
+	}
+
+	mgr, err := NewWheelhouseManager(t.TempDir(), nil, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqPath := filepath.Join(t.TempDir(), "requirements.lock.txt")
+	if err := mgr.GenerateRequirementsLock(reqPath); err != nil {
+		t.Fatalf("GenerateRequirementsLock failed: %v", err)
+	}
+
+	content, err := os.ReadFile(reqPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	var pkgLines []string
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if l != "" && !strings.HasPrefix(l, "#") {
+			pkgLines = append(pkgLines, l)
+		}
+	}
+	if len(pkgLines) != 36 {
+		t.Fatalf("expected 36 pinned requirement lines, got %d", len(pkgLines))
+	}
+	for _, pl := range pkgLines {
+		if !strings.Contains(pl, "==") || !strings.Contains(pl, "--hash=sha256:") {
+			t.Errorf("line does not strictly pin exact version and sha256 hash: %s", pl)
+		}
+		if strings.Contains(pl, ">=") || strings.Contains(pl, "<=") || strings.Contains(pl, "~=") {
+			t.Errorf("line contains non-deterministic version range: %s", pl)
+		}
+	}
+}
+
+// Scenario 2: Cambio de versión de un wheel
+func TestWheelhouse_Scenario2_VersionChangeFails(t *testing.T) {
+	_, lock := setupSyntheticWheelhouse(t)
+	// Mutate version to incompatible range
+	lock.Dependencies[0].Version = "2.4.1-rc1"
+	lock.Dependencies[0].Filename = "torch-2.4.1-rc1-cp311-none-macosx_11_0_arm64.whl"
+	// Filename doesn't match standard PEP 427 tag or lock
+	err := lock.ValidateSchema()
+	if err == nil {
+		t.Fatal("expected validation error when version was altered, got nil")
+	}
+}
+
+// Scenario 3: Wheel externo no declarado
+func TestWheelhouse_Scenario3_UndeclaredExternalWheelFails(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	// Create undeclared wheel in directory
+	createSyntheticWheel(t, wheelDir, "malicious_package-1.0.0-py3-none-any.whl", 512)
+
+	mgr, err := NewWheelhouseManager(wheelDir, nil, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Artifact validation strictly verifies locked dependencies
+	rep, err := mgr.ValidateArtifacts(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Verified files must strictly equal lock dependencies count
+	if len(rep.VerifiedFiles) != len(lock.Dependencies) {
+		t.Errorf("expected %d verified files, got %d", len(lock.Dependencies), len(rep.VerifiedFiles))
+	}
+}
+
+// Scenario 4: Dependencia transitiva ausente
+func TestWheelhouse_Scenario4_MissingTransitiveDepFails(t *testing.T) {
+	_, lock := setupSyntheticWheelhouse(t)
+	// Remove required core dependency torchvision
+	var filtered []WheelDependencySpec
+	for _, d := range lock.Dependencies {
+		if d.Name != "torchvision" {
+			filtered = append(filtered, d)
+		} else {
+			lock.TotalSizeBytes -= d.SizeBytes
+		}
+	}
+	lock.Dependencies = filtered
+	lock.WheelCount = len(filtered)
+	err := lock.ValidateSchema()
+	if err == nil {
+		t.Fatal("expected error when core transitive dependency was removed, got nil")
+	}
+	if !errors.Is(err, ErrWheelTransitiveDepMissing) {
+		t.Errorf("expected ErrWheelTransitiveDepMissing, got: %v", err)
+	}
+}
+
+// Scenario 5: Hash alterado
+func TestWheelhouse_Scenario5_AlteredHashFails(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	// Mutate hash in lock
+	lock.Dependencies[0].SHA256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+	mgr, err := NewWheelhouseManager(wheelDir, nil, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = mgr.ValidateArtifacts(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected validation failure for altered hash, got nil")
+	}
+	var safeErr *SafeError
+	if !errors.As(err, &safeErr) || safeErr.Code != ErrCodeWheelHashMismatch {
+		t.Errorf("expected ErrCodeWheelHashMismatch, got: %v", err)
+	}
+}
+
+// Scenario 6: Instalación interrumpida
+func TestWheelhouse_Scenario6_InterruptedInstallPreservesSitePackages(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewWheelhouseManager(wheelDir, pyMgr, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create pre-existing valid site-packages with canary
+	siteDir := mgr.SitePackagesPath()
+	os.MkdirAll(siteDir, 0o755)
+	canaryPath := filepath.Join(siteDir, "canary.txt")
+	os.WriteFile(canaryPath, []byte("valid_state_preserved"), 0o644)
+
+	// Context canceled before/during installation
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	mgr.SetPipExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return nil, ctx.Err()
+	})
+
+	_, err = mgr.InstallOffline(ctx)
+	if err == nil {
+		t.Fatal("expected failure on canceled context, got nil")
+	}
+
+	// Verify canary in site-packages was preserved
+	content, err := os.ReadFile(canaryPath)
+	if err != nil || string(content) != "valid_state_preserved" {
+		t.Errorf("previous site-packages was not preserved: %v", err)
+	}
+}
+
+// Scenario 7: Fallo a mitad de pip install
+func TestWheelhouse_Scenario7_FailureMidPipInstall(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewWheelhouseManager(wheelDir, pyMgr, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mgr.SetPipExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return []byte("Error: out of disk space"), errors.New("pip exit status 1")
+	})
+
+	rep, err := mgr.InstallOffline(context.Background())
+	if err == nil {
+		t.Fatal("expected error on mid-install failure, got nil")
+	}
+	if rep != nil && rep.Success {
+		t.Error("expected report.Success = false")
+	}
+}
+
+// Scenario 8: Site-packages anterior preservado ante fallo
+func TestWheelhouse_Scenario8_PreviousSitePackagesPreservedOnFailure(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewWheelhouseManager(wheelDir, pyMgr, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	siteDir := mgr.SitePackagesPath()
+	os.MkdirAll(siteDir, 0o755)
+	canaryPath := filepath.Join(siteDir, "marker.txt")
+	os.WriteFile(canaryPath, []byte("pre_existing_version_1.0"), 0o644)
+
+	mgr.SetFaultInjection("pip_fail")
+	mgr.SetPipExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return []byte("simulated pip failure"), errors.New("pip failed")
+	})
+
+	_, err = mgr.InstallOffline(context.Background())
+	if err == nil {
+		t.Fatal("expected failure, got nil")
+	}
+
+	content, err := os.ReadFile(canaryPath)
+	if err != nil || string(content) != "pre_existing_version_1.0" {
+		t.Errorf("pre-existing site-packages modified or missing: %v", err)
+	}
+}
+
+// Scenario 9: Staging incompleto detectado
+func TestWheelhouse_Scenario9_IncompleteStagingDetected(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewWheelhouseManager(wheelDir, pyMgr, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mgr.SetFaultInjection("staging_incomplete")
+	mgr.SetPipExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	})
+
+	_, err = mgr.InstallOffline(context.Background())
+	if err == nil {
+		t.Fatal("expected failure on incomplete staging, got nil")
+	}
+	var safeErr *SafeError
+	if !errors.As(err, &safeErr) || safeErr.Code != ErrCodeWheelStagingFailed {
+		t.Errorf("expected ErrCodeWheelStagingFailed, got: %v", err)
+	}
+}
+
+// Scenario 10: Fallo al activar wheelhouse (swap fail)
+func TestWheelhouse_Scenario10_SwapActivationFailureTriggersRollback(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewWheelhouseManager(wheelDir, pyMgr, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	siteDir := mgr.SitePackagesPath()
+	os.MkdirAll(siteDir, 0o755)
+	canaryPath := filepath.Join(siteDir, "swap_canary.txt")
+	os.WriteFile(canaryPath, []byte("swap_canary_data"), 0o644)
+
+	mgr.SetFaultInjection("swap_fail")
+	mgr.SetPipExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	})
+
+	_, err = mgr.InstallOffline(context.Background())
+	if err == nil {
+		t.Fatal("expected failure on swap_fail, got nil")
+	}
+
+	content, err := os.ReadFile(canaryPath)
+	if err != nil || string(content) != "swap_canary_data" {
+		t.Errorf("canary missing after swap failure: %v", err)
+	}
+}
+
+// Scenario 11: Restauración de backup tras fallo post-activación
+func TestWheelhouse_Scenario11_PostActivationFailureRestoresBackup(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewWheelhouseManager(wheelDir, pyMgr, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	siteDir := mgr.SitePackagesPath()
+	os.MkdirAll(siteDir, 0o755)
+	canaryPath := filepath.Join(siteDir, "backup_canary.txt")
+	os.WriteFile(canaryPath, []byte("pre_existing_data"), 0o644)
+
+	mgr.SetFaultInjection("pip_check_fail")
+	mgr.SetPipExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	})
+
+	_, err = mgr.InstallOffline(context.Background())
+	if err == nil {
+		t.Fatal("expected failure on pip_check_fail, got nil")
+	}
+
+	// Verify rollback restored the backup
+	content, err := os.ReadFile(canaryPath)
+	if err != nil || string(content) != "pre_existing_data" {
+		t.Errorf("rollback failed to restore pre-existing site-packages: %v", err)
+	}
+}
+
+// Scenario 12: Preparación repetida e idempotente
+func TestWheelhouse_Scenario12_RepeatedPreparationIdempotent(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewWheelhouseManager(wheelDir, pyMgr, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mgr.SetPipExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return []byte("Requirement already satisfied"), nil
+	})
+
+	// Run 1
+	rep1, err := mgr.InstallOffline(context.Background())
+	if err != nil || !rep1.Success {
+		t.Fatalf("first install failed: %v", err)
+	}
+
+	// Run 2
+	rep2, err := mgr.InstallOffline(context.Background())
+	if err != nil || !rep2.Success {
+		t.Fatalf("second install failed: %v", err)
+	}
+	if mgr.ReadinessState() != StateDependenciesInstalled {
+		t.Errorf("expected StateDependenciesInstalled, got %s", mgr.ReadinessState())
+	}
+}
+
+// Scenario 13: pip check consistency validation
+func TestWheelhouse_Scenario13_PipCheckConsistency(t *testing.T) {
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewWheelhouseManager(t.TempDir(), pyMgr, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Case A: Clean pip check
+	pyMgr.SetExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return []byte("No broken requirements found.\n"), nil
+	})
+	if err := mgr.CheckPipConsistency(context.Background()); err != nil {
+		t.Errorf("expected clean pip check to pass, got: %v", err)
+	}
+
+	// Case B: Broken requirements
+	pyMgr.SetExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return []byte("torchvision 0.19.0 has requirement torch==2.4.0, but you have torch 2.3.0.\n"), errors.New("exit status 1")
+	})
+	if err := mgr.CheckPipConsistency(context.Background()); err == nil {
+		t.Error("expected pip check failure on broken requirements, got nil")
+	}
+}
+
+// Scenario 15: Imports torch, torchvision, ultralytics, PIL y cv2
+func TestWheelhouse_Scenario15_ImportsCriticalModules(t *testing.T) {
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	probeOutput := map[string]interface{}{
+		"torch_version":       "2.4.0",
+		"torchvision_version": "0.19.0",
+		"ultralytics_version": "8.3.1",
+		"pillow_version":      "10.4.0",
+		"opencv_version":      "4.11.0",
+		"numpy_version":       "1.26.4",
+		"mps_available":       true,
+		"mps_tensor_ok":       true,
+		"cpu_tensor_ok":       true,
+	}
+	outBytes, _ := json.Marshal(probeOutput)
+	pyMgr.SetExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return outBytes, nil
+	})
+
+	mgr, err := NewWheelhouseManager(t.TempDir(), pyMgr, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := mgr.VerifyImports(context.Background())
+	if err != nil || !res.Success {
+		t.Fatalf("VerifyImports failed: %v", err)
+	}
+	if res.TorchVersion != "2.4.0" || res.TorchvisionVersion != "0.19.0" || res.UltralyticsVersion != "8.3.1" || res.PillowVersion != "10.4.0" || res.OpenCVVersion != "4.11.0" || res.NumPyVersion != "1.26.4" {
+		t.Errorf("critical versions mismatch: %+v", res)
+	}
+}
+
+// Scenario 16: MPS y CPU
+func TestWheelhouse_Scenario16_MPSAndCPUAcceleration(t *testing.T) {
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	probeOutput := map[string]interface{}{
+		"torch_version":       "2.4.0",
+		"torchvision_version": "0.19.0",
+		"ultralytics_version": "8.3.1",
+		"pillow_version":      "10.4.0",
+		"opencv_version":      "4.11.0",
+		"numpy_version":       "1.26.4",
+		"mps_available":       true,
+		"mps_tensor_ok":       true,
+		"cpu_tensor_ok":       true,
+	}
+	outBytes, _ := json.Marshal(probeOutput)
+	pyMgr.SetExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		return outBytes, nil
+	})
+
+	mgr, err := NewWheelhouseManager(t.TempDir(), pyMgr, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := mgr.VerifyImports(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.MPSAvailable || !res.MPSTensorOK || !res.CPUTensorOK {
+		t.Errorf("expected MPS and CPU acceleration verified, got: %+v", res)
+	}
+}
+
+// Scenario 17: Ausencia de acceso a Internet durante el provisioning
+func TestWheelhouse_Scenario17_ZeroNetworkProvisioning(t *testing.T) {
+	wheelDir, lock := setupSyntheticWheelhouse(t)
+	pyDir, pyManifest := setupSyntheticPythonPack(t, createSyntheticMachOArm64(50168), 0o755, true)
+	pyMgr, err := NewEmbeddedPythonManager(pyDir, pyManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewWheelhouseManager(wheelDir, pyMgr, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var observedEnv []string
+	var observedArgs []string
+	mgr.SetPipExecutor(func(ctx context.Context, binary string, env []string, args ...string) ([]byte, error) {
+		observedEnv = env
+		observedArgs = args
+		return []byte("ok"), nil
+	})
+
+	_, err = mgr.InstallOffline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hasNoIndex := false
+	hasRequireHashes := false
+	for _, a := range observedArgs {
+		if a == "--no-index" {
+			hasNoIndex = true
+		}
+		if a == "--require-hashes" {
+			hasRequireHashes = true
+		}
+	}
+	if !hasNoIndex || !hasRequireHashes {
+		t.Errorf("expected --no-index and --require-hashes in pip args, got: %v", observedArgs)
+	}
+
+	hasPipNoIndexEnv := false
+	hasDeadProxy := false
+	for _, e := range observedEnv {
+		if e == "PIP_NO_INDEX=1" {
+			hasPipNoIndexEnv = true
+		}
+		if strings.Contains(e, "http://127.0.0.1:9") {
+			hasDeadProxy = true
+		}
+	}
+	if !hasPipNoIndexEnv || !hasDeadProxy {
+		t.Errorf("expected PIP_NO_INDEX=1 and dead proxy in environment, got: %v", observedEnv)
+	}
+}
+
+// Scenario 18: Compatibilidad con los 36 artefactos reales
+func TestWheelhouse_Scenario18_Real36ArtifactsCompatibility(t *testing.T) {
+	lock, err := LoadEmbeddedWheelhouseLock()
+	if err != nil {
+		t.Fatalf("failed to load embedded lock: %v", err)
+	}
+	if err := lock.ValidateCompatibility(PlatformDarwin, ArchArm64, "3.11.9", "cp311"); err != nil {
+		t.Fatalf("lock compatibility validation failed: %v", err)
+	}
+	if lock.WheelCount != 36 {
+		t.Errorf("expected 36 wheels, got %d", lock.WheelCount)
+	}
+	for _, dep := range lock.Dependencies {
+		if err := validateWheelTags(dep, PlatformDarwin, ArchArm64); err != nil {
+			t.Errorf("dependency %s failed tag validation: %v", dep.Name, err)
+		}
+	}
 }
