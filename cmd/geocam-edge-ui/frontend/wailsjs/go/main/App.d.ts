@@ -22,6 +22,10 @@ export function GetProcessingModeOptions():Promise<Array<installer.ProcessingMod
 
 export function GetSaaSURL():Promise<string>;
 
+export function GetFFmpegStatus():Promise<installer.DependencyStatus>;
+
+export function InstallFFmpeg():Promise<installer.DependencyStatus>;
+
 export function TestSaaSConnection(arg1:string):Promise<installer.ServerCheckResult>;
 
 export function GetSystemReport():Promise<installer.SystemReport>;

@@ -43,6 +43,17 @@ func (a *App) GetSaaSURL() string {
 	return a.installer.GetSaaSURL(a.ctx)
 }
 
+// GetFFmpegStatus returns the current FFmpeg and FFprobe dependency status.
+func (a *App) GetFFmpegStatus() (*installer.DependencyStatus, error) {
+	return a.installer.ResolveFFmpeg(a.ctx), nil
+}
+
+// InstallFFmpeg triggers the safe platform package installation of FFmpeg (e.g. Homebrew on macOS).
+func (a *App) InstallFFmpeg() (*installer.DependencyStatus, error) {
+	res, err := a.installer.InstallFFmpeg(a.ctx)
+	return res, structuredError(err)
+}
+
 // TestSaaSConnection tests connectivity to a GEO CAM SaaS server.
 func (a *App) TestSaaSConnection(rawURL string) (*installer.ServerCheckResult, error) {
 	return a.installer.TestSaaSConnection(a.ctx, rawURL)

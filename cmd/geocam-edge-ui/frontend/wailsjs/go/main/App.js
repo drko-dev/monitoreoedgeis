@@ -42,6 +42,14 @@ export function GetSaaSURL() {
   return window['go']['main']['App']['GetSaaSURL']();
 }
 
+export function GetFFmpegStatus() {
+  return window['go']['main']['App']['GetFFmpegStatus']();
+}
+
+export function InstallFFmpeg() {
+  return window['go']['main']['App']['InstallFFmpeg']();
+}
+
 export function TestSaaSConnection(arg1) {
   return window['go']['main']['App']['TestSaaSConnection'](arg1);
 }

@@ -34,8 +34,26 @@ export interface SystemReport {
   free_disk_gb: number;
   ffmpeg_present: boolean;
   ffprobe_path?: string;
+  ffmpeg_path?: string;
+  ffmpeg_version?: string;
+  ffmpeg_source?: string;
   has_gpu_support: boolean;
   gpu_info?: string;
+}
+
+export type DependencySource = 'configured' | 'path' | 'homebrew' | 'system' | 'managed' | 'none';
+
+export interface DependencyStatus {
+  ffmpeg_found: boolean;
+  ffmpeg_path: string;
+  ffmpeg_version: string;
+  ffprobe_found: boolean;
+  ffprobe_path: string;
+  ready: boolean;
+  source: DependencySource;
+  install_supported: boolean;
+  install_method: string;
+  message?: string;
 }
 
 export interface InstallerState {

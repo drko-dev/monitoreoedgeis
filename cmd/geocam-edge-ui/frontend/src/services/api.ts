@@ -15,12 +15,15 @@ import {
   CameraOnboardingRequest,
   CameraOnboardingPlan,
   CameraOnboardingApplyResult,
+  DependencyStatus,
 } from '../types/installer';
 import {
   GetSystemReport,
   GetInstallerState,
   ClaimDevice,
   GetSaaSURL,
+  GetFFmpegStatus,
+  InstallFFmpeg,
   GetProcessingModeOptions,
   GetCurrentProcessingMode,
   PlanProcessingMode,
@@ -367,3 +370,59 @@ export async function cancelCameraOnboarding(operationId: number): Promise<void>
     // Best-effort cleanup call; swallow errors in dev-sandbox/non-Wails mode
   }
 }
+
+// fetchFFmpegStatus queries the resolved FFmpeg / FFprobe installation state
+export async function fetchFFmpegStatus(): Promise<DependencyStatus> {
+  try {
+    const status = await GetFFmpegStatus();
+    if (status && typeof status === 'object') {
+      return status as unknown as DependencyStatus;
+    }
+  } catch {
+    // Fallback below when not in Wails desktop runtime
+  }
+
+  return {
+    ffmpeg_found: true,
+    ffmpeg_path: '/opt/homebrew/bin/ffmpeg',
+    ffmpeg_version: '7.1',
+    ffprobe_found: true,
+    ffprobe_path: '/opt/homebrew/bin/ffprobe',
+    ready: true,
+    source: 'homebrew',
+    install_supported: true,
+    install_method: 'homebrew',
+  };
+}
+
+// installFFmpeg initiates safe desktop provisioning of FFmpeg
+export async function installFFmpeg(): Promise<DependencyStatus> {
+  try {
+    const status = await InstallFFmpeg();
+    if (status && typeof status === 'object') {
+      return status as unknown as DependencyStatus;
+    }
+  } catch (err: unknown) {
+    if (err && typeof err === 'object' && 'safe_message' in err) {
+      throw err;
+    }
+    throw {
+      code: 'INSTALL_FAILED',
+      safe_message: err instanceof Error ? err.message : String(err),
+      recoverable: true,
+    };
+  }
+
+  return {
+    ffmpeg_found: true,
+    ffmpeg_path: '/opt/homebrew/bin/ffmpeg',
+    ffmpeg_version: '7.1',
+    ffprobe_found: true,
+    ffprobe_path: '/opt/homebrew/bin/ffprobe',
+    ready: true,
+    source: 'homebrew',
+    install_supported: true,
+    install_method: 'homebrew',
+  };
+}
+

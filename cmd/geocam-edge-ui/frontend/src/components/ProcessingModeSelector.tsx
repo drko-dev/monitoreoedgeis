@@ -1,10 +1,11 @@
 import React from 'react';
-import { ProcessingModeOption, ProcessingMode } from '../types/installer';
+import { ProcessingModeOption, ProcessingMode, DependencyStatus } from '../types/installer';
 import { capabilityBadge } from '../utils/processingModeDisplay';
 import { Button } from './Button';
 import { HelpLink } from './HelpLink';
 import { useI18n } from '../i18n/I18nContext';
 import { docsLinks } from '../config/docsLinks';
+import { useFFmpeg } from '../hooks/useFFmpeg';
 
 interface ProcessingModeSelectorProps {
   options: ProcessingModeOption[];
@@ -13,6 +14,11 @@ interface ProcessingModeSelectorProps {
   onSelect: (mode: ProcessingMode) => void;
   onContinue: () => void;
   loading: boolean;
+  ffmpegStatus?: DependencyStatus | null;
+  onInstallFFmpeg?: () => void;
+  installingFFmpeg?: boolean;
+  verifyingFFmpeg?: boolean;
+  ffmpegError?: string | null;
 }
 
 export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
@@ -22,14 +28,109 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
   onSelect,
   onContinue,
   loading,
+  ffmpegStatus,
+  onInstallFFmpeg,
+  installingFFmpeg,
+  verifyingFFmpeg,
+  ffmpegError,
 }) => {
   const { t } = useI18n();
+  const hookFFmpeg = useFFmpeg();
+
+  const status = ffmpegStatus !== undefined ? ffmpegStatus : hookFFmpeg.status;
+  const installing = installingFFmpeg !== undefined ? installingFFmpeg : hookFFmpeg.installing;
+  const verifying = verifyingFFmpeg !== undefined ? verifyingFFmpeg : hookFFmpeg.verifying;
+  const installError = ffmpegError !== undefined ? ffmpegError : hookFFmpeg.error;
+  const handleInstall = onInstallFFmpeg || hookFFmpeg.install;
+
+  const selectedOption = options.find((o) => o.mode === selected);
+  const isSelectedUnavailable = selectedOption?.capability === 'UNAVAILABLE';
+
   return (
     <div className="card mode-selector-card">
       <div className="card-header-row">
         <h3 className="card-title">{t('mode.chooseTitle')}</h3>
         <HelpLink href={docsLinks.processingModes}>{t('mode.whichShouldIChoose')}</HelpLink>
       </div>
+
+      {status && !status.ready && (
+        <div
+          className="card"
+          style={{
+            border: '1px solid var(--danger)',
+            backgroundColor: 'rgba(239, 68, 68, 0.08)',
+            marginBottom: '1.25rem',
+            padding: '1rem',
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <span className="check-icon fail" aria-hidden="true">✗</span>
+                <strong style={{ color: 'var(--danger)' }}>{t('ffmpeg.notInstalled')}</strong>
+              </div>
+              <p style={{ margin: '0.25rem 0 0.5rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                {t('ffmpeg.missingDesc')}
+              </p>
+              <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                {t('ffmpeg.path')} <code>{status.ffmpeg_path || t('ffmpeg.pathNotFound')}</code>
+              </p>
+            </div>
+            <div>
+              <Button
+                variant="primary"
+                onClick={handleInstall}
+                loading={installing || verifying}
+                disabled={installing || verifying}
+              >
+                {installing ? t('ffmpeg.installing') : verifying ? t('ffmpeg.verifying') : t('ffmpeg.installAction')}
+              </Button>
+            </div>
+          </div>
+          {installError && (
+            <div
+              style={{
+                marginTop: '0.75rem',
+                padding: '0.5rem',
+                backgroundColor: 'rgba(239, 68, 68, 0.15)',
+                borderRadius: 'var(--radius-sm)',
+                fontSize: '0.85rem',
+                color: 'var(--danger)',
+              }}
+            >
+              <p style={{ margin: 0 }}>{t('ffmpeg.installFailed', { error: installError })}</p>
+              <p style={{ margin: '0.25rem 0 0', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                {t('ffmpeg.manualInstruction')}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {status && status.ready && (
+        <div
+          className="card"
+          style={{
+            border: '1px solid var(--success)',
+            backgroundColor: 'rgba(16, 185, 129, 0.06)',
+            marginBottom: '1.25rem',
+            padding: '0.75rem 1rem',
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <span className="check-icon pass" aria-hidden="true">✓</span>
+              <span style={{ color: 'var(--success)', fontWeight: 600 }}>{t('ffmpeg.ready')}</span>
+            </div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+              <span>{t('ffmpeg.version')} {status.ffmpeg_version}</span>
+              {' · '}
+              <span><code>{status.ffmpeg_path}</code></span>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="mode-card-grid">
         {options.map((option) => {
           const badge = capabilityBadge(option);
@@ -75,10 +176,23 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
           );
         })}
       </div>
-      <div className="actions-bar">
-        <Button variant="primary" onClick={onContinue} disabled={!selected} loading={loading}>
-          {t('mode.continue')}
-        </Button>
+
+      <div className="actions-bar" style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: '0.5rem' }}>
+        {isSelectedUnavailable && (
+          <p style={{ margin: 0, textAlign: 'center', color: 'var(--danger)', fontSize: '0.875rem' }}>
+            {t('mode.cannotContinueUnavailable')}
+          </p>
+        )}
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <Button
+            variant="primary"
+            onClick={onContinue}
+            disabled={!selected || isSelectedUnavailable || loading}
+            loading={loading}
+          >
+            {t('mode.continue')}
+          </Button>
+        </div>
       </div>
     </div>
   );
