@@ -309,8 +309,8 @@ To ensure the standalone interpreter executes completely isolated from host conf
 - **Synthetic Test Fixtures:** 20 table-driven unit tests verify error handling (missing file, corrupted hash, truncated size, non-executable bits, wrong Mach-O architecture, wrong version, incompatible ABI, incomplete stdlib, escaping symlinks, execution timeout, air-gapped readiness, path relocatability, and paths with spaces) using synthetic fixtures without requiring large binaries in git.
 - **Physical Verification:** `TestEmbeddedPython_RealPythonExecution` executes against real CPython 3.11.9 Standalone Apple Silicon Mach-O binary, confirming probe execution, JSON serialization, and standard library hermetic loading.
 
-### 9.5 Security Hardening & Secure Extraction Architecture
-To mitigate archive extraction attacks (Zip Slip / Tar Slip, symlink traversal, hardlink injection, tar bombs):
+### 9.5 Security Hardening, State Machine & Rollback Safety Architecture
+To guarantee absolute reliability against archive corruption, filesystem errors, and process interruptions:
 1. **Entry-by-Entry Pre-Validation (`internal/installer/secure_extractor.go`):**
    - Rejects absolute paths (`/usr/bin`, `\windows\sys`).
    - Rejects path traversal components (`..`, `../`, `/../`).
@@ -319,29 +319,40 @@ To mitigate archive extraction attacks (Zip Slip / Tar Slip, symlink traversal, 
    - Verifies symlink targets: rejects absolute targets and targets that resolve outside the staging root.
    - Refuses to write through existing symlinks (`os.Remove` before file creation).
    - Validates hardlink targets to ensure they reference pre-existing files within staging.
-2. **Same-Filesystem Staging & Rollback Guarantee:**
-   - Staging directory is allocated strictly as a hidden sibling `$TARGET_DIR/.python.tmp.<pid>` on the exact same filesystem as the final target, avoiding cross-filesystem moves.
-   - Full distribution verification (`python3.11` binary, `libpython3.11.dylib`, `os.py`, `lib-dynload`) occurs entirely on staging BEFORE modifying the active target runtime.
-   - Existing valid runtime is never deleted upon staging failure; atomic rename swap ensures rollback to backup `$TARGET_DIR/.python.old.<pid>` if replacement fails.
-   - Cleanup handlers strictly delete the current attempt's staging directory.
-3. **Template Manifest vs. Release Separation:**
+2. **Explicit State Machine in Activation Script (`deploy/installer/fetch-runtime-deps.sh`):**
+   - States: `INIT` -> `PREPARING` -> `STAGED` -> `BACKING_UP` -> `BACKED_UP` -> `ACTIVATING` -> `ACTIVATED` -> `VERIFYING` -> `COMMITTED`.
+   - Error states: `ROLLING_BACK`, `ROLLED_BACK`, `ROLLBACK_FAILED`.
+   - Staging occurs strictly in sibling hidden directory `$TARGET_DIR/.python.tmp.<pid>` on the exact same filesystem.
+   - Existing runtime is preserved in `$TARGET_DIR/.python.old.<pid>`.
+   - **Backup Preservation Guarantee:** Previous backup is NEVER deleted until post-activation verification succeeds (`STATE=COMMITTED`).
+   - **Rollback Resilience:** If activation or post-activation verification fails, rollback restores the backup. If rollback itself fails, the backup directory is SAFELY PRESERVED on disk and its path and recovery command are logged (`STATE=ROLLBACK_FAILED`).
+   - **Signal Shielding:** Signal traps (`INT`, `TERM`, `HUP`, `EXIT`) trigger automated rollback during the transition window and prevent destructive double cleanup (`IN_CLEANUP` re-entrancy lock).
+3. **Atomic Rename vs. Two-Step Directory Swap Distinction:**
+   - In POSIX filesystems without atomic exchange syscalls (e.g. Darwin), directory replacement requires a two-step sequence: `mv target backup` followed by `mv staging target`.
+   - Between step 1 and step 2, target is momentarily absent.
+   - Mitigations: (1) Staging is verified 100% before step 1, (2) signals are trapped to immediately restore backup, (3) backup is kept until post-activation verification succeeds, and (4) unrecovered backups are preserved if restoration fails.
+   - Note for Milestone H6: Full upgrade system in H6 will evaluate versioned directories with single-pointer symlink swapping (`ln -sfn ... && mv -f link target`).
+4. **Template Manifest vs. Release Separation:**
    - Embedded manifest `assets/runtime-manifest.json` specifies `"manifest_type": "template"` to indicate that dependent components (wheels in H3, worker/ffmpeg in H4) are unbuilt specifications and not ready-for-inference releases.
    - Formalized state: `PYTHON_EXECUTABLE` indicates interpreter availability, but explicitly does NOT imply `RUNTIME_READY` or `INFERENCE_READY`.
 
-### 9.6 Adversarial Test Suite Coverage (`secure_extractor_test.go`)
-Twelve adversarial test scenarios validate fail-closed packaging behavior:
-1. `TestSecureExtractor_Case1_PathTraversal`: Tar entry with `../` is rejected before extraction.
-2. `TestSecureExtractor_Case2_AbsolutePath`: Tar entry with `/etc/shadow` is rejected.
-3. `TestSecureExtractor_Case3_EscapingSymlink`: Symlink pointing outside extraction root is rejected.
-4. `TestSecureExtractor_Case4_DangerousHardlink`: Hardlink pointing outside destination is rejected.
-5. `TestSecureExtractor_Case5_ArchiveHashMismatchPreExtraction`: Corrupted archive hash fails before opening.
-6. `TestSecureExtractor_Case6_InterruptedExtractionCleanup`: Partial extraction cleans up current attempt only.
-7. `TestSecureExtractor_Case7_StagingMoveFailureRollback`: Swap failure restores previous valid runtime.
-8. `TestSecureExtractor_Case8_PreviousValidRuntimePreserved`: Failed extraction preserves running environment.
-9. `TestSecureExtractor_Case9_RepeatedPreparationIdempotent`: Repeated extractions succeed without corruption.
-10. `TestSecureExtractor_Case10_SameFilesystemStagingGuarantee`: Verifies sibling staging path on same filesystem.
-11. `TestEmbeddedPython_Case11_IncompleteDistributionChecks`: Verifies detection of missing dylib or stdlib.
-12. `TestEmbeddedPython_Case12_RealMacOSArm64Validation`: Physical validation of Apple Silicon Python execution.
+### 9.6 Adversarial Test Suite Coverage (`secure_extractor_test.go` & `test-rollback-safety.sh`)
+Twelve mandatory rollback safety failure modes are validated via deterministic fault injection (`deploy/installer/test-rollback-safety.sh`):
+1. **Case 1 (Fresh install):** Successful clean installation without leftover temporary files.
+2. **Case 2 (Valid previous runtime update):** Clean upgrade with backup deleted post-commit.
+3. **Case 3 (Error before activation):** Pre-activation failure leaves target untouched and cleans staging.
+4. **Case 4 (Error moving old runtime):** Failure backing up preserves existing runtime.
+5. **Case 5 (Error activating new runtime):** Activation failure triggers automatic rollback and restores valid runtime.
+6. **Case 6 (Error restoring backup):** Restoration failure preserves backup directory intact with manual recovery instructions.
+7. **Case 7 (Error in final verification):** Post-activation verification failure triggers rollback and restores previous runtime.
+8. **Case 8 (Interruption between renames):** SIGINT between renames is trapped, initiating rollback and restoring valid runtime.
+9. **Case 9 (Interruption during cleanup):** Trap handler prevents re-entrancy and double cleanup crashes.
+10. **Case 10 (Repeated execution):** Idempotent execution skips redundant work when runtime is already verified.
+11. **Case 11 (Exact cryptographic preservation):** Canary files and dylibs remain bit-for-bit identical after rollback.
+12. **Case 12 (Absence of deletion of unrecovered backups):** Failed restoration never prunes backup on process exit.
+
+Go unit test suite in `secure_extractor_test.go` (14 cases) validates entry confinement, tar bomb bounds, same-filesystem staging, post-activation validation rollback (`Case 13`), and backup preservation upon rollback failure (`Case 14`).
+
 
 
 

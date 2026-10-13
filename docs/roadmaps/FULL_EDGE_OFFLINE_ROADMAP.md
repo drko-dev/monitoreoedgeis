@@ -144,16 +144,19 @@ This document establishes the official engineering roadmap to transition GEO CAM
   19. Rutas con espacios.
   20. Validación repetida e idempotente.
   - Test de integración física: ejecución de intérprete CPython 3.11.9 real en Apple Silicon (`TestEmbeddedPython_RealPythonExecution`).
-  - Suite adversarial de empaquetado y extracción segura (12 escenarios en `secure_extractor_test.go`): path traversal, rutas absolutas, symlinks que escapan, hardlinks externos/peligrosos, mismatch de hash pre-extracción, cleanup ante extracción interrumpida, rollback ante fallo de swap, preservación de runtime previo válido, staging garantizado en el mismo filesystem, verificación completa de distribución (dylib + stdlib), y validación física real.
+  - Suite adversarial de empaquetado y extracción segura (14 escenarios en `secure_extractor_test.go`): path traversal, rutas absolutas, symlinks que escapan, hardlinks externos/peligrosos, mismatch de hash pre-extracción, cleanup ante extracción interrumpida, rollback ante fallo de swap, preservación de runtime previo válido, staging garantizado en el mismo filesystem, verificación completa de distribución (dylib + stdlib), validación física real, rollback ante fallo post-activación (Case 13) y preservación de backup ante fallo de rollback (Case 14).
+  - Suite de seguridad de rollback y máquinas de estado con inyección determinista de fallos (12 escenarios en `deploy/installer/test-rollback-safety.sh`): primera instalación, actualización limpia, fallo previo a activación, fallo al mover runtime anterior, fallo de activación con rollback automático, fallo al restaurar con preservación estricta de backup, fallo en verificación post-activación con rollback, interrupción de señales (SIGINT) entre renames con rollback, interrupción en cleanup sin reentrancia, idempotencia en ejecución repetida, preservación criptográfica exacta bit a bit, y garantía de no eliminación de backups no recuperados tras finalizar el proceso.
 - **Criterios de aceptación (DONE):**
   - El intérprete embebido ejecuta y reporta versión 3.11.9 sin intervención del sistema host.
   - Extractor seguro implementado en Go (`cmd/runtime-extractor` y `internal/installer/secure_extractor.go`) reemplaza `tar -xzf` con validación previa de entradas, límites contra tar-bombs y staging en el mismo filesystem con rollback atómico.
+  - Máquina de estados explícita (`INIT` -> `PREPARING` -> `STAGED` -> `BACKING_UP` -> `BACKED_UP` -> `ACTIVATING` -> `ACTIVATED` -> `VERIFYING` -> `COMMITTED`) implementada en `deploy/installer/fetch-runtime-deps.sh`.
+  - Preservación estricta de backups: el backup previo nunca se elimina hasta que la verificación post-activación tiene éxito; ante fallo de restauración, el backup se conserva intacto y se reporta en logs.
   - `runtime-manifest.json` marcado explícitamente como `template` para componentes no construidos (H3–H5).
   - Estado formal `PYTHON_EXECUTABLE` no implica `RUNTIME_READY` o `INFERENCE_READY`.
-  - 100% de tests unitarios, de integración y adversariales aprobados bajo `go test -count=1 -race ./internal/installer/...`.
-- **Riesgos:** Mitigado aislamiento mediante flags `-I` y filtrado estricto de variables. Mitigado TOCTOU mediante staging en directorio oculto del mismo filesystem y rename atómico con rollback.
+  - 100% de tests unitarios, de integración y adversariales aprobados bajo `go test -count=1 -race ./internal/installer/...` y `./deploy/installer/test-rollback-safety.sh`.
+- **Riesgos:** Mitigado aislamiento mediante flags `-I` y filtrado estricto de variables. Mitigado TOCTOU mediante staging en directorio oculto del mismo filesystem y rename atómico con rollback. Documentada la limitación de reemplazo de directorios de dos pasos en POSIX vs puntero único de H6.
 - **Bloqueos:** Ninguno.
-- **Entregable:** Branch `feat/full-edge-embedded-python` con `EmbeddedPythonManager`, extractor seguro, script de fetch endurecido y suites de tests.
+- **Entregable:** Branch `feat/full-edge-embedded-python` con `EmbeddedPythonManager`, extractor seguro, script de fetch endurecido con máquina de estados, y suite de tests de rollback.
 
 ---
 

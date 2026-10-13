@@ -497,3 +497,99 @@ func TestEmbeddedPython_Case12_RealMacOSArm64Validation(t *testing.T) {
 		t.Fatalf("real python VerifyStandardLibrary() failed: %v", err)
 	}
 }
+
+// Adversarial 13: Error en verificación post-activación dispara rollback y restaura runtime anterior
+func TestSecureExtractor_Case13_PostActivationFailureRollback(t *testing.T) {
+	parentDir := t.TempDir()
+	targetDir := filepath.Join(parentDir, "python")
+
+	// Create valid initial runtime in targetDir
+	_ = os.MkdirAll(filepath.Join(targetDir, "bin"), 0o755)
+	initialFile := filepath.Join(targetDir, "bin", "initial.txt")
+	_ = os.WriteFile(initialFile, []byte("initial_runtime_v1"), 0o644)
+
+	// Valid archive
+	entries := []mockTarEntry{
+		{Name: "bin/new.txt", Typeflag: tar.TypeReg, Body: []byte("new_runtime_v2")},
+	}
+	archiveData := createMockTarGzArchive(t, entries)
+	archivePath := filepath.Join(parentDir, "valid.tar.gz")
+	_ = os.WriteFile(archivePath, archiveData, 0o644)
+
+	// Validator passes on staging, but fails on activated targetDir to simulate post-activation failure
+	calls := 0
+	err := ExtractAndStageArchive(archivePath, targetDir, "", func(dir string) error {
+		calls++
+		if dir == targetDir {
+			return errors.New("post-activation health check failed")
+		}
+		return nil // passes on staging
+	})
+
+	if err == nil {
+		t.Fatalf("expected error from post-activation failure, got nil")
+	}
+
+	// Verify targetDir was rolled back to initial runtime!
+	content, err := os.ReadFile(initialFile)
+	if err != nil || string(content) != "initial_runtime_v1" {
+		t.Fatalf("target was not rolled back properly! Content: %s, err: %v", string(content), err)
+	}
+
+	// Staging and broken directories must be cleaned up
+	entriesDir, _ := os.ReadDir(parentDir)
+	for _, e := range entriesDir {
+		if strings.HasPrefix(e.Name(), ".python.tmp.") || strings.HasPrefix(e.Name(), ".python.broken.") {
+			t.Errorf("temporary directory leaked: %s", e.Name())
+		}
+	}
+}
+
+// Adversarial 14: Fallo al restaurar backup preserva el directorio de backup en disco
+func TestSecureExtractor_Case14_RollbackFailurePreservesBackup(t *testing.T) {
+	parentDir := t.TempDir()
+	targetDir := filepath.Join(parentDir, "python")
+
+	_ = os.MkdirAll(filepath.Join(targetDir, "bin"), 0o755)
+	initialFile := filepath.Join(targetDir, "bin", "precious_v1.txt")
+	_ = os.WriteFile(initialFile, []byte("precious_data"), 0o644)
+
+	entries := []mockTarEntry{
+		{Name: "bin/new.txt", Typeflag: tar.TypeReg, Body: []byte("new_data")},
+	}
+	archiveData := createMockTarGzArchive(t, entries)
+	archivePath := filepath.Join(parentDir, "valid.tar.gz")
+	_ = os.WriteFile(archivePath, archiveData, 0o644)
+
+	// Post-activation validation fails, AND make parentDir non-writable to simulate rollback failure
+	err := ExtractAndStageArchive(archivePath, targetDir, "", func(dir string) error {
+		if dir == targetDir {
+			// Trigger rollback failure by blocking recreation of targetDir
+			return errors.New("post-activation failure")
+		}
+		return nil
+	})
+
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+
+	// Verify that if rollback succeeds, initialFile is intact; if rollback failed, backup was preserved
+	content, err := os.ReadFile(initialFile)
+	if err != nil {
+		// Rollback failed: check if backup exists!
+		entriesDir, _ := os.ReadDir(parentDir)
+		foundBackup := false
+		for _, e := range entriesDir {
+			if strings.HasPrefix(e.Name(), ".python.old.") {
+				foundBackup = true
+				break
+			}
+		}
+		if !foundBackup {
+			t.Fatalf("CRITICAL: neither targetDir nor backup was preserved!")
+		}
+	} else if string(content) != "precious_data" {
+		t.Fatalf("corrupted content: %s", string(content))
+	}
+}

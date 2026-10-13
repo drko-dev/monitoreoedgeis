@@ -559,12 +559,43 @@ func ExtractAndStageArchive(
 	if err := os.Rename(stagingDir, absTarget); err != nil {
 		cleanStaging = true
 		// Rollback previous runtime!
-		_ = os.Rename(backupDir, absTarget)
+		if rerr := os.Rename(backupDir, absTarget); rerr != nil {
+			return &SafeError{
+				Code:        ErrCodeStagingMoveFailed,
+				SafeMessage: fmt.Sprintf("CRITICAL: Fallo al activar nuevo runtime y fallo al restaurar backup (%s): %v", backupDir, rerr),
+				Recoverable: false,
+				Err:         rerr,
+			}
+		}
 		return &SafeError{
 			Code:        ErrCodeStagingMoveFailed,
 			SafeMessage: fmt.Sprintf("Fallo al activar nuevo runtime, runtime previo restaurado: %v", err),
 			Recoverable: true,
 			Err:         err,
+		}
+	}
+
+	// Post-activation verification on the activated target location
+	if validateFn != nil {
+		if err := validateFn(absTarget); err != nil {
+			// Move broken target aside and restore previous valid runtime
+			brokenDir := filepath.Join(parentDir, fmt.Sprintf(".%s.broken.%d", filepath.Base(absTarget), time.Now().UnixNano()))
+			_ = os.Rename(absTarget, brokenDir)
+			if rerr := os.Rename(backupDir, absTarget); rerr != nil {
+				return &SafeError{
+					Code:        ErrCodeStagingMoveFailed,
+					SafeMessage: fmt.Sprintf("CRITICAL: Verificación post-activación falló y fallo al restaurar backup (%s): %v", backupDir, rerr),
+					Recoverable: false,
+					Err:         rerr,
+				}
+			}
+			_ = os.RemoveAll(brokenDir)
+			return &SafeError{
+				Code:        ErrCodeStagingMoveFailed,
+				SafeMessage: fmt.Sprintf("Verificación post-activación falló; runtime previo restaurado: %v", err),
+				Recoverable: true,
+				Err:         err,
+			}
 		}
 	}
 
