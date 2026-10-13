@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -32,10 +33,21 @@ func mockCommandExecutor(responses map[string]struct {
 	out []byte
 	err error
 }) CommandExecutor {
+	patterns := make([]string, 0, len(responses))
+	for p := range responses {
+		patterns = append(patterns, p)
+	}
+	sort.Slice(patterns, func(i, j int) bool {
+		if len(patterns[i]) != len(patterns[j]) {
+			return len(patterns[i]) > len(patterns[j])
+		}
+		return patterns[i] < patterns[j]
+	})
 	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		cmdStr := name + " " + strings.Join(args, " ")
-		for pattern, resp := range responses {
+		for _, pattern := range patterns {
 			if strings.Contains(cmdStr, pattern) {
+				resp := responses[pattern]
 				return resp.out, resp.err
 			}
 		}
