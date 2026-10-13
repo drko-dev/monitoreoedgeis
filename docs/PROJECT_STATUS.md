@@ -5,19 +5,30 @@
 
 ## Current Active Initiative: Full Edge Self-Contained Offline Runtime
 
-### Hito OFFLINE-H2: Embedded Python Standalone macOS ARM64 (Current)
-- **Branch:** `feat/full-edge-embedded-python`
-- **Base:** `main @ 0c8f64a6e3cf6be2de671bdfaef21a13ea695006` (después del merge de H1 en PR #138)
-- **Objective:** Implementar el soporte de CPython 3.11.9 Standalone hermético para macOS Apple Silicon (`darwin/arm64`), permitiendo la ejecución aislada del intérprete sin depender de `/usr/bin/python3`, Homebrew, venvs previos ni acceso a PyPI/red.
+### Hito OFFLINE-H3: Hermetic Wheelhouse & Deterministic Python Dependencies (Current)
+- **Branch:** `feat/full-edge-offline-wheelhouse`
+- **Base:** `main @ 6f381a4d337ce2271823b92884ea4c5b6a1f03d1` (después del merge de H2 en PR #139)
+- **Objective:** Implementar un wheelhouse offline reproducible y determinista para macOS Apple Silicon (`darwin/arm64`) + CPython 3.11, resolviendo el árbol transitivo completo para PyTorch, Torchvision, Ultralytics y Pillow sin dependencias externas ni compilación local.
 - **Implementación:**
-  - `internal/installer/embedded_python.go`: Componente `EmbeddedPythonManager` para resolución de ruta, verificación criptográfica (SHA-256 y tamaño exacto), validación de arquitectura Mach-O 64-bit arm64 (`macho.CpuArm64`), validación de biblioteca dinámica `libpython3.11.dylib` (`ValidateMachODylib`), verificación de completitud de distribución (`os.py` y `lib-dynload`), estados formales de preparación (`PYTHON_EXECUTABLE` vs `RUNTIME_READY` vs `INFERENCE_READY`), purga de entorno de subprocess (`IsolateEnv()`), probador de versión/ABI (`ProbeInterpreter()`) y verificación de carga hermética de biblioteca estándar (`VerifyStandardLibrary()`).
-  - `internal/installer/secure_extractor.go` & `cmd/runtime-extractor`: Motor de extracción segura tar.gz en Go que valida entradas antes de escribir a disco (rechaza traversal `..`, rutas absolutas, symlinks/hardlinks que escapan, y tipos inesperados), impone límites contra tar bombs (1GB por archivo, 2GB acumulado), y garantiza staging atómico en el mismo filesystem con rollback post-activación y preservación estricta de backup.
-  - `internal/installer/assets/runtime-manifest.json`: Actualización con `"manifest_type": "template"` para distinguir especificaciones de componentes no construidos (H3–H5) de releases listas para inferencia, junto con metadatos reales verificados de Python (`90677957...`, 50168 bytes).
-  - `deploy/installer/fetch-runtime-deps.sh`: Script reproducible de adquisición y staging para `cpython-3.11.9+20240415-aarch64-apple-darwin-install_only.tar.gz` con máquina de estados explícita (`INIT` -> `PREPARING` -> `STAGED` -> `BACKING_UP` -> `BACKED_UP` -> `ACTIVATING` -> `ACTIVATED` -> `VERIFYING` -> `COMMITTED`), delegación a `runtime-extractor`, staging exclusivo en `$TARGET_DIR/.python.tmp.$$`, respaldo en `$TARGET_DIR/.python.old.$$`, verificación física de existencia de backup en disco, recuperación basada en evidencia del filesystem en `cleanup()`, preservación estricta de backup hasta confirmación, rollback automático ante fallo o interrupción por señales (INT, TERM, HUP), y preservación garantizada de backup no recuperado.
-  - `internal/installer/embedded_python_test.go`: Suite de 20 escenarios unitarios y de integración table-driven bajo `-race` + test de integración física con intérprete real verificado (`TestEmbeddedPython_RealPythonExecution`).
-  - `internal/installer/secure_extractor_test.go`: Suite adversarial de 14 escenarios comprobando path traversal, rutas absolutas, symlinks/hardlinks maliciosos, mismatch previo de hash, rollback ante error de movimiento, preservación de runtime anterior válido, garantía de mismo filesystem, completitud de la distribución, rollback ante fallo post-activación (Case 13) y preservación de backup (Case 14).
-  - `deploy/installer/test-rollback-safety.sh`: Suite de 13 pruebas de inyección determinista de fallos validando primera instalación, actualización limpia, fallo previo a activación, fallo al respaldar, fallo al activar, fallo de rollback con preservación estricta de backup, fallo de verificación post-activación, interrupción SIGINT entre renames (Case 8a), interrupción durante `BACKING_UP` recuperada por evidencia de filesystem (Case 8b), interrupción de cleanup sin reentrancia, idempotencia en ejecución repetida, preservación criptográfica exacta, y ausencia de eliminación de backups no recuperados tras la salida.
-- **Garantías TOCTOU y Límites de Atomicidad en POSIX (Milestone H6):** Documentado explícitamente que la validación en tiempo de inspección no elimina por sí sola condiciones de carrera TOCTOU concurrentes; la garantía fuerte de activación se alcanzará en H6 mediante staging en directorio aislado `0700`. Se documenta además que el reemplazo de directorios de dos pasos en POSIX (`mv target backup; mv staging target`) posee una ventana no atómica; fallos no interceptables por traps (SIGKILL, kernel panic, corte de energía) dejan directorios intermedios que requieren recuperación persistente en el arranque subsiguiente (alcance de H6).
+  - `internal/installer/assets/wheelhouse-lock.json`: Lockfile formal e inmutable con 36 wheels binarios exactos (`173,935,126` bytes total), hashes SHA-256 criptográficos, tamaños, origen verificable y mapeo de licencias.
+  - `internal/installer/wheelhouse.go`: Componente `WheelhouseManager` que implementa validación estricta de artefactos, confinamiento canónico de symlinks, comprobación de compatibilidad de tags PEP 427 (`cp311`, `abi3`, `universal2`, `arm64`), rechazo estricto de distribuciones fuente (.tar.gz, .zip), aprovisionamiento de pip 100% offline (`--no-index --find-links=... --only-binary=:all: --disable-pip-version-check`), aislamiento de entorno con `IsolateEnv()`, `PIP_CONFIG_FILE=/dev/null`, fail-closed ante conexiones externas con proxy blackhole, sonda de imports (`VerifyImports`) y smoke test del Vision Worker (`backend.py`).
+  - `internal/installer/wheelhouse_test.go`: Suite exhaustiva de 25 escenarios table-driven bajo `-race` cubriendo validación de lock, detección de corrupción/mismatch, tags incompatibles, dependencias faltantes/duplicadas, aislamiento de pip/PYTHONPATH, fallos a mitad de instalación y preservación de runtime, además de prueba de integración física E2E en hardware real Apple Silicon M4.
+  - `deploy/installer/fetch-wheelhouse.sh`: Script reproducible de packaging para sincronizar y verificar la integridad del wheelhouse durante el empaquetado de release sin contacto de red en tiempo de provisioning del cliente.
+  - `internal/installer/assets/runtime-manifest.json`: Actualización de la sección `dependencies` con los 36 wheels reales del lockfile manteniendo `"manifest_type": "template"`.
+- **Validación Física en Apple Silicon M4:**
+  - 36 wheels instalados completamente offline en 20.6 segundos.
+  - Verificación exitosa de imports críticos: `torch 2.4.0`, `torchvision 0.19.0`, `ultralytics 8.3.1`, `pillow 10.4.0`, `opencv 4.11.0`, `numpy 1.26.4`.
+  - Detección de aceleración de hardware: `torch.backends.mps.is_available() == True`.
+  - Operaciones tensoriales en MPS y CPU validadas exitosamente.
+  - Smoke test del Worker: importación limpia de `backend.py` y resolución de dispositivos (`auto` -> `cpu`, `mps` -> `mps`).
+- **Licensing Gate:** `MODEL_REDISTRIBUTION_APPROVED=false` estrictamente mantenido. Ultralytics (AGPL-3.0) confinado como daemon externo sobre socket Unix.
+- **Documentos de Referencia:**
+  - Arquitectura detallada: `docs/architecture/FULL_EDGE_SELF_CONTAINED.md` (Sección 10)
+  - Roadmap maestro H0–H9: `docs/roadmaps/FULL_EDGE_OFFLINE_ROADMAP.md` (Hito H3)
+
+### Hito OFFLINE-H2: Embedded Python Standalone macOS ARM64 (MERGED)
+- **PR:** #139 (Merged en `6f381a4d337ce2271823b92884ea4c5b6a1f03d1`)
+- **Resumen:** CPython 3.11.9 Standalone hermético para macOS arm64, `EmbeddedPythonManager`, extractor seguro tar.gz, máquina de estados y suite de 13 pruebas de rollback.
 - **Known Technical Debt (Monitoreado):**
   - `internal/heartbeat/saas_outage_test.go`: `TestW5_TransientFailuresBackOffInsteadOfHammering` tiene potencial de flakiness por contención de scheduling debido a `fakeSaaS` inicializando en `modeOK` antes de `setMode(modeUnavailable)` con `recordingClock`. Registrado como deuda técnica conocida sin modificar la suite de heartbeat en este hito.
 - **Licensing Gate:** `MODEL_REDISTRIBUTION_APPROVED=false` estrictamente mantenido (`RUNTIME_OFFLINE_READY=true`, `MODEL_PACK_RELEASE_BLOCKED=true`).

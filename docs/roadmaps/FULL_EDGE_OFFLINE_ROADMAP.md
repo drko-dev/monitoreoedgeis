@@ -163,27 +163,33 @@ This document establishes the official engineering roadmap to transition GEO CAM
 
 ---
 
-### Hito H3 — Dependencias Offline y Wheelhouse
+### Hito H3 — Dependencias Offline y Wheelhouse (COMPLETADO)
 
 - **Objetivo:** Proveer e integrar un wheelhouse hermético con versiones exactas (pinned) de PyTorch, Torchvision, Ultralytics, Pillow y dependencias transitivas, instalables con `--no-index`.
 - **Dependencias:** H2 completado.
 - **Archivos/Componentes involucrados:**
   - `internal/installer/wheelhouse.go`
-  - `internal/installer/assets/wheelhouse/` (o empaquetado en release bundle)
+  - `internal/installer/assets/wheelhouse-lock.json`
   - `internal/installer/wheelhouse_test.go`
-- **Implementación esperada:**
-  - Lista de dependencias bloqueada sin rangos (`torch==2.4.0`, `ultralytics==8.3.1`, etc.).
-  - Protocolo de instalación que invoca `pip install --no-index --find-links=<wheelhouse>`.
-  - Detección fail-closed si se intenta abrir un socket TCP a PyPI.
+  - `deploy/installer/fetch-wheelhouse.sh`
+- **Implementación realizada:**
+  - Lockfile determinista `assets/wheelhouse-lock.json` con 36 wheels binarios exactos (173.9 MB total), hashes SHA-256 reales, tamaños y metadatos de tags PEP 427.
+  - Componente Go `WheelhouseManager` con validación exhaustiva de integridad, confinamiento canónico de symlinks, comprobación de tags de plataforma (`cp311`, `abi3`, `universal2`, `arm64`) y rechazo estricto de distribuciones fuente (.tar.gz, .zip).
+  - Protocolo de aprovisionamiento 100% offline invocando `pip install --no-index --find-links=<wheelhouse> --only-binary=:all: --disable-pip-version-check --no-cache-dir`.
+  - Contención estricta de red: `PIP_CONFIG_FILE=/dev/null`, `PIP_NO_INDEX=1` y proxy blackhole a `127.0.0.1:9` para fail-closed ante cualquier intento de apertura de socket externo.
+  - Aislamiento de entorno con `IsolateEnv()` suprimiendo `PYTHONPATH`, `PYTHONHOME`, `VIRTUAL_ENV` y Homebrew.
+  - Sonda de verificación de imports (`VerifyImports`) y prueba de aceleración de hardware Apple Silicon Metal Performance Shaders (`torch.backends.mps.is_available()`) con ejecución tensorial real y fallback a CPU.
+  - Smoke test del Vision Worker (`backend.py`) validando resolución de dispositivo sin necesidad de cámaras reales ni pesos en git.
 - **Tests obligatorios:**
-  - Simulación de entorno con red completamente bloqueada (resolución DNS nula).
-  - Verificación de que todos los imports críticos (`torch`, `ultralytics`, `PIL`) cargan exitosamente.
+  - Suite de 25 escenarios unitarios y de integración table-driven cubriendo lock válido/inválido, wheels ausentes/corruptos, hash/size mismatch, versiones/ABI incompatibles, wheels de otra arquitectura, dependencias transitivas faltantes, duplicadas, sdist rechazados, aislamiento de pip config, network fail-closed, host/brew ausentes, PYTHONPATH contaminado, idempotencia, fallos de instalación, y preservación del runtime previo.
+  - Prueba física E2E en hardware real (Apple Silicon M4) instalando los 36 wheels en ~20s, validando imports y aceleración MPS.
 - **Criterios de aceptación (DONE):**
-  - Instalación exitosa sin tráfico saliente de red.
-  - Duración de preparación reducida drásticamente (sin latencias de descarga).
-- **Riesgos:** Wheel con dependencias nativas faltantes para macOS ARM64.
-- **Bloqueos:** Tamaño del bundle del instalador (requiere compresión eficiente de wheels).
-- **Entregable:** Mecanismo de bootstrap de wheelhouse offline funcional y testeado.
+  - Instalación exitosa sin tráfico saliente de red (comprobado vía blackhole proxy).
+  - Duración de preparación reducida drásticamente (18-20s en M4).
+  - 100% de tests unitarios, de integración y adversariales aprobados bajo `go test -count=1 -race ./internal/installer/...`.
+- **Riesgos:** Mitigado tamaño mediante lockfile estricto y descarga exclusiva en packaging. `MODEL_REDISTRIBUTION_APPROVED=false` estrictamente mantenido.
+- **Bloqueos:** Ninguno.
+- **Entregable:** Branch `feat/full-edge-offline-wheelhouse` con `WheelhouseManager`, lockfile, suite de tests y script de sincronización.
 
 ---
 

@@ -356,6 +356,81 @@ Thirteen mandatory rollback safety failure modes across twelve categories are va
 
 Go unit test suite in `secure_extractor_test.go` (14 cases) validates entry confinement, tar bomb bounds, same-filesystem staging, post-activation validation rollback (`Case 13`), and backup preservation upon rollback failure (`Case 14`).
 
+---
+
+## 10. Hermetic Offline Wheelhouse Architecture (Milestone H3)
+
+Implemented in `internal/installer/wheelhouse.go` with complete 25-scenario test suite in `internal/installer/wheelhouse_test.go`, lockfile in `internal/installer/assets/wheelhouse-lock.json`, and packaging tooling in `deploy/installer/fetch-wheelhouse.sh`.
+
+### 10.1 Deterministic Transitive Dependency Resolution
+- **Core Dependencies:**
+  - `torch==2.4.0`
+  - `torchvision==0.19.0`
+  - `ultralytics==8.3.1`
+  - `pillow==10.4.0`
+- **Complete Transitive Closure (36 wheels):**
+  - Numerical & Scientific: `numpy==1.26.4`, `scipy==1.17.1`, `pandas==3.0.6`, `sympy==1.14.0`, `mpmath==1.3.0`.
+  - Vision & Image Processing: `opencv-python==4.11.0.86`, `contourpy==1.3.3`, `fonttools==4.66.1`, `kiwisolver==1.5.1`.
+  - Plotting & Visualization: `matplotlib==3.11.2`, `seaborn==0.13.2`, `cycler==0.12.1`, `pyparsing==3.3.3`.
+  - Utilities & System: `pyyaml==6.0.3`, `requests==2.34.2`, `urllib3==2.8.0`, `certifi==2026.7.22`, `charset-normalizer==3.5.2`, `idna==3.20`, `psutil==7.2.2`, `py-cpuinfo==9.0.0`, `tqdm==4.70.1`, `filelock==4.1.1`, `fsspec==2026.9.0`, `jinja2==3.1.6`, `MarkupSafe==3.0.4`, `networkx==3.6.1`, `packaging==26.3`, `python-dateutil==2.9.0.post0`, `six==1.17.0`, `typing-extensions==4.16.0`, `ultralytics-thop==2.2.2`.
+- **Zero Local Compilation:** 100% of wheels are pure binary wheels (`--only-binary=:all:`). No C/C++ compiler, CMake, or Xcode Command Line Tools are required on the client machine.
+- **Strict ABI & Tag Compatibility:**
+  - CPython 3.11 (`cp311`): Matches standalone Python interpreter.
+  - Stable ABI (`abi3`): Accepted for packages targeting limited C API (e.g., `opencv-python`, `psutil`) where `PythonTag` indicates minimum supported CPython version (`cp37`, `cp36`).
+  - Architecture: `macosx_11_0_arm64`, `macosx_10_9_universal2`, or architecture-independent `any`.
+
+### 10.2 Cryptographic Lock Contract (`assets/wheelhouse-lock.json`)
+The lock document formally seals the entire wheelhouse:
+```json
+{
+  "schema_version": "1.0.0",
+  "target_platform": "darwin",
+  "target_architecture": "arm64",
+  "python_version": "3.11.9",
+  "python_abi": "cp311",
+  "wheel_count": 36,
+  "total_size_bytes": 173935126,
+  "dependencies": [ ... ]
+}
+```
+Every dependency specifies exact `name`, `version`, `filename`, `size_bytes`, `sha256`, `origin`, and `license`. Open ranges (`>=`, `~=`, `*`) are strictly rejected.
+
+### 10.3 Strict Offline Client Provisioning
+Client provisioning executes with complete isolation from external networks:
+```bash
+python -I -m pip install \
+  --no-index \
+  --find-links=<wheelhouse> \
+  --only-binary=:all: \
+  --disable-pip-version-check \
+  --no-cache-dir \
+  torch torchvision ultralytics pillow
+```
+Security and hermetic containment flags:
+1. `PIP_CONFIG_FILE=/dev/null`: Ignores host `~/.pip/pip.conf` or `/etc/pip.conf`.
+2. `PIP_NO_INDEX=1` and `--no-index`: Prohibits package index lookup.
+3. Subprocess Proxy Blackholing (`http_proxy=http://127.0.0.1:9`): Guarantees immediate fail-closed behavior if any internal component attempts network socket creation.
+4. `IsolateEnv()`: Scrubs host `PYTHONPATH`, `PYTHONHOME`, `VIRTUAL_ENV`, Homebrew, and user site packages.
+
+### 10.4 Apple Silicon Hardware Acceleration (MPS)
+Physical execution on Apple Silicon (M1/M2/M3/M4) validates Metal Performance Shaders (MPS):
+- `torch.backends.mps.is_available() == True`.
+- In-process probe validates tensor operations on the MPS device (`torch.ones(..., device='mps')`).
+- Controlled fallback to CPU is preserved if MPS is unavailable.
+
+### 10.5 Sizing, Footprint & Performance Metrics
+- **Wheelhouse Bundle Payload:** 36 binary wheels, `173,935,126` bytes (~165.88 MB).
+- **Python Standalone Archive:** `17,915,401` bytes (~17.08 MB).
+- **Installed Runtime Footprint:** `site-packages` consumes ~879 MB uncompressed on disk.
+- **Offline Installation Duration:** ~18–20 seconds on Apple Silicon M4 without internet latency.
+
+### 10.6 Licensing Audit & Boundary Gate
+- **Dependencies Licensing:**
+  - Permissive licenses: BSD-3-Clause (PyTorch, Torchvision, NumPy, SciPy, Pandas), MIT (Pillow, PyYAML, urllib3), Apache-2.0 (OpenCV, Requests), MPL-2.0 (Certifi), PSF-2.0 (CPython, Typing-extensions).
+  - Copyleft / Network copyleft: `ultralytics` and `ultralytics-thop` are licensed under AGPL-3.0. In accordance with GEO CAM architecture, the Vision Worker executes as an isolated standalone daemon communicating strictly over a loopback Unix domain socket (`protocol.go` / `worker.py`), preserving license boundary integrity.
+- **Model Gate:** `MODEL_REDISTRIBUTION_APPROVED=false` remains strictly enforced. Commercial YOLO model weights (`.pt`) are NOT included in the wheelhouse or repository.
+
+
 
 
 
