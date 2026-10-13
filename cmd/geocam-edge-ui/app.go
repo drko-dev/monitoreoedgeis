@@ -43,6 +43,11 @@ func (a *App) GetSaaSURL() string {
 	return a.installer.GetSaaSURL(a.ctx)
 }
 
+// TestSaaSConnection tests connectivity to a GEO CAM SaaS server.
+func (a *App) TestSaaSConnection(rawURL string) (*installer.ServerCheckResult, error) {
+	return a.installer.TestSaaSConnection(a.ctx, rawURL)
+}
+
 // ClaimDevice executes the secure one-time enrollment flow.
 func (a *App) ClaimDevice(req installer.ClaimRequest) (*installer.ClaimResult, error) {
 	res, err := a.installer.ClaimDevice(a.ctx, req)

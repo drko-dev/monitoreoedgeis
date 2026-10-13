@@ -1,10 +1,12 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useEnrollment } from '../hooks/useEnrollment';
 import { Button } from './Button';
 import { HelpLink } from './HelpLink';
 import { useI18n } from '../i18n/I18nContext';
 import { TranslationKey } from '../i18n/translations';
 import { docsLinks } from '../config/docsLinks';
+import { checkSaaSConnection } from '../services/api';
+import { ServerCheckResult } from '../types/installer';
 
 const ERROR_LABEL_KEYS: Record<string, TranslationKey> = {
   INVALID_CODE: 'enrollment.errorInvalidCode',
@@ -16,6 +18,7 @@ const ERROR_LABEL_KEYS: Record<string, TranslationKey> = {
   PERSISTENCE_ERROR: 'enrollment.errorPersistenceError',
   EDGE_ID_CONFLICT: 'enrollment.errorEdgeIdConflict',
   INVALID_SAAS_URL: 'enrollment.errorInvalidServerUrl',
+  SAAS_URL_REQUIRED: 'enrollment.errorInvalidServerUrl',
   CONFIG_WRITE_FAILED: 'enrollment.errorPersistenceError',
 };
 
@@ -35,6 +38,23 @@ export const EnrollmentWizard: React.FC<{ onComplete: () => void }> = ({ onCompl
     reset,
     canSubmit,
   } = useEnrollment();
+
+  const [testingServer, setTestingServer] = useState(false);
+  const [testResult, setTestResult] = useState<ServerCheckResult | null>(null);
+
+  const handleTestServer = async () => {
+    if (!saasUrl.trim() || testingServer) return;
+    setTestingServer(true);
+    setTestResult(null);
+    try {
+      const res = await checkSaaSConnection(saasUrl.trim());
+      setTestResult(res);
+    } catch {
+      setTestResult({ accessible: false, status: 'UNREACHABLE', message: 'Could not connect' });
+    } finally {
+      setTestingServer(false);
+    }
+  };
 
   const isClaiming = status === 'CLAIMING';
   const isSuccess = status === 'SUCCESS';
@@ -157,7 +177,31 @@ export const EnrollmentWizard: React.FC<{ onComplete: () => void }> = ({ onCompl
           </div>
         )}
 
-        <div className="enrollment-actions">
+        <div className="enrollment-actions" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={handleTestServer}
+              disabled={!saasUrl.trim() || isClaiming || testingServer}
+              loading={testingServer}
+            >
+              {testingServer ? t('enrollment.testingServer') : t('enrollment.testServer')}
+            </Button>
+            {testResult && (
+              <span
+                style={{
+                  marginLeft: '0.75rem',
+                  fontSize: '0.875rem',
+                  color: testResult.accessible ? 'var(--success, #10b981)' : 'var(--danger, #ef4444)',
+                }}
+              >
+                {testResult.accessible
+                  ? `✓ ${t('enrollment.serverAccessible')}`
+                  : `✗ ${testResult.status === 'INVALID_TLS' ? t('enrollment.serverInvalidTls') : t('enrollment.serverUnreachable')}`}
+              </span>
+            )}
+          </div>
           <Button
             variant="primary"
             onClick={submit}

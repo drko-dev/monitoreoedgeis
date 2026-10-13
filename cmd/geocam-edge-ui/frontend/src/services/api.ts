@@ -31,7 +31,9 @@ import {
   PlanCameraOnboarding,
   ApplyCameraOnboarding,
   CancelCameraOnboarding,
+  TestSaaSConnection,
 } from '../../wailsjs/go/main/App';
+import { ServerCheckResult } from '../types/installer';
 
 // fetchSystemReport calls the Go facade via Wails binding
 export async function fetchSystemReport(): Promise<SystemReport> {
@@ -99,6 +101,23 @@ export async function fetchSaaSURL(): Promise<string> {
     return (await GetSaaSURL()) || '';
   } catch {
     return '';
+  }
+}
+
+// checkSaaSConnection tests reachability and responsiveness of the target SaaS server
+export async function checkSaaSConnection(url: string): Promise<ServerCheckResult> {
+  try {
+    const res = await TestSaaSConnection(url);
+    if (res && typeof res === 'object') {
+      return res as ServerCheckResult;
+    }
+    return { accessible: false, status: 'UNREACHABLE', message: 'No response from test runner' };
+  } catch (err: unknown) {
+    return {
+      accessible: false,
+      status: 'UNREACHABLE',
+      message: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
