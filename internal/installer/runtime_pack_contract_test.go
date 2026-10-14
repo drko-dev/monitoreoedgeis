@@ -118,14 +118,15 @@ func TestBuildRuntimePackWorkerLaunchSpec(t *testing.T) {
 	// No host Python, Homebrew or other host tools are visible to this test.
 	t.Setenv("PATH", t.TempDir())
 	modelsDir := filepath.Join(t.TempDir(), "persistent", "models")
-	spec, err := BuildRuntimePackWorkerLaunchSpec(manifest, root, modelsDir, PlatformDarwin, ArchArm64)
+	stateDir := filepath.Join(t.TempDir(), "persistent", "worker")
+	spec, err := BuildRuntimePackWorkerLaunchSpec(manifest, root, modelsDir, stateDir, PlatformDarwin, ArchArm64)
 	if err != nil {
 		t.Fatalf("build launch spec: %v", err)
 	}
 	if spec.Command != filepath.Join(root, manifest.Python.RelativeBinaryPath) {
 		t.Fatalf("worker command is not bundled Python: %s", spec.Command)
 	}
-	if len(spec.Args) != 2 || spec.Args[0] != "-I" || spec.Args[1] != filepath.Join(root, manifest.Worker.Entrypoint) {
+	if len(spec.Args) != 3 || spec.Args[0] != "-I" || spec.Args[1] != "-B" || spec.Args[2] != filepath.Join(root, manifest.Worker.Entrypoint) {
 		t.Fatalf("unexpected isolated worker args: %#v", spec.Args)
 	}
 	for _, forbidden := range []string{"PYTHONPATH=", "PYTHONHOME=", "http_proxy=", "https_proxy="} {
@@ -142,7 +143,7 @@ func TestBuildRuntimePackWorkerLaunchSpec(t *testing.T) {
 
 func TestBuildRuntimePackWorkerLaunchSpecRequiresPersistentAbsoluteModelsPath(t *testing.T) {
 	root, manifest := syntheticMediaPack(t)
-	if _, err := BuildRuntimePackWorkerLaunchSpec(manifest, root, "models", PlatformDarwin, ArchArm64); err == nil {
+	if _, err := BuildRuntimePackWorkerLaunchSpec(manifest, root, "models", "state", PlatformDarwin, ArchArm64); err == nil {
 		t.Fatal("expected relative models directory to be rejected")
 	}
 }
@@ -152,7 +153,7 @@ func TestBuildRuntimePackWorkerLaunchSpecRejectsNonExecutablePython(t *testing.T
 	if err := os.Chmod(filepath.Join(root, manifest.Python.RelativeBinaryPath), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := BuildRuntimePackWorkerLaunchSpec(manifest, root, filepath.Join(t.TempDir(), "models"), PlatformDarwin, ArchArm64)
+	_, err := BuildRuntimePackWorkerLaunchSpec(manifest, root, filepath.Join(t.TempDir(), "models"), filepath.Join(t.TempDir(), "state"), PlatformDarwin, ArchArm64)
 	if !errors.Is(err, ErrRuntimePackPythonNotExecutable) {
 		t.Fatalf("expected non-executable Python rejection, got %v", err)
 	}
