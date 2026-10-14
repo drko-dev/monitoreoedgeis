@@ -47,11 +47,21 @@ class H7BPolicyTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {
             "DYLD_INSERT_LIBRARIES": "/host/malicious.dylib",
             "PYTHONPATH": "/host/packages", "HTTP_PROXY": "http://host:8080",
-            "HTTPS_PROXY": "http://host:8080",
+            "HTTPS_PROXY": "http://host:8080", "ALL_PROXY": "socks5://host:1080",
+            "FTP_PROXY": "http://host:8080", "NO_PROXY": "localhost",
+            "http_proxy": "http://host:8080", "https_proxy": "http://host:8080",
+            "all_proxy": "socks5://host:1080", "no_proxy": "localhost",
+            "CURL_CA_BUNDLE": "/host/evil.crt", "SSL_CERT_FILE": "/host/evil.crt",
+            "RES_OPTIONS": "nameserver:8.8.8.8", "HOSTALIASES": "/host/hosts",
             "GOPROXY": "https://proxy.invalid",
         }):
             env = h7b.audited_environment()
-        for key in ("DYLD_INSERT_LIBRARIES", "PYTHONPATH", "HTTP_PROXY", "HTTPS_PROXY"):
+        for key in (
+            "DYLD_INSERT_LIBRARIES", "PYTHONPATH", "HTTP_PROXY", "HTTPS_PROXY",
+            "ALL_PROXY", "FTP_PROXY", "NO_PROXY", "http_proxy", "https_proxy",
+            "all_proxy", "no_proxy", "CURL_CA_BUNDLE", "SSL_CERT_FILE",
+            "RES_OPTIONS", "HOSTALIASES",
+        ):
             self.assertNotIn(key, env)
         self.assertEqual(env["GOPROXY"], "off")
         self.assertEqual(env["PIP_NO_INDEX"], "1")

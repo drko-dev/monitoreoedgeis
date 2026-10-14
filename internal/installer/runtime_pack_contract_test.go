@@ -158,3 +158,44 @@ func TestBuildRuntimePackWorkerLaunchSpecRejectsNonExecutablePython(t *testing.T
 		t.Fatalf("expected non-executable Python rejection, got %v", err)
 	}
 }
+
+func TestBuildRuntimePackWorkerLaunchSpecAdversarialIsolation(t *testing.T) {
+	root, manifest := syntheticMediaPack(t)
+	// Inject adversarial environment into the host test process
+	t.Setenv("HTTP_PROXY", "http://proxy.attacker.internal:8080")
+	t.Setenv("HTTPS_PROXY", "http://proxy.attacker.internal:8080")
+	t.Setenv("ALL_PROXY", "socks5://proxy.attacker.internal:1080")
+	t.Setenv("FTP_PROXY", "http://proxy.attacker.internal:8080")
+	t.Setenv("NO_PROXY", "localhost,127.0.0.1")
+	t.Setenv("http_proxy", "http://proxy.attacker.internal:8080")
+	t.Setenv("https_proxy", "http://proxy.attacker.internal:8080")
+	t.Setenv("all_proxy", "socks5://proxy.attacker.internal:1080")
+	t.Setenv("CURL_CA_BUNDLE", "/etc/ssl/evil.crt")
+	t.Setenv("SSL_CERT_FILE", "/etc/ssl/evil.crt")
+	t.Setenv("RES_OPTIONS", "nameserver:8.8.8.8")
+	t.Setenv("DYLD_INSERT_LIBRARIES", "/usr/local/lib/inject.dylib")
+	t.Setenv("LD_PRELOAD", "/usr/local/lib/preload.so")
+
+	modelsDir := filepath.Join(t.TempDir(), "models")
+	stateDir := filepath.Join(t.TempDir(), "state")
+
+	spec, err := BuildRuntimePackWorkerLaunchSpec(manifest, root, modelsDir, stateDir, PlatformDarwin, ArchArm64)
+	if err != nil {
+		t.Fatalf("BuildRuntimePackWorkerLaunchSpec failed: %v", err)
+	}
+
+	forbiddenPrefixes := []string{
+		"http_proxy=", "https_proxy=", "all_proxy=", "ftp_proxy=", "no_proxy=",
+		"curl_ca_bundle=", "ssl_cert_file=", "res_options=", "dyld_insert_libraries=", "ld_preload=",
+		"pythonpath=", "pythonhome=",
+	}
+
+	for _, entry := range spec.Environment {
+		lower := strings.ToLower(entry)
+		for _, prefix := range forbiddenPrefixes {
+			if strings.HasPrefix(lower, prefix) {
+				t.Fatalf("forbidden variable leaked into hermetic worker environment: %s", entry)
+			}
+		}
+	}
+}

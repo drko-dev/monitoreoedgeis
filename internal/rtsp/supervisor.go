@@ -181,7 +181,7 @@ func (s *Supervisor) run(ctx context.Context) {
 
 		s.logger.Info("connecting to camera stream", "addr", s.target.Addr, "path", s.target.RTSPPath)
 
-		session, err := Dial(ctx, s.target.Addr, s.target.RTSPPath, s.target.Username, s.target.Password, s.cfg.DialTimeout)
+		session, err := DialWithDialContext(ctx, s.target.Addr, s.target.RTSPPath, s.target.Username, s.target.Password, s.cfg.DialTimeout, s.cfg.DialContext)
 		if err != nil {
 			if errors.Is(err, ErrTimeout) || isTimeout(err) || errors.Is(err, context.DeadlineExceeded) {
 				s.incrementTimeout()

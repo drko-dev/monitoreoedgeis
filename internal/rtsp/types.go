@@ -1,7 +1,9 @@
 package rtsp
 
 import (
+	"context"
 	"errors"
+	"net"
 	"time"
 )
 
@@ -82,7 +84,10 @@ type Config struct {
 	InitialBackoff time.Duration // Reconnect initial backoff (default 1s)
 	MaxBackoff     time.Duration // Reconnect maximum backoff (default 60s)
 	DialTimeout    time.Duration // TCP dial / handshake timeout (default 5s)
-	Enabled        bool          // Whether connectivity supervision is enabled
+	// DialContext is opt-in: when set, restricts transport connects (e.g. H7
+	// loopback-only lab). Nil preserves ordinary LAN camera connectivity.
+	DialContext func(context.Context, string, string) (net.Conn, error)
+	Enabled     bool // Whether connectivity supervision is enabled
 }
 
 // DefaultConfig returns safe production defaults for Hito G.
