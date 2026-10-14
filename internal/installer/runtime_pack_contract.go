@@ -14,6 +14,7 @@ var (
 	ErrRuntimePackMediaMissing        = errors.New("runtime pack is missing a required media binary")
 	ErrRuntimePackMediaNotExecutable  = errors.New("runtime pack media binary is not executable")
 	ErrRuntimePackPythonNotExecutable = errors.New("runtime pack Python interpreter is not executable")
+	ErrRuntimePackArtifactsUnverified = errors.New("runtime pack artifacts were not verified")
 )
 
 // RuntimePackMediaPaths contains only media executables declared by and resolved
@@ -109,20 +110,43 @@ func resolvePackArtifact(root, relativePath string) (string, error) {
 // existing internal/vision.Worker supervisor. H4A builds this metadata only;
 // it does not start Python, load models, or assert inference readiness.
 type RuntimePackWorkerLaunchSpec struct {
-	Command      string
-	Args         []string
-	Environment  []string
-	FFmpeg       string
-	FFprobe      string
-	ModelsDir    string
-	StartTimeout time.Duration
+	RuntimePackRoot   string
+	Command           string
+	Args              []string
+	Environment       []string
+	FFmpeg            string
+	FFprobe           string
+	ModelsDir         string
+	StartTimeout      time.Duration
+	modelsAuthorized  bool
+	artifactsVerified bool
 }
+
+// ArtifactsVerified reports whether the launch contract was built after
+// validating the pack manifest, every declared artifact, and executable modes.
+func (s RuntimePackWorkerLaunchSpec) ArtifactsVerified() bool { return s.artifactsVerified }
+
+func (s RuntimePackWorkerLaunchSpec) RuntimePackRootPath() string { return s.RuntimePackRoot }
+func (s RuntimePackWorkerLaunchSpec) CommandPath() string         { return s.Command }
+func (s RuntimePackWorkerLaunchSpec) CommandArgs() []string       { return append([]string(nil), s.Args...) }
+func (s RuntimePackWorkerLaunchSpec) ProcessEnvironment() []string {
+	return append([]string(nil), s.Environment...)
+}
+func (s RuntimePackWorkerLaunchSpec) PersistentModelsDir() string { return s.ModelsDir }
+func (s RuntimePackWorkerLaunchSpec) ProcessStartTimeout() time.Duration {
+	return s.StartTimeout
+}
+
+// ModelsAuthorized reports whether this release was explicitly authorized to
+// ship a model pack. H4B keeps this false until model provenance and licensing
+// are approved; a healthy worker must not imply authorized inference.
+func (s RuntimePackWorkerLaunchSpec) ModelsAuthorized() bool { return s.modelsAuthorized }
 
 // BuildRuntimePackWorkerLaunchSpec creates a hermetic command/environment
 // contract from verified pack paths and caller-authorized persistent paths.
 // Python's isolated mode and a pack-only PATH prevent host Python packages and
 // host FFmpeg from becoming implicit fallbacks.
-func BuildRuntimePackWorkerLaunchSpec(manifest *RuntimeManifest, rootDir, modelsDir, targetOS, targetArch string) (RuntimePackWorkerLaunchSpec, error) {
+func BuildRuntimePackWorkerLaunchSpec(manifest *RuntimeManifest, rootDir, modelsDir, stateDir, targetOS, targetArch string) (RuntimePackWorkerLaunchSpec, error) {
 	var spec RuntimePackWorkerLaunchSpec
 	if manifest == nil {
 		return spec, errors.New("runtime manifest is nil")
@@ -133,6 +157,9 @@ func BuildRuntimePackWorkerLaunchSpec(manifest *RuntimeManifest, rootDir, models
 	}
 	if !filepath.IsAbs(modelsDir) {
 		return spec, errors.New("persistent models directory must be an absolute path")
+	}
+	if !filepath.IsAbs(stateDir) {
+		return spec, errors.New("persistent worker state directory must be an absolute path")
 	}
 	root, err := filepath.Abs(filepath.Clean(rootDir))
 	if err != nil {
@@ -158,14 +185,18 @@ func BuildRuntimePackWorkerLaunchSpec(manifest *RuntimeManifest, rootDir, models
 		return spec, fmt.Errorf("resolve bundled worker: %w", err)
 	}
 	cleanModelsDir := filepath.Clean(modelsDir)
+	cleanStateDir := filepath.Clean(stateDir)
 	mediaDir := filepath.Dir(media.FFmpeg)
 	return RuntimePackWorkerLaunchSpec{
-		Command:      pythonPath,
-		Args:         []string{"-I", workerPath},
-		Environment:  []string{"PATH=" + mediaDir, "GEOCAM_VIDEO_FFMPEG_PATH=" + media.FFmpeg, "GEOCAM_VIDEO_FFPROBE_PATH=" + media.FFprobe, "GEOCAM_EDGE_YOLO_MODELS_DIR=" + cleanModelsDir, "PYTHONNOUSERSITE=1", "PYTHONDONTWRITEBYTECODE=1"},
-		FFmpeg:       media.FFmpeg,
-		FFprobe:      media.FFprobe,
-		ModelsDir:    cleanModelsDir,
-		StartTimeout: 30 * time.Second,
+		RuntimePackRoot:   root,
+		Command:           pythonPath,
+		Args:              []string{"-I", "-B", workerPath},
+		Environment:       []string{"PATH=" + mediaDir, "HOME=" + cleanStateDir, "TMPDIR=" + filepath.Join(cleanStateDir, "tmp"), "GEOCAM_VIDEO_FFMPEG_PATH=" + media.FFmpeg, "GEOCAM_VIDEO_FFPROBE_PATH=" + media.FFprobe, "GEOCAM_EDGE_YOLO_MODELS_DIR=" + cleanModelsDir},
+		FFmpeg:            media.FFmpeg,
+		FFprobe:           media.FFprobe,
+		ModelsDir:         cleanModelsDir,
+		StartTimeout:      30 * time.Second,
+		modelsAuthorized:  false,
+		artifactsVerified: true,
 	}, nil
 }

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -18,6 +19,20 @@ import (
 // every other subsystem instead of a bespoke goroutine kicked off from New.
 type visionModule struct {
 	worker *vision.Worker
+}
+
+// bundledVisionLaunchContract is implemented by the installer package's
+// verified Runtime Pack launch spec. The narrow interface avoids a package
+// cycle: installer already imports agent for its onboarding UI.
+type bundledVisionLaunchContract interface {
+	ArtifactsVerified() bool
+	ModelsAuthorized() bool
+	RuntimePackRootPath() string
+	CommandPath() string
+	CommandArgs() []string
+	ProcessEnvironment() []string
+	PersistentModelsDir() string
+	ProcessStartTimeout() time.Duration
 }
 
 func (m *visionModule) Name() string                    { return "edge-vision" }
@@ -64,6 +79,44 @@ func buildVisionSink(cfg *config.Config, reporter *health.Reporter, consumer vis
 
 	sink := vision.NewSink(worker, models, reporter, consumer, log)
 	return sink, &visionModule{worker: worker}
+}
+
+// buildBundledVisionSink adapts only a verified Runtime Pack launch contract
+// to the existing Worker supervisor. It deliberately preserves the legacy
+// buildVisionSink path; callers must opt into this function explicitly.
+func buildBundledVisionSink(cfg *config.Config, reporter *health.Reporter, consumer vision.EventConsumer, launch bundledVisionLaunchContract, log *slog.Logger) (*vision.Sink, Module, error) {
+	if launch == nil {
+		return nil, nil, errors.New("bundled vision launch contract is nil")
+	}
+	if !launch.ArtifactsVerified() {
+		return nil, nil, errors.New("bundled runtime pack artifacts were not verified")
+	}
+	if !launch.ModelsAuthorized() {
+		return nil, nil, vision.ErrHermeticModelPackUnauthorized
+	}
+	modelsDir := launch.PersistentModelsDir()
+	models := vision.NewModelManager(modelsDir, cfg.EdgeYOLOPersonModel, cfg.EdgeYOLOVehicleModel)
+	worker := vision.NewWorker(vision.Config{
+		WorkerCmd:           launch.CommandPath(),
+		WorkerArgs:          launch.CommandArgs(),
+		Hermetic:            true,
+		RuntimePackRoot:     launch.RuntimePackRootPath(),
+		ProcessEnv:          launch.ProcessEnvironment(),
+		ModelPackAuthorized: launch.ModelsAuthorized(),
+		ModelsDir:           modelsDir,
+		PersonModel:         cfg.EdgeYOLOPersonModel,
+		VehicleModel:        cfg.EdgeYOLOVehicleModel,
+		PersonConfidence:    cfg.EdgeYOLOPersonConfidence,
+		VehicleConfidence:   cfg.EdgeYOLOVehicleConfidence,
+		NMSIoU:              cfg.EdgeYOLONMSIoU,
+		Device:              cfg.EdgeYOLODevice,
+		ImgSize:             cfg.EdgeYOLOImgSize,
+		SocketPath:          cfg.EdgeYOLOSocketPath,
+		StartTimeout:        launch.ProcessStartTimeout(),
+		InferTimeout:        cfg.EdgeYOLOInferTimeout,
+	}, models, log)
+	sink := vision.NewSink(worker, models, reporter, consumer, log)
+	return sink, &visionModule{worker: worker}, nil
 }
 
 // newVisionSink builds Milestone K's local-inference routing destination

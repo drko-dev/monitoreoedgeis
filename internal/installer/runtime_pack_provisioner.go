@@ -291,8 +291,11 @@ func inspectRuntimePack(root, manifestName, expectedManifestSHA256, targetOS, ta
 	if _, err := ResolveRuntimePackMedia(manifest, canonicalRoot, targetOS, targetArch); err != nil {
 		return inspected, err
 	}
-	modelsDir := filepath.Join(canonicalRoot, ".models-not-shipped")
-	if _, err := BuildRuntimePackWorkerLaunchSpec(manifest, canonicalRoot, modelsDir, targetOS, targetArch); err != nil {
+	// Non-executing contract check only. Persistent model/state paths must be
+	// provided independently before any real Worker launch is authorized.
+	modelsDir := filepath.Join(filepath.Dir(canonicalRoot), ".models-not-shipped")
+	stateDir := filepath.Join(filepath.Dir(canonicalRoot), ".worker-state-not-provisioned")
+	if _, err := BuildRuntimePackWorkerLaunchSpec(manifest, canonicalRoot, modelsDir, stateDir, targetOS, targetArch); err != nil {
 		return inspected, err
 	}
 	return inspectedRuntimePack{manifest: manifest, manifestSHA256: digest}, nil
