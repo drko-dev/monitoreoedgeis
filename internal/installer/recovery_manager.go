@@ -35,6 +35,7 @@ const (
 
 var (
 	ErrRecoveryLockHeld         = errors.New("recovery manager lock already held by another process")
+	ErrRecoveryLockNotHeld      = errors.New("recovery manager lock must be held for filesystem operations")
 	ErrRecoveryAmbiguous        = errors.New("ambiguous recovery state: both active and backup exist with data")
 	ErrJournalCorrupt           = errors.New("recovery journal corrupted or checksum mismatch")
 	ErrSecurityEscapingSymlink  = errors.New("security violation: path escapes authorized root directory")
@@ -44,11 +45,12 @@ var (
 )
 
 const (
-	ErrCodeRecoveryLockHeld  = "RECOVERY_LOCK_HELD"
-	ErrCodeRecoveryAmbiguous = "RECOVERY_AMBIGUOUS_BACKUP"
-	ErrCodeJournalCorrupt    = "RECOVERY_JOURNAL_CORRUPT"
-	ErrCodeRollbackFailed    = "RECOVERY_ROLLBACK_FAILED"
-	ErrCodeRecoveryFailed    = "RECOVERY_FAILED"
+	ErrCodeRecoveryLockHeld     = "RECOVERY_LOCK_HELD"
+	ErrCodeRecoveryLockRequired = "RECOVERY_LOCK_REQUIRED"
+	ErrCodeRecoveryAmbiguous    = "RECOVERY_AMBIGUOUS_BACKUP"
+	ErrCodeJournalCorrupt       = "RECOVERY_JOURNAL_CORRUPT"
+	ErrCodeRollbackFailed       = "RECOVERY_ROLLBACK_FAILED"
+	ErrCodeRecoveryFailed       = "RECOVERY_FAILED"
 )
 
 // JournalRecord is the persisted, checksummed record of a recovery transaction.
@@ -84,10 +86,29 @@ func (r *JournalRecord) computeHash() string {
 }
 
 func (r *JournalRecord) isValid() bool {
-	if r == nil || r.Version != 1 || r.TxID == "" || r.Target == "" {
+	if r == nil || r.Version != 1 || r.TxID == "" || !validTargetName(r.Target) || r.Timestamp.IsZero() {
+		return false
+	}
+	if strings.ContainsAny(r.TxID, "/\\:\x00") || strings.Contains(r.TxID, "..") || r.ActivePath != r.Target ||
+		r.StagingPath != fmt.Sprintf(".staging.%s.%s", r.Target, r.TxID) {
+		return false
+	}
+	if r.BackupPath != "" && r.BackupPath != fmt.Sprintf(".backup.%s.%s", r.Target, r.TxID) {
+		return false
+	}
+	switch r.State {
+	case JournalStateIdle, JournalStatePreparing, JournalStateStaged, JournalStateBackingUp,
+		JournalStateBackedUp, JournalStateActivating, JournalStateActivated,
+		JournalStateRollingBack, JournalStateRolledBack, JournalStateCommitted, JournalStateFailed:
+	default:
 		return false
 	}
 	return r.RecordHash == r.computeHash()
+}
+
+func validTargetName(name string) bool {
+	return name != "" && name != "." && name != ".." && filepath.Base(name) == name &&
+		filepath.Clean(name) == name && !strings.ContainsAny(name, "/\\:\x00")
 }
 
 // FaultInjector allows synthetic injection of failures to test crash and recovery behavior.
@@ -115,6 +136,7 @@ type RecoveryManager struct {
 	lockFile      *os.File
 	currentTx     *JournalRecord
 	faultInjector *FaultInjector
+	syncDirectory func(string) error
 }
 
 // NewRecoveryManager initializes a RecoveryManager confined to baseDir.
@@ -141,10 +163,11 @@ func NewRecoveryManager(baseDir string) (*RecoveryManager, error) {
 	recoveryLocksMu.Unlock()
 
 	return &RecoveryManager{
-		baseDir:     canonBase,
-		journalPath: filepath.Join(canonBase, "recovery.journal"),
-		lockPath:    filepath.Join(canonBase, ".recovery.lock"),
-		pathMutex:   pMu,
+		baseDir:       canonBase,
+		journalPath:   filepath.Join(canonBase, "recovery.journal"),
+		lockPath:      filepath.Join(canonBase, ".recovery.lock"),
+		pathMutex:     pMu,
+		syncDirectory: syncDir,
 	}, nil
 }
 
@@ -155,6 +178,9 @@ func (m *RecoveryManager) SetFaultInjector(fi *FaultInjector) {
 
 // AcquireLock acquires in-process mutex and cross-process advisory lock.
 func (m *RecoveryManager) AcquireLock(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !m.pathMutex.TryLock() {
 		return &SafeError{
 			Code:        ErrCodeRecoveryLockHeld,
@@ -162,6 +188,13 @@ func (m *RecoveryManager) AcquireLock(ctx context.Context) error {
 			Recoverable: false,
 			Err:         ErrRecoveryLockHeld,
 		}
+	}
+	if info, err := os.Lstat(m.lockPath); err == nil && !info.Mode().IsRegular() {
+		m.pathMutex.Unlock()
+		return fmt.Errorf("%w: recovery lock must be a regular file", ErrSecurityEscapingSymlink)
+	} else if err != nil && !os.IsNotExist(err) {
+		m.pathMutex.Unlock()
+		return fmt.Errorf("failed to inspect recovery lock file: %w", err)
 	}
 
 	f, err := os.OpenFile(m.lockPath, os.O_CREATE|os.O_RDWR, 0o600)
@@ -187,14 +220,20 @@ func (m *RecoveryManager) AcquireLock(ctx context.Context) error {
 
 // ReleaseLock releases both lock layers safely.
 func (m *RecoveryManager) ReleaseLock() {
-	if m.lockFile != nil {
-		_ = fileUnlock(m.lockFile)
-		_ = m.lockFile.Close()
-		m.lockFile = nil
+	if m == nil || m.lockFile == nil {
+		return
 	}
-	if m.pathMutex != nil {
-		m.pathMutex.Unlock()
+	_ = fileUnlock(m.lockFile)
+	_ = m.lockFile.Close()
+	m.lockFile = nil
+	m.pathMutex.Unlock()
+}
+
+func (m *RecoveryManager) requireLock() error {
+	if m == nil || m.lockFile == nil {
+		return &SafeError{Code: ErrCodeRecoveryLockRequired, SafeMessage: "Acquire the recovery lock before filesystem operations", Recoverable: true, Err: ErrRecoveryLockNotHeld}
 	}
+	return nil
 }
 
 // validateConfinement guarantees that a path is strictly inside baseDir and does not escape via symlinks.
@@ -262,10 +301,15 @@ func (m *RecoveryManager) writeJournal(record *JournalRecord) error {
 		return fmt.Errorf("failed to marshal journal record: %w", err)
 	}
 
-	tmpJournal := fmt.Sprintf("%s.tmp.%d", m.journalPath, os.Getpid())
-	f, err := os.OpenFile(tmpJournal, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	f, err := os.CreateTemp(m.baseDir, ".recovery.journal.tmp-*")
 	if err != nil {
-		return fmt.Errorf("failed to create temporary journal %s: %w", tmpJournal, err)
+		return fmt.Errorf("failed to create temporary journal: %w", err)
+	}
+	tmpJournal := f.Name()
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpJournal)
+		return fmt.Errorf("failed to set temporary journal permissions: %w", err)
 	}
 
 	if _, err := f.Write(data); err != nil {
@@ -287,14 +331,17 @@ func (m *RecoveryManager) writeJournal(record *JournalRecord) error {
 		_ = os.Remove(tmpJournal)
 		return fmt.Errorf("failed to fsync temporary journal: %w", err)
 	}
-	_ = f.Close()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpJournal)
+		return fmt.Errorf("failed to close temporary journal: %w", err)
+	}
 
 	if err := os.Rename(tmpJournal, m.journalPath); err != nil {
 		_ = os.Remove(tmpJournal)
 		return fmt.Errorf("failed to atomic rename journal to %s: %w", m.journalPath, err)
 	}
 
-	if err := syncDir(m.baseDir); err != nil {
+	if err := m.syncDirectory(m.baseDir); err != nil {
 		return fmt.Errorf("failed to fsync base directory after journal update: %w", err)
 	}
 
@@ -309,6 +356,16 @@ func (m *RecoveryManager) writeJournal(record *JournalRecord) error {
 }
 
 func (m *RecoveryManager) readJournal() (*JournalRecord, error) {
+	info, err := os.Lstat(m.journalPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, &SafeError{Code: ErrCodeJournalCorrupt, SafeMessage: "Journal must be a regular file", Recoverable: false, Err: ErrJournalCorrupt}
+	}
 	data, err := os.ReadFile(m.journalPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -344,17 +401,42 @@ func (m *RecoveryManager) readJournal() (*JournalRecord, error) {
 			Err:         ErrJournalCorrupt,
 		}
 	}
+	for _, path := range []string{rec.ActivePath, rec.StagingPath, rec.BackupPath} {
+		if path == "" {
+			continue
+		}
+		if _, err := m.validateConfinement(path); err != nil {
+			return nil, &SafeError{Code: ErrCodeJournalCorrupt, SafeMessage: "Journal contains an unsafe runtime path", Recoverable: false, Err: ErrJournalCorrupt}
+		}
+	}
 
 	return &rec, nil
 }
 
 // Begin initiates a new recovery transaction and creates an isolated staging directory.
 func (m *RecoveryManager) Begin(ctx context.Context, targetName, targetVer, expectedHash string) (string, error) {
+	if err := m.requireLock(); err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if m.currentTx == nil {
+		existing, err := m.readJournal()
+		if err != nil {
+			return "", err
+		}
+		if existing != nil {
+			m.currentTx = existing
+		}
+	}
 	if m.currentTx != nil && m.currentTx.State != JournalStateIdle && m.currentTx.State != JournalStateCommitted && m.currentTx.State != JournalStateRolledBack {
-		return "", ErrTransactionInProgress
+		return "", fmt.Errorf("%w: reconcile the persisted transaction before beginning another", ErrTransactionInProgress)
 	}
 
-	targetName = filepath.Clean(targetName)
+	if !validTargetName(targetName) {
+		return "", fmt.Errorf("%w: target must be a single safe directory name", ErrSecurityEscapingSymlink)
+	}
 	if _, err := m.validateConfinement(targetName); err != nil {
 		return "", err
 	}
@@ -394,6 +476,15 @@ func (m *RecoveryManager) Begin(ctx context.Context, targetName, targetVer, expe
 // CommitStaged verifies staging, atomically backs up active, swaps staging into active,
 // verifies active, and marks transaction COMMITTED. If anything fails, it rolls back safely.
 func (m *RecoveryManager) CommitStaged(ctx context.Context, verifyFn func(path string) error) error {
+	if err := m.requireLock(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if verifyFn == nil {
+		return errors.New("staged runtime verification function is required")
+	}
 	if m.currentTx == nil || m.currentTx.State != JournalStatePreparing {
 		return ErrTransactionNotInProgress
 	}
@@ -402,13 +493,15 @@ func (m *RecoveryManager) CommitStaged(ctx context.Context, verifyFn func(path s
 	activeFull := filepath.Join(m.baseDir, m.currentTx.ActivePath)
 
 	// 1. Verify staging directory contents
-	if verifyFn != nil {
-		if err := verifyFn(stagingFull); err != nil {
-			_ = os.RemoveAll(stagingFull)
-			m.currentTx.State = JournalStateIdle
-			_ = m.writeJournal(m.currentTx)
-			return fmt.Errorf("staging verification failed: %w", err)
+	if err := verifyFn(stagingFull); err != nil {
+		if removeErr := os.RemoveAll(stagingFull); removeErr != nil {
+			return fmt.Errorf("staging verification failed (%v); staging cleanup failed: %w", err, removeErr)
 		}
+		m.currentTx.State = JournalStateIdle
+		if journalErr := m.writeJournal(m.currentTx); journalErr != nil {
+			return fmt.Errorf("staging verification failed (%v); unable to persist idle state: %w", err, journalErr)
+		}
+		return fmt.Errorf("staging verification failed: %w", err)
 	}
 
 	// 2. Mark STAGED
@@ -447,7 +540,9 @@ func (m *RecoveryManager) CommitStaged(ctx context.Context, verifyFn func(path s
 		if err := os.Rename(activeFull, backupFull); err != nil {
 			return fmt.Errorf("failed to move active to backup: %w", err)
 		}
-		_ = syncDir(m.baseDir)
+		if err := m.syncDirectory(m.baseDir); err != nil {
+			return fmt.Errorf("failed to sync directory after backup rename: %w", err)
+		}
 
 		if m.faultInjector != nil && m.faultInjector.AfterRename != nil {
 			if err := m.faultInjector.AfterRename(activeFull, backupFull); err != nil {
@@ -478,14 +573,22 @@ func (m *RecoveryManager) CommitStaged(ctx context.Context, verifyFn func(path s
 	if err := os.Rename(stagingFull, activeFull); err != nil {
 		// Staging rename failed! If backup exists, restore active from backup immediately
 		if backupFull != "" {
-			_ = os.Rename(backupFull, activeFull)
-			_ = syncDir(m.baseDir)
+			if restoreErr := os.Rename(backupFull, activeFull); restoreErr != nil {
+				return m.failRollback(backupFull, activeFull, restoreErr)
+			}
+			if syncErr := m.syncDirectory(m.baseDir); syncErr != nil {
+				return fmt.Errorf("backup restored but directory sync failed: %w", syncErr)
+			}
 		}
 		m.currentTx.State = JournalStateRolledBack
-		_ = m.writeJournal(m.currentTx)
+		if journalErr := m.writeJournal(m.currentTx); journalErr != nil {
+			return fmt.Errorf("activation failed and rollback journal update failed: %w", journalErr)
+		}
 		return fmt.Errorf("failed to activate staging to active: %w", err)
 	}
-	_ = syncDir(m.baseDir)
+	if err := m.syncDirectory(m.baseDir); err != nil {
+		return fmt.Errorf("failed to sync directory after activation: %w", err)
+	}
 
 	if m.faultInjector != nil && m.faultInjector.AfterRename != nil {
 		if err := m.faultInjector.AfterRename(stagingFull, activeFull); err != nil {
@@ -500,11 +603,11 @@ func (m *RecoveryManager) CommitStaged(ctx context.Context, verifyFn func(path s
 	}
 
 	// 5. Post-activation verification
-	if verifyFn != nil {
-		if err := verifyFn(activeFull); err != nil {
-			// Verification failed! Execute rollback!
-			return m.rollbackInternal(activeFull, backupFull, err)
-		}
+	if err := ctx.Err(); err != nil {
+		return m.rollbackInternal(activeFull, backupFull, err)
+	}
+	if err := verifyFn(activeFull); err != nil {
+		return m.rollbackInternal(activeFull, backupFull, err)
 	}
 
 	// 6. Commit transaction
@@ -516,13 +619,19 @@ func (m *RecoveryManager) CommitStaged(ctx context.Context, verifyFn func(path s
 
 	// Remove backup only after verification and commit succeed
 	if backupFull != "" {
-		_ = os.RemoveAll(backupFull)
-		_ = syncDir(m.baseDir)
+		if err := os.RemoveAll(backupFull); err != nil {
+			return fmt.Errorf("runtime committed; unable to prune verified backup: %w", err)
+		}
+		if err := m.syncDirectory(m.baseDir); err != nil {
+			return fmt.Errorf("runtime committed; backup cleanup sync failed: %w", err)
+		}
 	}
 
 	m.currentTx.State = JournalStateIdle
 	m.currentTx.Timestamp = time.Now().UTC()
-	_ = m.writeJournal(m.currentTx)
+	if err := m.writeJournal(m.currentTx); err != nil {
+		return fmt.Errorf("runtime committed but idle journal update failed: %w", err)
+	}
 
 	_ = activeFi
 	return nil
@@ -531,17 +640,25 @@ func (m *RecoveryManager) CommitStaged(ctx context.Context, verifyFn func(path s
 func (m *RecoveryManager) rollbackInternal(activeFull, backupFull string, causeErr error) error {
 	m.currentTx.State = JournalStateRollingBack
 	m.currentTx.Timestamp = time.Now().UTC()
-	_ = m.writeJournal(m.currentTx)
+	if err := m.writeJournal(m.currentTx); err != nil {
+		return fmt.Errorf("failed to persist rollback intent; active and backup preserved: %w", err)
+	}
 
 	// Clean defective active directory
-	_ = os.RemoveAll(activeFull)
-	_ = syncDir(m.baseDir)
+	if err := os.RemoveAll(activeFull); err != nil {
+		return m.failRollback(backupFull, activeFull, err)
+	}
+	if err := m.syncDirectory(m.baseDir); err != nil {
+		return fmt.Errorf("failed to sync active removal before rollback: %w", err)
+	}
 
 	if backupFull != "" {
 		if m.faultInjector != nil && m.faultInjector.BeforeRename != nil {
 			if err := m.faultInjector.BeforeRename(backupFull, activeFull); err != nil {
 				m.currentTx.State = JournalStateFailed
-				_ = m.writeJournal(m.currentTx)
+				if journalErr := m.writeJournal(m.currentTx); journalErr != nil {
+					err = errors.Join(err, journalErr)
+				}
 				return &SafeError{
 					Code: ErrCodeRollbackFailed,
 					SafeMessage: fmt.Sprintf("CRITICAL: Error restaurando backup %s a %s: %v. Backup preservado. Recuperación manual: mv %s %s",
@@ -554,7 +671,9 @@ func (m *RecoveryManager) rollbackInternal(activeFull, backupFull string, causeE
 
 		if err := os.Rename(backupFull, activeFull); err != nil {
 			m.currentTx.State = JournalStateFailed
-			_ = m.writeJournal(m.currentTx)
+			if journalErr := m.writeJournal(m.currentTx); journalErr != nil {
+				err = errors.Join(err, journalErr)
+			}
 			return &SafeError{
 				Code: ErrCodeRollbackFailed,
 				SafeMessage: fmt.Sprintf("CRITICAL: Error restaurando backup %s a %s: %v. Backup preservado. Recuperación manual: mv %s %s",
@@ -563,12 +682,16 @@ func (m *RecoveryManager) rollbackInternal(activeFull, backupFull string, causeE
 				Err:         ErrRollbackFailed,
 			}
 		}
-		_ = syncDir(m.baseDir)
+		if err := m.syncDirectory(m.baseDir); err != nil {
+			return fmt.Errorf("backup restored but directory sync failed: %w", err)
+		}
 	}
 
 	m.currentTx.State = JournalStateRolledBack
 	m.currentTx.Timestamp = time.Now().UTC()
-	_ = m.writeJournal(m.currentTx)
+	if err := m.writeJournal(m.currentTx); err != nil {
+		return fmt.Errorf("runtime rollback completed but journal update failed: %w", err)
+	}
 
 	return fmt.Errorf("post-activation verification failed, rolled back to prior version: %w", causeErr)
 }
@@ -576,6 +699,12 @@ func (m *RecoveryManager) rollbackInternal(activeFull, backupFull string, causeE
 // Reconcile performs persistent crash recovery by checking disk evidence and the journal.
 // It is strictly idempotent and protects backups from being deleted in ambiguous states.
 func (m *RecoveryManager) Reconcile(ctx context.Context) error {
+	if err := m.requireLock(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	rec, err := m.readJournal()
 	if err != nil {
 		return err // ErrJournalCorrupt or read error: fail-closed
@@ -585,6 +714,7 @@ func (m *RecoveryManager) Reconcile(ctx context.Context) error {
 		// No journal file: inspect disk for un-journaled or legacy artifacts
 		return m.reconcileUnjournaled()
 	}
+	m.currentTx = rec
 
 	activeFull := filepath.Join(m.baseDir, rec.ActivePath)
 	stagingFull := filepath.Join(m.baseDir, rec.StagingPath)
@@ -594,22 +724,38 @@ func (m *RecoveryManager) Reconcile(ctx context.Context) error {
 	}
 
 	activeFi, activeErr := os.Stat(activeFull)
+	if activeErr != nil && !os.IsNotExist(activeErr) {
+		return fmt.Errorf("failed to inspect active runtime: %w", activeErr)
+	}
 	activeExists := activeErr == nil
 	backupFi, backupErr := os.Stat(backupFull)
+	if backupFull != "" && backupErr != nil && !os.IsNotExist(backupErr) {
+		return fmt.Errorf("failed to inspect runtime backup: %w", backupErr)
+	}
 	backupExists := (backupFull != "" && backupErr == nil)
 
 	switch rec.State {
 	case JournalStateIdle, JournalStateCommitted:
 		// System was in clean state. Clean any orphan staging if present.
 		if stagingFull != "" {
-			_ = os.RemoveAll(stagingFull)
+			if err := os.RemoveAll(stagingFull); err != nil {
+				return err
+			}
+			if err := m.syncDirectory(m.baseDir); err != nil {
+				return err
+			}
 		}
 		return nil
 
 	case JournalStatePreparing, JournalStateStaged:
 		// Crashed before touching active. Active was untouched. Clean staging.
 		if stagingFull != "" {
-			_ = os.RemoveAll(stagingFull)
+			if err := os.RemoveAll(stagingFull); err != nil {
+				return err
+			}
+			if err := m.syncDirectory(m.baseDir); err != nil {
+				return err
+			}
 		}
 		rec.State = JournalStateIdle
 		rec.Timestamp = time.Now().UTC()
@@ -617,15 +763,24 @@ func (m *RecoveryManager) Reconcile(ctx context.Context) error {
 
 	case JournalStateBackingUp:
 		// Crashed during/before active -> backup
+		if backupExists && activeExists {
+			return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Both active runtime and backup exist during backup transition; both preserved", Recoverable: false, Err: ErrRecoveryAmbiguous}
+		}
 		if backupExists && !activeExists {
 			// Active was moved to backup before crash. Restore backup -> active.
 			if err := os.Rename(backupFull, activeFull); err != nil {
 				return m.failRollback(backupFull, activeFull, err)
 			}
-			_ = syncDir(m.baseDir)
+			if err := m.syncDirectory(m.baseDir); err != nil {
+				return err
+			}
+		} else if !activeExists {
+			return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Active runtime and expected backup are both missing; journal preserved", Recoverable: false, Err: ErrRecoveryAmbiguous}
 		}
 		if stagingFull != "" {
-			_ = os.RemoveAll(stagingFull)
+			if err := os.RemoveAll(stagingFull); err != nil {
+				return err
+			}
 		}
 		rec.State = JournalStateRolledBack
 		rec.Timestamp = time.Now().UTC()
@@ -637,11 +792,15 @@ func (m *RecoveryManager) Reconcile(ctx context.Context) error {
 			if activeExists {
 				// Both exist! Ambiguity! Check if active is empty
 				if activeFi.IsDir() && dirIsEmpty(activeFull) {
-					_ = os.Remove(activeFull)
+					if err := os.Remove(activeFull); err != nil {
+						return err
+					}
 					if err := os.Rename(backupFull, activeFull); err != nil {
 						return m.failRollback(backupFull, activeFull, err)
 					}
-					_ = syncDir(m.baseDir)
+					if err := m.syncDirectory(m.baseDir); err != nil {
+						return err
+					}
 				} else {
 					return &SafeError{
 						Code: ErrCodeRecoveryAmbiguous,
@@ -655,11 +814,17 @@ func (m *RecoveryManager) Reconcile(ctx context.Context) error {
 				if err := os.Rename(backupFull, activeFull); err != nil {
 					return m.failRollback(backupFull, activeFull, err)
 				}
-				_ = syncDir(m.baseDir)
+				if err := m.syncDirectory(m.baseDir); err != nil {
+					return err
+				}
 			}
+		} else {
+			return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Expected backup is missing during BACKED_UP state; journal and active files preserved", Recoverable: false, Err: ErrRecoveryAmbiguous}
 		}
 		if stagingFull != "" {
-			_ = os.RemoveAll(stagingFull)
+			if err := os.RemoveAll(stagingFull); err != nil {
+				return err
+			}
 		}
 		rec.State = JournalStateRolledBack
 		rec.Timestamp = time.Now().UTC()
@@ -672,7 +837,9 @@ func (m *RecoveryManager) Reconcile(ctx context.Context) error {
 			if err := os.Rename(backupFull, activeFull); err != nil {
 				return m.failRollback(backupFull, activeFull, err)
 			}
-			_ = syncDir(m.baseDir)
+			if err := m.syncDirectory(m.baseDir); err != nil {
+				return err
+			}
 			rec.State = JournalStateRolledBack
 			rec.Timestamp = time.Now().UTC()
 			return m.writeJournal(rec)
@@ -680,33 +847,48 @@ func (m *RecoveryManager) Reconcile(ctx context.Context) error {
 		// If active exists and backup exists:
 		// To be fail-closed, restore backup if available and not yet verified
 		if backupExists {
-			_ = os.RemoveAll(activeFull)
+			if err := os.RemoveAll(activeFull); err != nil {
+				return err
+			}
 			if err := os.Rename(backupFull, activeFull); err != nil {
 				return m.failRollback(backupFull, activeFull, err)
 			}
-			_ = syncDir(m.baseDir)
+			if err := m.syncDirectory(m.baseDir); err != nil {
+				return err
+			}
 			rec.State = JournalStateRolledBack
 			rec.Timestamp = time.Now().UTC()
 			return m.writeJournal(rec)
 		}
-		// If active exists and no backup was needed (first install): commit
+		// An interrupted first install has no previous runtime to restore and was
+		// not verified before the crash. Preserve its files and fail closed.
 		if activeExists {
-			rec.State = JournalStateCommitted
-			rec.Timestamp = time.Now().UTC()
-			return m.writeJournal(rec)
+			return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "First installation was activated but not verified before interruption; runtime preserved for operator review", Recoverable: false, Err: ErrRecoveryAmbiguous}
 		}
-		return nil
+		return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Interrupted first installation left no active runtime; journal preserved for operator review", Recoverable: false, Err: ErrRecoveryAmbiguous}
 
 	case JournalStateRollingBack:
 		// Crashed during rollback: finish restoring backup -> active
-		if backupExists && !activeExists {
+		if backupExists {
+			if activeExists {
+				if err := os.RemoveAll(activeFull); err != nil {
+					return err
+				}
+			}
 			if err := os.Rename(backupFull, activeFull); err != nil {
 				return m.failRollback(backupFull, activeFull, err)
 			}
-			_ = syncDir(m.baseDir)
+			if err := m.syncDirectory(m.baseDir); err != nil {
+				return err
+			}
 		}
 		if stagingFull != "" {
-			_ = os.RemoveAll(stagingFull)
+			if err := os.RemoveAll(stagingFull); err != nil {
+				return err
+			}
+			if err := m.syncDirectory(m.baseDir); err != nil {
+				return err
+			}
 		}
 		rec.State = JournalStateRolledBack
 		rec.Timestamp = time.Now().UTC()
@@ -714,7 +896,12 @@ func (m *RecoveryManager) Reconcile(ctx context.Context) error {
 
 	case JournalStateRolledBack:
 		if stagingFull != "" {
-			_ = os.RemoveAll(stagingFull)
+			if err := os.RemoveAll(stagingFull); err != nil {
+				return err
+			}
+			if err := m.syncDirectory(m.baseDir); err != nil {
+				return err
+			}
 		}
 		rec.State = JournalStateIdle
 		rec.Timestamp = time.Now().UTC()
@@ -735,7 +922,9 @@ func (m *RecoveryManager) Reconcile(ctx context.Context) error {
 
 func (m *RecoveryManager) failRollback(backup, active string, err error) error {
 	m.currentTx.State = JournalStateFailed
-	_ = m.writeJournal(m.currentTx)
+	if journalErr := m.writeJournal(m.currentTx); journalErr != nil {
+		err = errors.Join(err, journalErr)
+	}
 	return &SafeError{
 		Code: ErrCodeRollbackFailed,
 		SafeMessage: fmt.Sprintf("CRITICAL: Error reconciliando y restaurando backup previo %s a %s: %v. Backup preservado. Comando manual: mv %s %s",
@@ -769,7 +958,9 @@ func (m *RecoveryManager) reconcileUnjournaled() error {
 	if len(backups) == 0 {
 		// Clean up any stale staging
 		for _, s := range stagings {
-			_ = os.RemoveAll(s)
+			if err := os.RemoveAll(s); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -786,14 +977,27 @@ func (m *RecoveryManager) reconcileUnjournaled() error {
 
 	for _, b := range backups {
 		// Infer target from name: .backup.<target>.<txid>
-		parts := strings.Split(filepath.Base(b), ".")
-		if len(parts) < 3 {
+		backupName := strings.TrimPrefix(filepath.Base(b), ".backup.")
+		lastDot := strings.LastIndex(backupName, ".")
+		if lastDot <= 0 || lastDot == len(backupName)-1 {
 			continue
 		}
-		target := parts[2]
+		target := backupName[:lastDot]
+		if !validTargetName(target) {
+			return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Unjournaled backup has an unsafe target name; backup preserved", Recoverable: false, Err: ErrRecoveryAmbiguous}
+		}
 		active := filepath.Join(m.baseDir, target)
+		if _, err := m.validateConfinement(b); err != nil {
+			return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Unjournaled backup path is unsafe; backup preserved", Recoverable: false, Err: ErrRecoveryAmbiguous}
+		}
+		if _, err := m.validateConfinement(active); err != nil {
+			return err
+		}
 
 		activeFi, activeErr := os.Stat(active)
+		if activeErr != nil && !os.IsNotExist(activeErr) {
+			return fmt.Errorf("failed to inspect active runtime %s: %w", active, activeErr)
+		}
 		if activeErr != nil && os.IsNotExist(activeErr) {
 			// Active is missing! Restore backup to active!
 			if err := os.Rename(b, active); err != nil {
@@ -805,10 +1009,14 @@ func (m *RecoveryManager) reconcileUnjournaled() error {
 					Err:         ErrRollbackFailed,
 				}
 			}
-			_ = syncDir(m.baseDir)
+			if err := m.syncDirectory(m.baseDir); err != nil {
+				return err
+			}
 		} else if activeErr == nil && activeFi.IsDir() && dirIsEmpty(active) {
 			// Active exists but is empty
-			_ = os.Remove(active)
+			if err := os.Remove(active); err != nil {
+				return err
+			}
 			if err := os.Rename(b, active); err != nil {
 				return &SafeError{
 					Code: ErrCodeRollbackFailed,
@@ -818,7 +1026,9 @@ func (m *RecoveryManager) reconcileUnjournaled() error {
 					Err:         ErrRollbackFailed,
 				}
 			}
-			_ = syncDir(m.baseDir)
+			if err := m.syncDirectory(m.baseDir); err != nil {
+				return err
+			}
 		} else if activeErr == nil {
 			// Active exists and has content! Ambiguous! Preserve backup!
 			return &SafeError{
@@ -832,7 +1042,9 @@ func (m *RecoveryManager) reconcileUnjournaled() error {
 	}
 
 	for _, s := range stagings {
-		_ = os.RemoveAll(s)
+		if err := os.RemoveAll(s); err != nil {
+			return err
+		}
 	}
 
 	return nil

@@ -98,6 +98,7 @@ The core safety rule of `RecoveryManager` is: **Never delete a backup under ambi
 - Targets are resolved against the canonicalized `baseDir` via `filepath.EvalSymlinks`.
 - Any relative escape (`..`) is rejected.
 - Any symlink pointing outside `baseDir` (either at the leaf or in any parent segment) is rejected with `ErrSecurityEscapingSymlink`.
+- Persisted journal paths are revalidated before cleanup or rename. A malformed or truncated journal does not authorize deleting staging or backup data; journal entries that are not regular files are rejected.
 
 ---
 
@@ -106,6 +107,12 @@ The core safety rule of `RecoveryManager` is: **Never delete a backup under ambi
 To prevent race conditions and concurrent installer/recovery execution:
 1. **In-Process Layer**: An in-memory mutex (`sync.Mutex`) is indexed by canonicalized `baseDir`. Multiple goroutines attempting concurrent recovery within the same process are serialized or rejected.
 2. **Cross-Process Layer**: Advisory file locking via `fileLock` (`flock` on Unix, `LockFileEx` on Windows) is acquired on `.recovery.lock`. If another installer or background updater holds the lock, `AcquireLock` immediately fails with `ErrCodeRecoveryLockHeld`.
+
+`Begin`, `CommitStaged`, and `Reconcile` require the caller to hold this lock; they fail closed otherwise. `ReleaseLock` is idempotent and never unlocks a lock owned by another manager. `CommitStaged` requires a non-nil verifier and returns directory-sync errors instead of advancing the journal as though the filesystem operation were durable.
+
+For an interrupted first install (`ACTIVATING`/`ACTIVATED` with no backup), there is no previous runtime to restore and the post-activation verifier may not have completed. Reconciliation preserves the active files and journal and returns a recovery-ambiguous error; it does not mark the runtime committed or ready. The caller must resolve this state explicitly.
+
+Journal records are validated semantically as well as by checksum: target names must be single safe path components; active, staging, and backup paths must match the transaction naming contract; and resolved paths must remain under the canonical recovery root.
 
 ---
 
@@ -120,3 +127,5 @@ To prevent race conditions and concurrent installer/recovery execution:
 | `active` missing, backup exists | `ROLLING_BACK` | `os.Rename(backup, active)` | `ROLLED_BACK` |
 | `active` ok, backup exists | Corrupted / No journal | Preserves both; returns `RECOVERY_AMBIGUOUS_BACKUP` | Error (Safe) |
 | Any | `FAILED` | Preserves all; instructions logged | Error (Safe) |
+
+H6A tests include a child process forcibly terminated after activation rename and a separate child process holding the advisory lock, in addition to injected state/rename/fsync failures. These are synthetic filesystem tests; they do not invoke the active Full Edge runtime or certify readiness.

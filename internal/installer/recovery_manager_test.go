@@ -2,8 +2,10 @@ package installer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -150,7 +152,7 @@ func TestRecoveryManager_CrashInBackingUp(t *testing.T) {
 		"bin/python3": "staging-v2",
 	})
 
-	err = rm.CommitStaged(ctx, nil)
+	err = rm.CommitStaged(ctx, func(string) error { return nil })
 	if !errors.Is(err, simulatedCrashErr) {
 		t.Fatalf("expected simulatedCrashErr, got %v", err)
 	}
@@ -214,7 +216,7 @@ func TestRecoveryManager_CrashInBackedUp(t *testing.T) {
 		"bin/python3": "staging-v2",
 	})
 
-	err = rm.CommitStaged(ctx, nil)
+	err = rm.CommitStaged(ctx, func(string) error { return nil })
 	if !errors.Is(err, simulatedCrashErr) {
 		t.Fatalf("expected simulatedCrashErr, got %v", err)
 	}
@@ -277,7 +279,7 @@ func TestRecoveryManager_CrashInActivating(t *testing.T) {
 		"bin/python3": "staging-v2",
 	})
 
-	_ = rm.CommitStaged(ctx, nil)
+	_ = rm.CommitStaged(ctx, func(string) error { return nil })
 	rm.ReleaseLock()
 
 	// Reconcile on restart: state was ACTIVATING/ACTIVATED with unverified active and valid backup.
@@ -680,4 +682,336 @@ func TestRecoveryManager_UnjournaledReconcile_RecoversMissingActive(t *testing.T
 
 	activeDir := filepath.Join(tmpDir, "python")
 	verifyTestTree(t, activeDir, map[string]string{"bin/python3": "recovered-binary"})
+}
+
+func TestRecoveryManagerRequiresLockAndReleaseIsIdempotent(t *testing.T) {
+	rm, err := NewRecoveryManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rm.Begin(context.Background(), "python", "v1", "hash"); !errors.Is(err, ErrRecoveryLockNotHeld) {
+		t.Fatalf("Begin without lock error = %v, want ErrRecoveryLockNotHeld", err)
+	}
+	if err := rm.Reconcile(context.Background()); !errors.Is(err, ErrRecoveryLockNotHeld) {
+		t.Fatalf("Reconcile without lock error = %v, want ErrRecoveryLockNotHeld", err)
+	}
+	// Releasing an unowned lock must be a safe no-op, not an Unlock panic.
+	rm.ReleaseLock()
+	rm.ReleaseLock()
+}
+
+func TestRecoveryManagerBeginRequiresPendingJournalReconciliation(t *testing.T) {
+	base := t.TempDir()
+	first, err := NewRecoveryManager(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.AcquireLock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Begin(context.Background(), "python", "v1", "hash"); err != nil {
+		t.Fatal(err)
+	}
+	first.ReleaseLock()
+
+	second, err := NewRecoveryManager(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.AcquireLock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer second.ReleaseLock()
+	if _, err := second.Begin(context.Background(), "python", "v2", "hash2"); !errors.Is(err, ErrTransactionInProgress) {
+		t.Fatalf("Begin with pending journal error = %v, want ErrTransactionInProgress", err)
+	}
+	if err := second.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Begin(context.Background(), "python", "v2", "hash2"); err != nil {
+		t.Fatalf("Begin after reconciliation failed: %v", err)
+	}
+}
+
+func TestRecoveryManagerRejectsSemanticallyCorruptJournalPaths(t *testing.T) {
+	base := t.TempDir()
+	active := filepath.Join(base, "python")
+	createTestTree(t, active, map[string]string{"marker": "preserve"})
+	rm, err := NewRecoveryManager(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rm.AcquireLock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer rm.ReleaseLock()
+
+	record := &JournalRecord{
+		Version: 1, TxID: "tx_1_1", State: JournalStateIdle, Target: "python",
+		ActivePath: "python", StagingPath: "../", Timestamp: time.Now().UTC(),
+	}
+	record.RecordHash = record.computeHash()
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rm.journalPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := rm.Reconcile(context.Background()); !errors.Is(err, ErrJournalCorrupt) {
+		t.Fatalf("Reconcile error = %v, want ErrJournalCorrupt", err)
+	}
+	verifyTestTree(t, active, map[string]string{"marker": "preserve"})
+}
+
+func TestRecoveryManagerRejectsSymlinkedJournalWithoutTouchingTarget(t *testing.T) {
+	base := t.TempDir()
+	externalJournal := filepath.Join(t.TempDir(), "external-journal")
+	if err := os.WriteFile(externalJournal, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rm, err := NewRecoveryManager(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalJournal, rm.journalPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := rm.AcquireLock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer rm.ReleaseLock()
+	if err := rm.Reconcile(context.Background()); !errors.Is(err, ErrJournalCorrupt) {
+		t.Fatalf("Reconcile error = %v, want ErrJournalCorrupt", err)
+	}
+	data, err := os.ReadFile(externalJournal)
+	if err != nil || string(data) != "preserve" {
+		t.Fatalf("external journal target changed: data=%q err=%v", data, err)
+	}
+}
+
+func TestRecoveryManagerRejectsSymlinkedLockFile(t *testing.T) {
+	base := t.TempDir()
+	externalLock := filepath.Join(t.TempDir(), "external-lock")
+	if err := os.WriteFile(externalLock, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rm, err := NewRecoveryManager(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalLock, rm.lockPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := rm.AcquireLock(context.Background()); !errors.Is(err, ErrSecurityEscapingSymlink) {
+		t.Fatalf("AcquireLock error = %v, want ErrSecurityEscapingSymlink", err)
+	}
+	data, err := os.ReadFile(externalLock)
+	if err != nil || string(data) != "preserve" {
+		t.Fatalf("external lock target changed: data=%q err=%v", data, err)
+	}
+}
+
+func TestRecoveryManagerAmbiguousBackupTransitionPreservesBoth(t *testing.T) {
+	base := t.TempDir()
+	active := filepath.Join(base, "python")
+	backup := filepath.Join(base, ".backup.python.tx_1_1")
+	createTestTree(t, active, map[string]string{"version": "active"})
+	createTestTree(t, backup, map[string]string{"version": "backup"})
+	rm, err := NewRecoveryManager(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rm.AcquireLock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer rm.ReleaseLock()
+	record := &JournalRecord{
+		Version: 1, TxID: "tx_1_1", State: JournalStateBackingUp, Target: "python",
+		ActivePath: "python", StagingPath: ".staging.python.tx_1_1", BackupPath: ".backup.python.tx_1_1",
+		Timestamp: time.Now().UTC(),
+	}
+	if err := rm.writeJournal(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := rm.Reconcile(context.Background()); !errors.Is(err, ErrRecoveryAmbiguous) {
+		t.Fatalf("Reconcile error = %v, want ErrRecoveryAmbiguous", err)
+	}
+	verifyTestTree(t, active, map[string]string{"version": "active"})
+	verifyTestTree(t, backup, map[string]string{"version": "backup"})
+}
+
+func TestRecoveryManagerMissingBackupInBackedUpStateFailsClosed(t *testing.T) {
+	base := t.TempDir()
+	active := filepath.Join(base, "python")
+	createTestTree(t, active, map[string]string{"version": "unverified-active"})
+	rm, err := NewRecoveryManager(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rm.AcquireLock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer rm.ReleaseLock()
+	record := &JournalRecord{
+		Version: 1, TxID: "tx_1_1", State: JournalStateBackedUp, Target: "python",
+		ActivePath: "python", StagingPath: ".staging.python.tx_1_1", BackupPath: ".backup.python.tx_1_1",
+		Timestamp: time.Now().UTC(),
+	}
+	if err := rm.writeJournal(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := rm.Reconcile(context.Background()); !errors.Is(err, ErrRecoveryAmbiguous) {
+		t.Fatalf("Reconcile error = %v, want ErrRecoveryAmbiguous", err)
+	}
+	verifyTestTree(t, active, map[string]string{"version": "unverified-active"})
+}
+
+func TestRecoveryManagerDirectorySyncFailureAborts(t *testing.T) {
+	rm, err := NewRecoveryManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rm.AcquireLock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer rm.ReleaseLock()
+	syncErr := errors.New("injected directory fsync failure")
+	rm.syncDirectory = func(string) error { return syncErr }
+	if _, err := rm.Begin(context.Background(), "python", "v1", "hash"); !errors.Is(err, syncErr) {
+		t.Fatalf("Begin error = %v, want directory fsync error", err)
+	}
+}
+
+func TestRecoveryManagerSubprocessHelper(t *testing.T) {
+	mode := os.Getenv("GEOCAM_RECOVERY_HELPER_MODE")
+	if mode == "" {
+		return
+	}
+	base := os.Getenv("GEOCAM_RECOVERY_HELPER_BASE")
+	marker := os.Getenv("GEOCAM_RECOVERY_HELPER_MARKER")
+	release := os.Getenv("GEOCAM_RECOVERY_HELPER_RELEASE")
+	rm, err := NewRecoveryManager(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rm.AcquireLock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer rm.ReleaseLock()
+	if mode == "lock" {
+		if err := os.WriteFile(marker, []byte("locked"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for {
+			if _, err := os.Stat(release); err == nil {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if mode == "crash" {
+		staging, err := rm.Begin(context.Background(), "python", "v2", "hash-v2")
+		if err != nil {
+			t.Fatal(err)
+		}
+		createTestTree(t, staging, map[string]string{"bin/python": "new"})
+		rm.SetFaultInjector(&FaultInjector{AfterRename: func(from, to string) error {
+			if to == filepath.Join(rm.baseDir, "python") {
+				if err := os.WriteFile(marker, []byte("activated"), 0o600); err != nil {
+					return err
+				}
+				select {}
+			}
+			return nil
+		}})
+		if err := rm.CommitStaged(context.Background(), func(string) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		t.Fatal("crash helper unexpectedly returned")
+	}
+	t.Fatalf("unknown helper mode %q", mode)
+}
+
+func TestRecoveryManagerCrossProcessLock(t *testing.T) {
+	base := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "locked")
+	release := filepath.Join(t.TempDir(), "release")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRecoveryManagerSubprocessHelper$")
+	cmd.Env = append(os.Environ(), "GEOCAM_RECOVERY_HELPER_MODE=lock", "GEOCAM_RECOVERY_HELPER_BASE="+base,
+		"GEOCAM_RECOVERY_HELPER_MARKER="+marker, "GEOCAM_RECOVERY_HELPER_RELEASE="+release)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = os.WriteFile(release, []byte("release"), 0o600)
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+	waitForMarker(t, marker, cmd)
+	rm, err := NewRecoveryManager(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rm.AcquireLock(context.Background()); !errors.Is(err, ErrRecoveryLockHeld) {
+		t.Fatalf("second process lock error = %v, want ErrRecoveryLockHeld", err)
+	}
+	if err := os.WriteFile(release, []byte("release"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("lock helper failed: %v", err)
+	}
+}
+
+func TestRecoveryManagerSIGKILLDuringActivationRestoresPreviousRuntime(t *testing.T) {
+	base := t.TempDir()
+	active := filepath.Join(base, "python")
+	createTestTree(t, active, map[string]string{"bin/python": "old"})
+	marker := filepath.Join(t.TempDir(), "activated")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRecoveryManagerSubprocessHelper$")
+	cmd.Env = append(os.Environ(), "GEOCAM_RECOVERY_HELPER_MODE=crash", "GEOCAM_RECOVERY_HELPER_BASE="+base,
+		"GEOCAM_RECOVERY_HELPER_MARKER="+marker)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+	waitForMarker(t, marker, cmd)
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("failed to terminate activation process: %v", err)
+	}
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("killed helper unexpectedly exited successfully")
+	}
+
+	recoverer, err := NewRecoveryManager(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverer.AcquireLock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer recoverer.ReleaseLock()
+	if err := recoverer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile after process kill failed: %v", err)
+	}
+	verifyTestTree(t, active, map[string]string{"bin/python": "old"})
+}
+
+func waitForMarker(t *testing.T, marker string, cmd *exec.Cmd) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(marker); err == nil {
+			return
+		}
+		if cmd.ProcessState != nil {
+			t.Fatalf("helper exited before writing marker: %v", cmd.ProcessState)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for helper process marker")
 }
