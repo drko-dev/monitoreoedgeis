@@ -50,3 +50,19 @@ This follow-up adds an **opt-in internal pre-commit verification callback** to t
 Added adversarial Go tests for revocation injected during staging, revocation immediately before already-active short-circuit, and source Worker modification between preflight and final staging verification. These tests verify false readiness flags, no successful commit, and absent active install for rejected first-time transactions. Targeted signed-manifest security tests pass with the race detector.
 
 **Limitations:** This closes the long staging interval but **does not provide global atomic key revocation** between the final validation and rename across processes, replace signed-release ownership infrastructure, or make previously installed executables immutable. A complete protection against filesystem race/TOCTOU attacks requires a defined immutable installed-pack trust model or descriptor-based verification/execution. Recover may still reconcile journal state before a late revalidation; the result remains fail-closed and not READY. No live release identity or production deployment was created.
+
+## H6D-R11.2 — Post-install file-integrity recheck (2026-10-14)
+
+The signed pre-commit checks authenticate bytes at the moment the transactional installer verifies and activates a pack, but they do not make an installed runtime immutable. The on-disk active directory can later be modified by a privileged or same-user process.
+
+The new explicit read-only method **`SignedRuntimePackPreparationBackend.VerifyInstalledRuntimePack(ctx)`** validates the installed *active* directory instead of its original source media:
+
+- Requires an existing real, non-symlinked persistent data directory and a direct real active pack directory; no missing or symlink-substituted installed pack may pass.
+- Checks the installed manifest raw bytes against the **independently provided SHA-256 pin** and verifies its parsed contents against the externally signed payload (Ed25519/P-256), currently trusted publisher key, expiry and revocation.
+- Revalidates **all declared installed artifacts** and the entire allowlisted installed tree, including the executable/Worker-backend contract. Missing, changed, unlisted or symlinked installed files are rejected.
+- Remains usable **when the original source pack media is removed** after installation, because installed integrity is authenticated from the active copy and publisher-trusted manifest, not re-read from the USB/tarball/source directory.
+- Never executes Python, FFmpeg, Worker or inference, and **does not grant model redistribution rights or set READY**. No production launch path is wired to this method; release-owned runtime orchestration must call it at launch/restart before it could become a security gate. A verification result must not be cached forever.
+
+Adversarial Go tests (race detector) now cover: uninstalled pack denial, valid installed bytes, valid installed bytes with removed source media, later Worker tampering, unlisted injected file, changed installed manifest, active directory symlink replacement, revoked publisher key, and cancelled verification. All synthetic tests pass.
+
+**Limitations:** Per-path hash checks are not an atomic snapshot across concurrent process mutation and cannot prevent an attacker replacing bytes **after the final recheck but before or during execution**. A final authorization architecture will need write-access separation (read-only owner-controlled installed tree and updater boundary), signature/descriptor-based process execution or equivalent platform-specific protection, trusted clean macOS14 H8, code signing, notarization and model licensing approval. Existing `Recover` still explicitly verifies original source media before calling the H6B recovery path; the new installed-tree guard itself is source-independent. Future offline-startup reconciliation needs a separately reviewed source-free signed recovery path. No such runtime activation was performed here.

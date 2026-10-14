@@ -374,3 +374,87 @@ func TestSignedPackGateTamperedSourceDuringStagingDoesNotCommit(t *testing.T) {
 		t.Fatalf("tampered release installed: %v", err)
 	}
 }
+
+func TestSignedPackInstalledRecheckSurvivesSourceMediaRemoval(t *testing.T) {
+	o, signed, trust := newSignedPackFixture(t)
+	backend, err := NewSignedRuntimePackPreparationBackend(o, signed, trust)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No installed pack may be accepted before transactional activation.
+	if err := backend.VerifyInstalledRuntimePack(context.Background()); err == nil {
+		t.Fatal("nonexistent installed pack passed recheck")
+	}
+	result, err := backend.Prepare(context.Background())
+	if err != nil || !result.TransactionCommitted || result.RuntimeReady {
+		t.Fatalf("cannot prepare synthetic test pack: %+v %v", result, err)
+	}
+	if err := backend.VerifyInstalledRuntimePack(context.Background()); err != nil {
+		t.Fatalf("correctly signed installed pack rejected: %v", err)
+	}
+	if err := os.RemoveAll(o.PackDir); err != nil {
+		t.Fatal(err)
+	}
+	// Offline-first install must be verifiable from installed files and
+	// independently trusted signer; source tar/USB/media may be gone.
+	if err := backend.VerifyInstalledRuntimePack(context.Background()); err != nil {
+		t.Fatalf("installed verification improperly depended on source media: %v", err)
+	}
+}
+
+func TestSignedPackInstalledRecheckDetectsPostCommitTampering(t *testing.T) {
+	for _, attack := range []string{"worker", "unlisted", "manifest", "symlink", "revoked"} {
+		t.Run(attack, func(t *testing.T) {
+			o, signed, trust := newSignedPackFixture(t)
+			backend, err := NewSignedRuntimePackPreparationBackend(o, signed, trust)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := backend.Prepare(context.Background())
+			if err != nil || !result.TransactionCommitted {
+				t.Fatalf("prepare: %+v %v", result, err)
+			}
+			active := filepath.Join(o.DataDir, DefaultRuntimePackTargetName)
+			switch attack {
+			case "worker":
+				err = os.WriteFile(filepath.Join(active, signed.Manifest.Worker.Entrypoint),
+					[]byte("replacement after installation"), 0o600)
+			case "unlisted":
+				err = os.WriteFile(filepath.Join(active, "unlisted-dynamic-library.so"),
+					[]byte("hostile hidden executable"), 0o600)
+			case "manifest":
+				err = os.WriteFile(filepath.Join(active, DefaultRuntimePackManifestName),
+					[]byte("{}"), 0o600)
+			case "symlink":
+				other := t.TempDir()
+				if err = os.Rename(active, filepath.Join(other, "legitimate-active")); err == nil {
+					err = os.Symlink(filepath.Join(other, "legitimate-active"), active)
+				}
+			case "revoked":
+				err = trust.RevokeKey("fixture-publisher", time.Now().UTC(), "revoked before execution")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := backend.VerifyInstalledRuntimePack(context.Background()); err == nil {
+				t.Fatal("changed installed pack accepted for future launch")
+			}
+		})
+	}
+}
+
+func TestSignedPackInstalledRecheckCancelAndMissingSource(t *testing.T) {
+	o, signed, trust := newSignedPackFixture(t)
+	backend, err := NewSignedRuntimePackPreparationBackend(o, signed, trust)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := backend.VerifyInstalledRuntimePack(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled installed verification: %v", err)
+	}
+	if err := backend.VerifyInstalledRuntimePack(context.Background()); err == nil {
+		t.Fatal("missing installed pack accepted")
+	}
+}

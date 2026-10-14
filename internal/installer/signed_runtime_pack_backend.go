@@ -96,8 +96,22 @@ func (p *SignedRuntimePackPreparationBackend) verify(ctx context.Context) error 
 	if err := ensureDisjointRuntimePaths(packRoot, o.DataDir); err != nil {
 		return err
 	}
-	manifestPath := filepath.Join(packRoot, filepath.FromSlash(o.ManifestName))
-	if err := requireRegularPath(packRoot, manifestPath); err != nil {
+	return p.verifyRoot(ctx, packRoot)
+}
+
+// verifyRoot authenticates a complete release tree against BOTH the externally
+// pinned raw manifest bytes and the independently supplied publisher signer.
+// It is reused for source media and already-installed files.
+func (p *SignedRuntimePackPreparationBackend) verifyRoot(ctx context.Context, root string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p == nil || p.backend == nil || p.signed == nil || p.trust == nil {
+		return ErrRuntimePackSignatureRequired
+	}
+	o := p.backend.options
+	manifestPath := filepath.Join(root, filepath.FromSlash(o.ManifestName))
+	if err := requireRegularPath(root, manifestPath); err != nil {
 		return err
 	}
 	manifestBytes, err := loadPinnedRuntimeManifestBytes(manifestPath, o.ExpectedManifestSHA256)
@@ -118,9 +132,53 @@ func (p *SignedRuntimePackPreparationBackend) verify(ctx context.Context) error 
 	return ValidateSignedManifest(p.signed, p.trust, VerifySignedManifestOptions{
 		TargetPlatform: o.TargetOS,
 		TargetArch:     o.TargetArch,
-		PackRoot:       packRoot,
+		PackRoot:       root,
 		RequireRelease: true,
 	})
+}
+
+// VerifyInstalledRuntimePack re-hashes the already activated pack immediately
+// before a future release-owned launch. It does NOT launch anything or imply
+// model rights, OS compatibility or inference readiness.
+//
+// This check intentionally reads the ACTIVE copy, not the original source
+// media, so it can detect post-install tampering even if the source media has
+// been removed. It must be called at the launch boundary by future owner-owned
+// orchestration, NOT trusted indefinitely as a one-time certificate.
+func (p *SignedRuntimePackPreparationBackend) VerifyInstalledRuntimePack(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p == nil || p.backend == nil || p.signed == nil || p.trust == nil {
+		return ErrRuntimePackSignatureRequired
+	}
+	o := p.backend.options
+	if !o.Enabled {
+		return ErrRuntimePackProvisioningDisabled
+	}
+	dataRoot, err := canonicalDirectory(o.DataDir)
+	if err != nil {
+		return err
+	}
+	activePath := filepath.Join(dataRoot, o.TargetName)
+	installedRoot, err := canonicalDirectory(activePath)
+	if err != nil {
+		return fmt.Errorf("installed runtime directory invalid: %w", err)
+	}
+	if installedRoot != activePath {
+		return errors.New("installed runtime must be a direct, non-symlinked child of persistent state")
+	}
+	if err := p.verifyRoot(ctx, installedRoot); err != nil {
+		return err
+	}
+	// Signed manifest validation authenticates declared hashes. H6B's full
+	// inspection additionally refuses hidden/unlisted extra files and
+	// checks executable modes, backend.py, and launch-contract structure.
+	if _, err := inspectRuntimePack(installedRoot, o.ManifestName,
+		o.ExpectedManifestSHA256, o.TargetOS, o.TargetArch); err != nil {
+		return fmt.Errorf("installed runtime full-tree inspection: %w", err)
+	}
+	return ctx.Err()
 }
 
 func loadPinnedRuntimeManifestBytes(path, expectedDigest string) ([]byte, error) {
