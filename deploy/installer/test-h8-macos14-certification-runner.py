@@ -172,14 +172,17 @@ class TestH8CertificationRunner(unittest.TestCase):
             self.assertTrue(env["physical_macos14_blocked"])
 
     def test_rosetta_runner_rejected(self):
-        with mock.patch("platform.machine", return_value="arm64"):
-            with mock.patch(
-                "subprocess.check_output",
-                return_value="1\n",
-            ):
-                env = h8.check_host_environment()
-                self.assertTrue(env["is_rosetta"])
-                self.assertFalse(env["is_native_macos14"])
+        # Simulate Darwin as well as its sysctl response; Linux runners do
+        # not even call sysctl.proc_translated unless sys.platform is Darwin.
+        with (
+            mock.patch("sys.platform", "darwin"),
+            mock.patch("platform.machine", return_value="arm64"),
+            mock.patch("subprocess.check_output", return_value="1\n"),
+            mock.patch("subprocess.run", side_effect=OSError("no VM service")),
+        ):
+            env = h8.check_host_environment()
+            self.assertTrue(env["is_rosetta"])
+            self.assertFalse(env["is_native_macos14"])
 
     def test_physical_macos14_blocked_declared_on_host_macos27(self):
         with mock.patch("platform.machine", return_value="arm64"):
