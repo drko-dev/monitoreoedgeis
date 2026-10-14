@@ -276,8 +276,10 @@ func ValidateHermeticAddress(addr string) error {
 func HermeticDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	switch network {
 	case "unix", "unixgram", "unixpacket":
-		var d net.Dialer
-		return d.DialContext(ctx, network, addr)
+		// No state-root is supplied to this generic network hook, so allowing
+		// an arbitrary local socket would permit contacting host relay daemons.
+		// Worker IPC uses its separately validated private socket path.
+		return nil, ErrHermeticSocketEscape
 	case "tcp", "tcp4", "tcp6":
 		if err := ValidateHermeticAddress(addr); err != nil {
 			return nil, err

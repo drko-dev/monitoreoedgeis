@@ -75,13 +75,26 @@ func (s *Session) SpropParameterSets() [][]byte { return s.spropParameterSets }
 // Dial establishes a TCP connection, completes DESCRIBE -> SETUP -> PLAY over
 // interleaved TCP, and returns an active Session ready to read RTP/RTCP packets.
 func Dial(ctx context.Context, addr, rtspPath, username, password string, timeout time.Duration) (*Session, error) {
+	return DialWithDialContext(ctx, addr, rtspPath, username, password, timeout, nil)
+}
+
+// DialWithDialContext supports an explicit, owner-selected network boundary.
+// Lab/H7 may inject an offline loopback-only dialer; normal camera networking
+// retains the original net.Dialer default (LAN cameras must still work).
+func DialWithDialContext(ctx context.Context, addr, rtspPath, username, password string,
+	timeout time.Duration, dial func(context.Context, string, string) (net.Conn, error)) (*Session, error) {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
 	baseURI := "rtsp://" + addr + rtspPath
 
-	dialer := &net.Dialer{Timeout: timeout}
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if dial == nil {
+		dialer := &net.Dialer{Timeout: timeout}
+		dial = dialer.DialContext
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	conn, err := dial(dialCtx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("rtsp: dial %s: %w", addr, err)
 	}

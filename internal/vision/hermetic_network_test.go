@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
+	"github.com/drko-dev/monitoreoedgeis/internal/rtsp"
 	"github.com/drko-dev/monitoreoedgeis/internal/rtsptest"
 )
 
@@ -67,7 +68,7 @@ func TestAdversarialChildProcessHelper(t *testing.T) {
 		if err != nil {
 			os.Exit(0) // Blocked at write time
 		}
-		os.Exit(0)
+		os.Exit(10) // UDP payload was sent: egress was NOT denied.
 
 	case "dns_leak":
 		resolver := HermeticResolver()
@@ -173,7 +174,7 @@ sys.exit(0 if res == errno.EPERM else 1)
 '`, "203.0.113.1")
 		exitCode := runSandboxedProbe(pyProbe)
 		if exitCode != 0 {
-			t.Logf("sandbox python TCP probe exit code %d (expected 0 for EPERM enforcement)", exitCode)
+			t.Errorf("sandbox TCP probe did not prove kernel EPERM (exit=%d)", exitCode)
 		}
 
 		// IPv6 TCP probe
@@ -186,7 +187,7 @@ sys.exit(0 if res == errno.EPERM else 1)
 '`, "2001:db8::1")
 		exitCodeV6 := runSandboxedProbe(pyProbeV6)
 		if exitCodeV6 != 0 {
-			t.Logf("sandbox python IPv6 TCP probe exit code %d", exitCodeV6)
+			t.Errorf("sandbox IPv6 TCP probe did not prove kernel EPERM (exit=%d)", exitCodeV6)
 		}
 
 		_ = testNet
@@ -523,3 +524,37 @@ func (r *recordingConsumer) ConsumeInference(res InferenceResult, jpeg []byte) {
 
 // Silence unused imports in build variants
 var _ = syscall.EPERM
+
+// TestH7HermeticDialIsConnectedToRealRTSPTransport verifies the opt-in hook
+// executes on the real RTSP handshake, not only via isolated helper tests.
+func TestH7HermeticDialIsConnectedToRealRTSPTransport(t *testing.T) {
+	sim, err := rtsptest.NewSimulator(rtsptest.Options{
+		AutoPacketCount: 8, AutoPacketInterval: 5 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sim.Close()
+
+	session, err := rtsp.DialWithDialContext(context.Background(), sim.Addr(), "/live", "", "",
+		2*time.Second, HermeticDialContext)
+	if err != nil {
+		t.Fatalf("opt-in hermetic RTSP loopback handshake: %v", err)
+	}
+	_ = session.Close()
+	if _, err := rtsp.DialWithDialContext(context.Background(),
+		"203.0.113.1:554", "/live", "", "", time.Second, HermeticDialContext); !errors.Is(err, ErrHermeticNetworkEscape) {
+		t.Fatalf("external camera address not blocked by injected hermetic transport: %v", err)
+	}
+}
+
+// TestH7GenericDialerRejectsUnconfinedUnixSockets ensures that unrestricted
+// local daemon sockets cannot be used as a network relay via this helper.
+func TestH7GenericDialerRejectsUnconfinedUnixSockets(t *testing.T) {
+	for _, network := range []string{"unix", "unixgram", "unixpacket"} {
+		if conn, err := HermeticDialContext(context.Background(), network,
+			"/var/run/docker.sock"); conn != nil || !errors.Is(err, ErrHermeticSocketEscape) {
+			t.Fatalf("unconfined Unix socket allowed (%s): conn=%v err=%v", network, conn, err)
+		}
+	}
+}
