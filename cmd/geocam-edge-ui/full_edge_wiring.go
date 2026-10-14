@@ -1,0 +1,33 @@
+package main
+
+import (
+	"errors"
+
+	"github.com/drko-dev/monitoreoedgeis/internal/installer"
+)
+
+// NewAppWithPinnedRuntimePack provides the explicit, release-owned wiring
+// boundary for H5A/Wails -> H5B -> H6B. Production NewApp stays fail-closed.
+// The embedding release must supply a trusted digest from outside packDir.
+func NewAppWithPinnedRuntimePack(options installer.RuntimePackProvisionerOptions) (*App, error) {
+	if !options.Enabled {
+		return nil, installer.ErrRuntimePackProvisioningDisabled
+	}
+	if options.ExpectedManifestSHA256 == "" {
+		return nil, installer.ErrRuntimePackManifestPinRequired
+	}
+	if options.PackDir == "" || options.DataDir == "" {
+		return nil, errors.New("release-owned pack and persistent data locations are required")
+	}
+	backend, err := installer.NewTransactionalRuntimePackProvisioner(options)
+	if err != nil {
+		return nil, err
+	}
+	adapter, err := installer.NewRuntimePackPreparationAdapter(backend, true)
+	if err != nil {
+		return nil, err
+	}
+	app := NewApp()
+	app.preparation = adapter
+	return app, nil
+}
