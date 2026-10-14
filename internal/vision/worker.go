@@ -100,9 +100,13 @@ type Config struct {
 	// Hermetic enables the Runtime Pack-only process contract. When true, the
 	// command, worker entrypoint, and media tools must resolve inside RuntimePackRoot;
 	// ProcessEnv replaces, rather than extends, the parent environment.
-	Hermetic            bool
-	RuntimePackRoot     string
-	ProcessEnv          []string
+	Hermetic        bool
+	RuntimePackRoot string
+	ProcessEnv      []string
+	// Optional independently authenticated installed-pack recheck called
+	// immediately before EVERY Worker subprocess spawn/restart. Lab fixtures
+	// may omit it; only release-owned signed contracts supply this callback.
+	PreSpawnVerify      func(context.Context) error
 	ModelPackAuthorized bool
 	ModelsDir           string
 	PersonModel         string
@@ -356,6 +360,16 @@ func (w *Worker) sleep(ctx context.Context, d time.Duration) bool {
 }
 
 func (w *Worker) spawnAndHandshake(ctx context.Context) error {
+	if w.cfg.Hermetic {
+		// Do not reuse the pack integrity decision made when Config was
+		// constructed or when Start was first called. This runs on every
+		// auto-restart too, and precedes even the socket directory mutation.
+		if w.cfg.PreSpawnVerify != nil {
+			if err := w.cfg.PreSpawnVerify(ctx); err != nil {
+				return fmt.Errorf("hermetic Worker signed pack pre-spawn verification: %w", err)
+			}
+		}
+	}
 	if err := ensureSocketDir(w.cfg.SocketPath); err != nil {
 		return err
 	}

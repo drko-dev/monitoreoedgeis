@@ -81,3 +81,16 @@ Adversarial tests under Go race detection confirm:
 3. Same setup but installed Worker artifact tampered: **fail closed**, no committed or READY result.
 
 **Limits:** This validates recovery of an already committed synthetic pack; crash recovery while no active tree exists, upgrades and concurrent filesystem attacks still need separately adversarial test coverage. Journal reconciliation may change transaction metadata before the installed-tree check, but signature/key status is authenticated before that operation. The result remains UNCERTIFIED. This does not activate Wails or authorize model redistribution or release.
+
+## H6D-R11.4 — Opt-in installed-pack guard at Worker process spawn/restart
+
+The previously added VerifyInstalledRuntimePack API detected post-install changes but was **not invoked at the Worker spawn boundary**. R11.4 provides a narrow, non-shipping bridge for future release-owned orchestration:
+
+- New installer BuildSignedInstalledWorkerLaunchSpec(ctx, modelsDir, stateDir) constructs an installed-only, **non-executing** launch spec from the independently signed manifest and rechecks the complete installed tree both before and after constructing that spec. It refuses absent installs or relative persistent model/state paths. The resulting spec **still returns ModelsAuthorized=false**; signing a runtime does NOT give permission to redistribute or run YOLO weights.
+- The signed spec exposes VerifyBeforeSpawn(ctx) which rechecks the live independent publisher key, current revocation status, raw pinned manifest hash, signed bytes, entire installed artifact inventory and launch-contract invariants **every time it is called**, including after original source media has been removed. There is no permanent cached trust certificate.
+- Existing agent buildBundledVisionSink detects this optional VerifyBeforeSpawn method on the launch contract and passes it into vision.Config.PreSpawnVerify. A hermetic vision.Worker invokes the callback at the very beginning of each spawnAndHandshake attempt, including all supervisor retries after process death, **before socket directory creation and before cmd.Start**. The legacy/laboratory launch contracts and standard LAN camera workflows remain unchanged.
+- Race-tested negative cases cover modifying installed Worker bytes **after the launch contract was constructed**, publisher key revocation after construction, a zero-value/unbound spec, explicit model/state path checks, repeated pre-spawn rejection and cancellation. No real Worker was spawned in these new tests.
+
+**Boundaries not claimed:** This is an opt-in callback for a future **separately authorized** launch pathway, not an enabled product runtime. It does not remove the last potential file-swap window between final hash verification and OS exec, does not stop mutation while a process is already running, and does not automatically authorize models. A tamper-resistant production release still needs OS-level owner/permission separation or verified descriptor/code-signature execution, clean macOS 14 physical validation, H7 installed-product isolation and all redistribution/legal permissions.
+
+**No default Wails activation, model copying, deploy, release or merge.**

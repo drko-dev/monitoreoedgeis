@@ -5,6 +5,11 @@ on:
     paths:
       - 'internal/installer/signed_runtime_pack_backend.go'
       - 'internal/installer/signed_runtime_pack_backend_test.go'
+      - 'internal/installer/signed_installed_worker_launch.go'
+      - 'internal/installer/signed_installed_worker_launch_test.go'
+      - 'internal/vision/worker.go'
+      - 'internal/vision/signed_pre_spawn_test.go'
+      - 'internal/agent/vision_module.go'
       - 'cmd/geocam-edge-ui/full_edge_signed_wiring.go'
       - 'cmd/geocam-edge-ui/full_edge_signed_wiring_test.go'
       - '.github/workflows/full-edge-signed-provisioning.yml'
@@ -14,6 +19,11 @@ on:
     paths:
       - 'internal/installer/signed_runtime_pack_backend.go'
       - 'internal/installer/signed_runtime_pack_backend_test.go'
+      - 'internal/installer/signed_installed_worker_launch.go'
+      - 'internal/installer/signed_installed_worker_launch_test.go'
+      - 'internal/vision/worker.go'
+      - 'internal/vision/signed_pre_spawn_test.go'
+      - 'internal/agent/vision_module.go'
       - 'cmd/geocam-edge-ui/full_edge_signed_wiring.go'
       - 'cmd/geocam-edge-ui/full_edge_signed_wiring_test.go'
       - '.github/workflows/full-edge-signed-provisioning.yml'
@@ -36,9 +46,9 @@ jobs:
           go-version: '1.26.2'
           cache: true
       - name: Test signature/pin/revocation/transaction boundaries with race detector
-        run: go test -race -count=1 -run 'TestSignedPackGate|TestWailsSignedRuntimePack' ./internal/installer ./cmd/geocam-edge-ui
+        run: go test -race -count=1 -run 'TestSignedPack|TestHermeticWorkerPreSpawn|TestWailsSignedRuntimePack' ./internal/installer ./cmd/geocam-edge-ui ./internal/vision ./internal/agent
       - name: Static analysis for signed runtime wiring
-        run: go vet ./internal/installer ./cmd/geocam-edge-ui
+        run: go vet ./internal/installer ./cmd/geocam-edge-ui ./internal/vision ./internal/agent
 
 # No production signer keys, models, FFmpeg binaries or sealed release packs
 # are downloaded or included. Passing is NOT installer or release certification.
