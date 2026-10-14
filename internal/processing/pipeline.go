@@ -127,7 +127,15 @@ func newCameraPipeline(candidateKey string, desc rtsp.StreamDescriptor, cfg Conf
 	}
 	p.decoderFactory = func() (VideoDecoder, error) {
 		return NewFFmpegDecoder(
-			FFmpegDecoderConfig{BinaryPath: cfg.FFmpegPath, QueueDepth: cfg.DecodeQueueDepth, Codec: desc.Codec, OutputWidth: cfg.OutputWidth, OutputHeight: cfg.OutputHeight},
+			FFmpegDecoderConfig{
+				Mode:           cfg.FFmpegMode,
+				BinaryPath:     cfg.FFmpegPath,
+				VerifiedFFmpeg: cfg.VerifiedFFmpeg,
+				QueueDepth:     cfg.DecodeQueueDepth,
+				Codec:          desc.Codec,
+				OutputWidth:    cfg.OutputWidth,
+				OutputHeight:   cfg.OutputHeight,
+			},
 			desc.Width, desc.Height,
 			desc.SpropParameterSets,
 			logger,

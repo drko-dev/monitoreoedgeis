@@ -213,6 +213,8 @@ type Config struct {
 	MaxConcurrentPipelines int
 	CandidateAllowlist     []string
 	FFmpegPath             string
+	FFmpegMode             FFmpegExecutionMode
+	VerifiedFFmpeg         *VerifiedFFmpeg
 	DecodeTimeout          time.Duration
 	// LiveTap, when set, sees every decoded frame ahead of the TargetFPS
 	// sampler (Full Edge Live View). It never feeds the router, so live FPS
