@@ -32,9 +32,9 @@ func NewAppWithPinnedRuntimePack(options installer.RuntimePackProvisionerOptions
 	// Bootstrap from transactional evidence, not H5B's in-memory default.
 	// An absent/corrupt active pack remains FAILED (never READY); the
 	// operation error is exposed through Status/Diagnostic, not ignored.
-	// An explicitly enabled desktop launch must not hang forever on a
-	// contested recovery lock, corrupt journal, or interrupted transaction.
-	// Timed-out recovery produces an uncertified failure snapshot, not READY.
+	// Bound cooperative recovery and lock acquisition to a 15-second context.
+	// This is not a hard deadline for non-cancellable filesystem syscalls.
+	// Timeout never implies successful recovery or readiness.
 	recoveryCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	_, _ = adapter.RestoreFromTransaction(recoveryCtx)

@@ -14,7 +14,7 @@
 1. The Wails `validatedPreparationSnapshot` boundary now validates the snapshot **whether or not the backend also returns an error**. Previously, on `err != nil`, it returned potentially malformed or falsely `READY` backend data to the frontend without validation.
 2. Invalid snapshots are replaced with a safe `FAILED / INVALID_PREPARATION_STATUS` result and a fresh set of pending components. Even a completely shaped `READY`/certification snapshot is replaced by `FAILED / PREPARATION_BACKEND_ERROR` if its backend operation failed. The original backend error remains returned, never silently converted to success.
 3. Valid `RECOVERY_REQUIRED` snapshots are preserved with their backend error for diagnosis, but never reported as `READY`. Cancellation remains unsupported during filesystem activation rather than acknowledged without proof.
-4. Explicit H5C startup recovery is bounded to 15 seconds to avoid an indefinite Wails constructor hang on contested transactional recovery locks. An error leaves an uncertified snapshot; it does not imply a successful recovery.
+4. Explicit H5C startup recovery now uses a cooperative 15-second context deadline for lock acquisition and cancellable work. This is **not a hard wall-clock guarantee** against non-cancellable filesystem calls. A timeout or any recovery error leaves an uncertified snapshot and never implies successful recovery.
 5. Synthetic Wails tests cover all four bridge operations (`Status`, `Start`, `Cancel`, `Recover`) with adversarial invalid status, fake ready with backend error, valid-shaped certification despite backend error, and recovery-required with error. The default shipping `NewApp()` is tested to remain fail-closed.
 
 ## Tests / limitations
