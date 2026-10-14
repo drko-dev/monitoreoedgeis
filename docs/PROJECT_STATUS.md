@@ -5,6 +5,16 @@
 
 ## Current Active Initiative: Full Edge Self-Contained Offline Runtime
 
+
+### 2026-10-14 — latest integration checkpoint (supersedes the older H3 'Current' snapshot below)
+
+- **H7B** laboratory network-denial harness PR #163 **MERGED** into main at `3ab57fc08456dd2a2eaa4a4ea2903be8578d660c`. macOS IPv4/IPv6 TCP/UDP denial + localhost RTSP functional YOLO/MPS lab E2E PASS. This is **not** full offline/clean-machine certification.
+- **H6D-R5** Worker bootstrap and runtime lab preflight PR #162 remains **OPEN**; local macOS M4 tests and 15/15 checks at the previously reviewed HEAD passed; full license/provenance/clean-machine/egress gates remain.
+- **H5B/H5C/H5D** adapter, explicit pinned-pack Wails constructor and startup reconciliation are **MERGED PARTIAL**. Shipping `NewApp()` still uses `UnavailableFullEdgePreparation`. No real Wails provisioning is enabled.
+- **H6C security hardening (this branch):** `feat/full-edge-h6c-wails-safety`, issue #155 already approved, local changes add Wails error-snapshot fail-closed validation and bounded explicit startup recovery. Tests must pass and PR be reviewed before merge. This is not a completed Full Edge installer.
+- **Blocked:** independent authenticated release pin and full signed pack, Python/Torchvision clean-machine relocation, dependencies/models/FFmpeg legal review and approval, H7/H8 full certification. `MODEL_REDISTRIBUTION_APPROVED=false`, no release/deploy/production mutation.
+
+
 ### Hito OFFLINE-H3: Hermetic Wheelhouse & Deterministic Python Dependencies (Current)
 - **Branch:** `feat/full-edge-offline-wheelhouse`
 - **Base:** `main @ 6f381a4d337ce2271823b92884ea4c5b6a1f03d1` (después del merge de H2 en PR #139)

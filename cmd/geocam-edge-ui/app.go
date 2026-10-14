@@ -92,20 +92,31 @@ func (a *App) RecoverFullEdgeRuntime(operationID string) (installer.FullEdgePrep
 }
 
 func validatedPreparationSnapshot(snapshot installer.FullEdgePreparationSnapshot, err error) (installer.FullEdgePreparationSnapshot, error) {
+	// Wails is a trust boundary even when its backend reports an error:
+	// it must never relay an invalid/READY status alongside a rejected Promise.
+	// Some frontends may retain the returned data on error, and an explicitly
+	// injected backend is not authorization to report fake certification.
+	if installer.ValidateFullEdgePreparationSnapshot(snapshot) != nil {
+		return blockedPreparationSnapshot("INVALID_PREPARATION_STATUS"), structuredError(err)
+	}
 	if err != nil {
+		if snapshot.State == installer.StateReady || snapshot.CertifiedReady() {
+			return blockedPreparationSnapshot("PREPARATION_BACKEND_ERROR"), structuredError(err)
+		}
 		return snapshot, structuredError(err)
 	}
-	if installer.ValidateFullEdgePreparationSnapshot(snapshot) != nil {
-		return installer.FullEdgePreparationSnapshot{
-			State:                installer.StateFailed,
-			ProgressPercent:      0,
-			ErrorCode:            "INVALID_PREPARATION_STATUS",
-			SafeMessage:          "Full Edge preparation status failed validation.",
-			DiagnosticsAvailable: true,
-			Components:           installer.DefaultComponentProgress(),
-		}, nil
-	}
 	return snapshot, nil
+}
+
+func blockedPreparationSnapshot(code string) installer.FullEdgePreparationSnapshot {
+	return installer.FullEdgePreparationSnapshot{
+		State:                installer.StateFailed,
+		ProgressPercent:      0,
+		ErrorCode:            code,
+		SafeMessage:          "Full Edge preparation was not certified; no readiness can be reported.",
+		DiagnosticsAvailable: true,
+		Components:           installer.DefaultComponentProgress(),
+	}
 }
 
 func (a *App) preparationAPI() installer.FullEdgePreparationAPI {

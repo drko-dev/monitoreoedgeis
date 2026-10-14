@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/installer"
 )
@@ -31,7 +32,12 @@ func NewAppWithPinnedRuntimePack(options installer.RuntimePackProvisionerOptions
 	// Bootstrap from transactional evidence, not H5B's in-memory default.
 	// An absent/corrupt active pack remains FAILED (never READY); the
 	// operation error is exposed through Status/Diagnostic, not ignored.
-	_, _ = adapter.RestoreFromTransaction(context.Background())
+	// Bound cooperative recovery and lock acquisition to a 15-second context.
+	// This is not a hard deadline for non-cancellable filesystem syscalls.
+	// Timeout never implies successful recovery or readiness.
+	recoveryCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, _ = adapter.RestoreFromTransaction(recoveryCtx)
 	app := NewApp()
 	app.preparation = adapter
 	return app, nil
