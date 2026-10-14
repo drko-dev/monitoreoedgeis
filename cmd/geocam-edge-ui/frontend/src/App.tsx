@@ -27,6 +27,30 @@ type CameraWizardStep = 'dashboard' | 'discover' | 'credentials' | 'result';
 
 export const App: React.FC = () => {
   const { t } = useI18n();
+  // This panel is compiled only in the private lab frontend bundle.
+  // Production builds never define VITE_LOCAL_FULL_EDGE_LAB.
+  const privateLabEnabled = import.meta.env.VITE_LOCAL_FULL_EDGE_LAB === '1';
+  const [privateLabRunning, setPrivateLabRunning] = useState(false);
+  const [privateLabResult, setPrivateLabResult] = useState<{
+    passed: boolean; status: string; detail: string
+  } | null>(null);
+  const startPrivateLab = async () => {
+    setPrivateLabRunning(true);
+    setPrivateLabResult(null);
+    try {
+      type LabResult = { passed: boolean; status: string; detail: string };
+      const api = (window as unknown as {
+        go?: { main?: { App?: { RunPrivateFullEdgeLabTest?: () => Promise<LabResult> } } }
+      }).go?.main?.App?.RunPrivateFullEdgeLabTest;
+      if (!api) throw new Error('Esta compilación no tiene el comprobador de laboratorio.');
+      const result = await api();
+      setPrivateLabResult(result);
+    } catch (error) {
+      setPrivateLabResult({ passed: false, status: 'LAB_TEST_FAILED', detail: String(error) });
+    } finally {
+      setPrivateLabRunning(false);
+    }
+  };
   const { report, state, loading, error, refresh } = useInstaller();
   const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
   const [modeStep, setModeStep] = useState<ModeWizardStep>('dashboard');
@@ -156,6 +180,26 @@ export const App: React.FC = () => {
   return (
     <main className="app-container" role="main">
       <Header version={report?.edge_version || 'v1.0.0'} />
+
+      {privateLabEnabled && (
+        <section className="card" aria-label="Prueba local Full Edge" style={{ marginBottom: '1rem', border: '2px solid #64748b', padding: '1.25rem' }}>
+          <h2 style={{ marginTop: 0 }}>Full Edge — prueba privada en esta Mac</h2>
+          <p>Ejecuta un video RTSP simulado, FFmpeg, Python y tus modelos YOLO locales. No conecta cámaras reales ni publica archivos.</p>
+          <Button variant="primary" onClick={startPrivateLab} disabled={privateLabRunning}>
+            {privateLabRunning ? 'Probando detección de personas…' : 'Probar Full Edge local'}
+          </Button>
+          {privateLabResult && (
+            <div role="status" style={{ marginTop: '1rem', padding: '1rem', borderRadius: '8px',
+              background: privateLabResult.passed ? '#dcfce7' : '#fee2e2', color: '#172554' }}>
+              <strong>{privateLabResult.passed ? 'DETECCIÓN REAL: PASS' : 'PRUEBA NO SUPERADA'}</strong>
+              <p style={{ marginBottom: 0 }}>{privateLabResult.detail}</p>
+            </div>
+          )}
+          <p style={{ marginBottom: 0, fontSize: '0.8rem', opacity: 0.8 }}>
+            Edición LAB, no instalador comercial. Sólo compatible con este entorno local.
+          </p>
+        </section>
+      )}
 
       {error && (
         <ErrorAlert
