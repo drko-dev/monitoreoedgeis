@@ -1,0 +1,7 @@
+(version 1)
+(allow default)
+; H7B Mac laboratory process-tree policy. Rules are intentionally ordered:
+; first deny every outbound IP destination; then allow localhost for RTSP.
+; Not a complete macOS network security boundary or production firewall.
+(deny network-outbound (remote ip "*:*"))
+(allow network-outbound (remote ip "localhost:*"))
