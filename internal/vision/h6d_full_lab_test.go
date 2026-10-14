@@ -104,7 +104,16 @@ func TestLabRTSPToRealYOLO(t *testing.T) {
 	if err = rm.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	pm := processing.NewManager(processing.Config{Enabled: true, TargetFPS: 5, RingBufferSize: 10, QueueDepth: 64, DecodeQueueDepth: 8, MaxConcurrentPipelines: 2}, rm, nil, nil, sink)
+	decoderPath := os.Getenv("H6D_LAB_FFMPEG_DECODER")
+	if decoderPath != "" {
+		if !filepath.IsAbs(decoderPath) {
+			t.Fatal("H6D_LAB_FFMPEG_DECODER must be an absolute path")
+		}
+		if _, err := os.Stat(decoderPath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pm := processing.NewManager(processing.Config{Enabled: true, TargetFPS: 5, RingBufferSize: 10, QueueDepth: 64, DecodeQueueDepth: 8, MaxConcurrentPipelines: 2, FFmpegPath: decoderPath}, rm, nil, nil, sink)
 	if err = pm.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
