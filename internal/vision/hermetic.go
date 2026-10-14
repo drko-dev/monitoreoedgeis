@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/drko-dev/monitoreoedgeis/internal/workerbootstrap"
 )
 
 var (
@@ -23,6 +25,7 @@ var hermeticEnvAllowlist = map[string]bool{
 	"GEOCAM_EDGE_YOLO_MODELS_DIR": true,
 	"LANG":                        true,
 	"LC_ALL":                      true,
+	"YOLO_CONFIG_DIR":             true,
 }
 
 func (w *Worker) validateHermeticConfig() error {
@@ -32,7 +35,8 @@ func (w *Worker) validateHermeticConfig() error {
 	if w.models == nil || !w.models.Ready() {
 		return ErrHermeticModelsUnavailable
 	}
-	if !filepath.IsAbs(w.cfg.RuntimePackRoot) || !filepath.IsAbs(w.cfg.WorkerCmd) || len(w.cfg.WorkerArgs) != 3 || w.cfg.WorkerArgs[0] != "-I" || w.cfg.WorkerArgs[1] != "-B" || !filepath.IsAbs(w.cfg.WorkerArgs[2]) {
+	workerPath, argsValid := workerbootstrap.Entrypoint(w.cfg.WorkerArgs)
+	if !filepath.IsAbs(w.cfg.RuntimePackRoot) || !filepath.IsAbs(w.cfg.WorkerCmd) || !argsValid {
 		return ErrHermeticRuntimePackInvalid
 	}
 	root, err := filepath.EvalSymlinks(filepath.Clean(w.cfg.RuntimePackRoot))
@@ -46,7 +50,13 @@ func (w *Worker) validateHermeticConfig() error {
 	if err := requirePackExecutable(root, w.cfg.WorkerCmd); err != nil {
 		return err
 	}
-	if err := requirePackArtifact(root, w.cfg.WorkerArgs[2]); err != nil {
+	if err := requirePackArtifact(root, workerPath); err != nil {
+		return err
+	}
+	// The isolated Python bootstrap imports only from this worker directory.
+	// Both files must be confined; higher-level manifest validation must pin
+	// their content before activation of any release Runtime Pack.
+	if err := requirePackArtifact(root, filepath.Join(filepath.Dir(workerPath), "backend.py")); err != nil {
 		return err
 	}
 
@@ -54,12 +64,12 @@ func (w *Worker) validateHermeticConfig() error {
 	if err != nil {
 		return err
 	}
-	for _, required := range []string{"PATH", "HOME", "TMPDIR", "GEOCAM_VIDEO_FFMPEG_PATH", "GEOCAM_VIDEO_FFPROBE_PATH", "GEOCAM_EDGE_YOLO_MODELS_DIR"} {
+	for _, required := range []string{"PATH", "HOME", "TMPDIR", "GEOCAM_VIDEO_FFMPEG_PATH", "GEOCAM_VIDEO_FFPROBE_PATH", "GEOCAM_EDGE_YOLO_MODELS_DIR", "YOLO_CONFIG_DIR"} {
 		if strings.TrimSpace(env[required]) == "" {
 			return ErrHermeticRuntimePackInvalid
 		}
 	}
-	for _, name := range []string{"HOME", "TMPDIR", "GEOCAM_EDGE_YOLO_MODELS_DIR"} {
+	for _, name := range []string{"HOME", "TMPDIR", "GEOCAM_EDGE_YOLO_MODELS_DIR", "YOLO_CONFIG_DIR"} {
 		if !filepath.IsAbs(env[name]) {
 			return ErrHermeticRuntimePackInvalid
 		}
@@ -69,6 +79,11 @@ func (w *Worker) validateHermeticConfig() error {
 		if err != nil || !info.IsDir() {
 			return ErrHermeticRuntimePackInvalid
 		}
+	}
+	// Ultralytics otherwise silently writes a settings.json under host /tmp,
+	// escaping this worker's private persistent state directory.
+	if filepath.Clean(env["YOLO_CONFIG_DIR"]) != filepath.Clean(env["HOME"]) {
+		return ErrHermeticRuntimePackInvalid
 	}
 	stateRoot, err := filepath.EvalSymlinks(env["HOME"])
 	if err != nil {

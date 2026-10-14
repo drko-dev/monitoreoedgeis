@@ -17,6 +17,7 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/processing"
 	"github.com/drko-dev/monitoreoedgeis/internal/rtsp"
 	"github.com/drko-dev/monitoreoedgeis/internal/rtsptest"
+	"github.com/drko-dev/monitoreoedgeis/internal/workerbootstrap"
 )
 
 type labEvents struct{ results chan InferenceResult }
@@ -107,11 +108,9 @@ func TestLabRTSPToRealYOLO(t *testing.T) {
 		}
 		py = verifiedH6DLabArtifact(t, pack, manifest, "python/bin/python3.11")
 		workerPath = verifiedH6DLabArtifact(t, pack, manifest, "worker/worker.py")
+		_ = verifiedH6DLabArtifact(t, pack, manifest, "worker/backend.py")
 		decoderPath = verifiedH6DLabArtifact(t, pack, manifest, "ffmpeg/ffmpeg")
-		// Python's isolated mode omits the script directory from sys.path.
-		// Add only this verified pack directory before loading its worker module.
-		bootstrap := "import runpy,sys; d=sys.argv.pop(1); p=sys.argv.pop(1); sys.path.insert(0,d); sys.argv[0]=p; runpy.run_path(p,run_name='__main__')"
-		workerArgs = []string{"-I", "-B", "-c", bootstrap, filepath.Dir(workerPath), workerPath}
+		workerArgs = workerbootstrap.Args(workerPath)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
 	defer cancel()
@@ -120,7 +119,34 @@ func TestLabRTSPToRealYOLO(t *testing.T) {
 	if device == "" {
 		device = "cpu"
 	}
-	w := NewWorker(Config{WorkerCmd: py, WorkerArgs: workerArgs, SocketPath: filepath.Join(dir, "v.sock"), Device: device, ImgSize: 320, PersonConfidence: 0.3, VehicleConfidence: 0.3, NMSIoU: 0.45, InferTimeout: 15 * time.Second, StartTimeout: 40 * time.Second}, NewModelManager(models, "yolo11s-pose.pt", "yolo11n.pt"), nil)
+	cfg := Config{WorkerCmd: py, WorkerArgs: workerArgs, SocketPath: filepath.Join(dir, "v.sock"), Device: device, ImgSize: 320, PersonConfidence: 0.3, VehicleConfidence: 0.3, NMSIoU: 0.45, InferTimeout: 15 * time.Second, StartTimeout: 40 * time.Second}
+	if pack != "" {
+		// Test-only authorization uses operator-supplied LOCAL models and never
+		// changes model redistribution or production readiness gates.
+		manifest, err := readH6DLabPackManifest(pack)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ffprobePath := verifiedH6DLabArtifact(t, pack, manifest, "ffmpeg/ffprobe")
+		tmpDir := filepath.Join(dir, "tmp")
+		if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Hermetic = true
+		cfg.RuntimePackRoot = pack
+		cfg.ModelPackAuthorized = true // local lab only, never product provisioning
+		cfg.ModelsDir = models
+		cfg.ProcessEnv = []string{
+			"PATH=" + filepath.Dir(decoderPath),
+			"HOME=" + dir,
+			"YOLO_CONFIG_DIR=" + dir,
+			"TMPDIR=" + tmpDir,
+			"GEOCAM_VIDEO_FFMPEG_PATH=" + decoderPath,
+			"GEOCAM_VIDEO_FFPROBE_PATH=" + ffprobePath,
+			"GEOCAM_EDGE_YOLO_MODELS_DIR=" + models,
+		}
+	}
+	w := NewWorker(cfg, NewModelManager(models, "yolo11s-pose.pt", "yolo11n.pt"), nil)
 	events := &labEvents{results: make(chan InferenceResult, 10)}
 	sink := NewSink(w, w.ModelManager(), nil, events, nil)
 	if err = w.Start(ctx); err != nil {
