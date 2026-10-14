@@ -90,3 +90,50 @@ func TestH5BPreparationAdapterCancellationNeverPretendsSuccess(t *testing.T) {
 		t.Fatalf("cancel=%+v err=%v", snap, err)
 	}
 }
+
+func TestH5DRestoreFromTransactionRebuildsStateWithoutReadiness(t *testing.T) {
+	backend := &testRuntimePackBackend{
+		recoverResult: RuntimePackProvisioningResult{
+			State: "COMMITTED_UNCERTIFIED", TransactionCommitted: true,
+			RuntimeIntegrityVerified: true, PinnedReleaseVerified: true,
+		},
+	}
+	first, err := NewRuntimePackPreparationAdapter(backend, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := first.RestoreFromTransaction(context.Background())
+	if err != nil || snap.State != StateFailed || snap.ErrorCode != "RUNTIME_UNCERTIFIED" || snap.CertifiedReady() {
+		t.Fatalf("restored snapshot = %+v, err=%v", snap, err)
+	}
+	if err := ValidateFullEdgePreparationSnapshot(snap); err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewRuntimePackPreparationAdapter(backend, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := second.RestoreFromTransaction(context.Background())
+	if err != nil || next.State != StateFailed || next.CertifiedReady() || backend.recovers != 2 {
+		t.Fatalf("second startup: %+v err=%v count=%d", next, err, backend.recovers)
+	}
+	if next.OperationID != "" {
+		t.Fatal("restored operation ID must not be invented")
+	}
+}
+func TestH5DRestoreFromTransactionPreservesRollbackAmbiguity(t *testing.T) {
+	backend := &testRuntimePackBackend{recoverResult: RuntimePackProvisioningResult{State: "ROLLED_BACK_UNCERTIFIED", ErrorCode: "RELEASE_PIN_MISMATCH"}}
+	adapter, _ := NewRuntimePackPreparationAdapter(backend, true)
+	snap, err := adapter.RestoreFromTransaction(context.Background())
+	if err != nil || snap.State != StateRecoveryRequired || !snap.RecoveryAvailable || snap.CertifiedReady() {
+		t.Fatalf("rollback snapshot = %+v err=%v", snap, err)
+	}
+}
+func TestH5DRestoreFromTransactionFailsClosedOnInvalidRuntime(t *testing.T) {
+	backend := &testRuntimePackBackend{recoverResult: RuntimePackProvisioningResult{State: "RECOVERED_UNCERTIFIED", ErrorCode: "ACTIVE_RUNTIME_NOT_VERIFIED"}, recoverError: errors.New("corrupt journal")}
+	adapter, _ := NewRuntimePackPreparationAdapter(backend, true)
+	snap, err := adapter.RestoreFromTransaction(context.Background())
+	if err == nil || snap.State != StateFailed || snap.ErrorCode != "ACTIVE_RUNTIME_NOT_VERIFIED" || snap.CanStart || snap.CertifiedReady() {
+		t.Fatalf("corrupt recovery = %+v err=%v", snap, err)
+	}
+}
