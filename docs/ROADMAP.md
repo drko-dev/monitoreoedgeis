@@ -4,6 +4,11 @@
 > Do not renumber them. Do not reinterpret them. They are referenced from
 > commits, PRs, `docs/PROJECT_STATUS.md` and session handoffs.
 
+
+### Full Edge offline initiative — current integration (2026-10-14)
+
+H7B's **laboratory** outbound-IP denial harness is merged (PR #163); release-grade airgap is not certified. H5B/H5C/H5D explicit adapter/bootstrap are merged but the normal Wails application remains fail-closed. H6C issue #155 tracks adversarial Wails bridge safety and later externally trusted release-owned wiring; the latter is **BLOCKED**, not authorized or implemented for product use, pending provenance, manifest pin, models/licensing and H7/H8 evidence. H6D source/Worker lab PR #162 stays open. Do not interpret H6C safety test work as enabling `RUNTIME_READY` or `INFERENCE_READY`.
+
 ## Block status
 
 | Block | Status                |
