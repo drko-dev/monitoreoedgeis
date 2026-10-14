@@ -7,12 +7,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/drko-dev/monitoreoedgeis/internal/workerbootstrap"
 )
 
 func syntheticHermeticWorker(t *testing.T) (*Worker, string) {
 	t.Helper()
 	root := t.TempDir()
-	for _, name := range []string{"python/bin/python3", "worker/worker.py", "media/ffmpeg", "media/ffprobe"} {
+	for _, name := range []string{"python/bin/python3", "worker/worker.py", "worker/backend.py", "media/ffmpeg", "media/ffprobe"} {
 		path := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -33,10 +35,10 @@ func syntheticHermeticWorker(t *testing.T) (*Worker, string) {
 	ffprobe := filepath.Join(root, "media/ffprobe")
 	w := NewWorker(Config{
 		WorkerCmd:           python,
-		WorkerArgs:          []string{"-I", "-B", workerPath},
+		WorkerArgs:          workerbootstrap.Args(workerPath),
 		Hermetic:            true,
 		RuntimePackRoot:     root,
-		ProcessEnv:          []string{"PATH=" + filepath.Dir(ffmpeg), "HOME=" + stateDir, "TMPDIR=" + stateDir, "GEOCAM_VIDEO_FFMPEG_PATH=" + ffmpeg, "GEOCAM_VIDEO_FFPROBE_PATH=" + ffprobe, "GEOCAM_EDGE_YOLO_MODELS_DIR=" + models.dir},
+		ProcessEnv:          []string{"PATH=" + filepath.Dir(ffmpeg), "HOME=" + stateDir, "YOLO_CONFIG_DIR=" + stateDir, "TMPDIR=" + stateDir, "GEOCAM_VIDEO_FFMPEG_PATH=" + ffmpeg, "GEOCAM_VIDEO_FFPROBE_PATH=" + ffprobe, "GEOCAM_EDGE_YOLO_MODELS_DIR=" + models.dir},
 		ModelPackAuthorized: true,
 		ModelsDir:           models.dir,
 		PersonModel:         "yolo11s-pose.pt",
@@ -52,17 +54,33 @@ func TestHermeticWorkerRejectsUnverifiedRuntimeInputs(t *testing.T) {
 		want   error
 	}{
 		{name: "host Python", mutate: func(w *Worker, _ string) { w.cfg.WorkerCmd = "/usr/bin/python3" }, want: ErrHermeticRuntimePackInvalid},
-		{name: "host FFmpeg", mutate: func(w *Worker, _ string) { w.cfg.ProcessEnv[3] = "GEOCAM_VIDEO_FFMPEG_PATH=/opt/homebrew/bin/ffmpeg" }, want: ErrHermeticRuntimePackInvalid},
+		{name: "host FFmpeg", mutate: func(w *Worker, _ string) { w.cfg.ProcessEnv[4] = "GEOCAM_VIDEO_FFMPEG_PATH=/opt/homebrew/bin/ffmpeg" }, want: ErrHermeticRuntimePackInvalid},
 		{name: "host Homebrew on parent PATH is ignored", mutate: func(_ *Worker, _ string) { t.Setenv("PATH", "/opt/homebrew/bin") }, want: nil},
 		{name: "FFmpeg missing", mutate: func(w *Worker, _ string) { _ = os.Remove(w.cfg.ProcessEnvPathForTest("GEOCAM_VIDEO_FFMPEG_PATH")) }, want: ErrHermeticRuntimePackInvalid},
 		{name: "PYTHONPATH contamination rejected", mutate: func(w *Worker, _ string) {
 			w.cfg.ProcessEnv = append(w.cfg.ProcessEnv, "PYTHONPATH=/tmp/contamination")
 		}, want: ErrHermeticRuntimePackInvalid},
 		{name: "temporary directory outside worker state rejected", mutate: func(w *Worker, _ string) {
-			w.cfg.ProcessEnv[2] = "TMPDIR=" + t.TempDir()
+			w.cfg.ProcessEnv[3] = "TMPDIR=" + t.TempDir()
 		}, want: ErrHermeticRuntimePackInvalid},
 		{name: "unreviewed worker arguments rejected", mutate: func(w *Worker, _ string) {
 			w.cfg.WorkerArgs = append(w.cfg.WorkerArgs, "--arbitrary-runtime-override")
+		}, want: ErrHermeticRuntimePackInvalid},
+		{name: "arbitrary bootstrap rejected", mutate: func(w *Worker, _ string) {
+			w.cfg.WorkerArgs[3] = "import os; os.system('echo untrusted')"
+		}, want: ErrHermeticRuntimePackInvalid},
+		{name: "incorrect import directory rejected", mutate: func(w *Worker, _ string) {
+			w.cfg.WorkerArgs[4] = "/tmp"
+		}, want: ErrHermeticRuntimePackInvalid},
+		{name: "Ultralytics host temp config rejected", mutate: func(w *Worker, _ string) {
+			w.cfg.ProcessEnv[2] = "YOLO_CONFIG_DIR=/tmp"
+		}, want: ErrHermeticRuntimePackInvalid},
+		{name: "backend missing", mutate: func(w *Worker, root string) {
+			_ = os.Remove(filepath.Join(root, "worker/backend.py"))
+		}, want: ErrHermeticRuntimePackInvalid},
+		{name: "backend symlink escapes pack", mutate: func(w *Worker, root string) {
+			_ = os.Remove(filepath.Join(root, "worker/backend.py"))
+			_ = os.Symlink(filepath.Join(t.TempDir(), "backend.py"), filepath.Join(root, "worker/backend.py"))
 		}, want: ErrHermeticRuntimePackInvalid},
 		{name: "model pack unauthorized", mutate: func(w *Worker, _ string) { w.cfg.ModelPackAuthorized = false }, want: ErrHermeticModelPackUnauthorized},
 		{name: "models directory missing", mutate: func(w *Worker, _ string) {

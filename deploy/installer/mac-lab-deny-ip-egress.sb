@@ -1,0 +1,6 @@
+(version 1)
+(allow default)
+; Mac M4 LOCAL LAB ONLY. Restricts IP remote network-outbound while leaving
+; Unix-domain socket connect available for Go <-> Python worker.
+; Not a complete network isolation policy or H7B certification.
+(deny network-outbound (remote ip "*:*"))

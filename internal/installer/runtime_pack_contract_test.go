@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/drko-dev/monitoreoedgeis/internal/workerbootstrap"
 )
 
 func syntheticMediaPack(t *testing.T) (string, *RuntimeManifest) {
@@ -30,6 +32,7 @@ func syntheticMediaPack(t *testing.T) (string, *RuntimeManifest) {
 	}{
 		{manifest.Python.RelativeBinaryPath, []byte("synthetic-python"), 0o755},
 		{manifest.Worker.Entrypoint, []byte("synthetic-worker"), 0o644},
+		{filepath.ToSlash(filepath.Join(filepath.Dir(manifest.Worker.Entrypoint), "backend.py")), []byte("synthetic-backend"), 0o644},
 		{manifest.Binaries[0].RelativePath, []byte("synthetic-ffmpeg"), 0o755},
 		{manifest.Binaries[1].RelativePath, []byte("synthetic-ffprobe"), 0o755},
 	}
@@ -46,9 +49,12 @@ func syntheticMediaPack(t *testing.T) (string, *RuntimeManifest) {
 	manifest.Python.SizeBytes = int64(len(artifacts[0].data))
 	manifest.Worker.SHA256 = sha256Hex(artifacts[1].data)
 	manifest.Worker.SizeBytes = int64(len(artifacts[1].data))
+	manifest.Worker.BackendRelativePath = artifacts[2].path
+	manifest.Worker.BackendSHA256 = sha256Hex(artifacts[2].data)
+	manifest.Worker.BackendSizeBytes = int64(len(artifacts[2].data))
 	for i := range manifest.Binaries {
-		manifest.Binaries[i].SHA256 = sha256Hex(artifacts[i+2].data)
-		manifest.Binaries[i].SizeBytes = int64(len(artifacts[i+2].data))
+		manifest.Binaries[i].SHA256 = sha256Hex(artifacts[i+3].data)
+		manifest.Binaries[i].SizeBytes = int64(len(artifacts[i+3].data))
 	}
 	return root, &manifest
 }
@@ -126,7 +132,7 @@ func TestBuildRuntimePackWorkerLaunchSpec(t *testing.T) {
 	if spec.Command != filepath.Join(root, manifest.Python.RelativeBinaryPath) {
 		t.Fatalf("worker command is not bundled Python: %s", spec.Command)
 	}
-	if len(spec.Args) != 3 || spec.Args[0] != "-I" || spec.Args[1] != "-B" || spec.Args[2] != filepath.Join(root, manifest.Worker.Entrypoint) {
+	if entry, ok := workerbootstrap.Entrypoint(spec.Args); !ok || entry != filepath.Join(root, manifest.Worker.Entrypoint) {
 		t.Fatalf("unexpected isolated worker args: %#v", spec.Args)
 	}
 	for _, forbidden := range []string{"PYTHONPATH=", "PYTHONHOME=", "http_proxy=", "https_proxy="} {

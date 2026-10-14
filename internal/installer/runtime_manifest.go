@@ -64,6 +64,11 @@ type WorkerSpec struct {
 	Entrypoint string `json:"entrypoint"`
 	SHA256     string `json:"sha256"`
 	SizeBytes  int64  `json:"size_bytes"`
+	// The backend is a separate executable Python module and must be pinned
+	// alongside the Worker for any hermetic release launch.
+	BackendRelativePath string `json:"backend_relative_path,omitempty"`
+	BackendSHA256       string `json:"backend_sha256,omitempty"`
+	BackendSizeBytes    int64  `json:"backend_size_bytes,omitempty"`
 }
 
 // BinarySpec specifies a standalone native executable (e.g. ffmpeg, ffprobe).
@@ -414,6 +419,25 @@ func (m *RuntimeManifest) ValidateSchema() error {
 		}
 	}
 
+	// Backward-compatible template schema: old manifests may omit the
+	// backend, but a hermetic Worker launch strictly requires all 3 fields.
+	if m.Worker.BackendRelativePath != "" || m.Worker.BackendSHA256 != "" || m.Worker.BackendSizeBytes != 0 {
+		if err := validateRelativePath(m.Worker.BackendRelativePath, "worker.backend_relative_path"); err != nil {
+			return err
+		}
+		canonBackendPath := canonicalizeManifestPath(m.Worker.BackendRelativePath)
+		if prev, exists := seenAllArtifactPaths[canonBackendPath]; exists {
+			return fmt.Errorf("%w: worker backend path collides with %s", ErrManifestSchemaInvalid, prev)
+		}
+		seenAllArtifactPaths[canonBackendPath] = "worker.backend_relative_path"
+		if err := validateSHA256(m.Worker.BackendSHA256, "worker.backend_sha256"); err != nil {
+			return err
+		}
+		if m.Worker.BackendSizeBytes <= 0 {
+			return fmt.Errorf("%w: worker.backend_size_bytes must be positive", ErrManifestSchemaInvalid)
+		}
+	}
+
 	// Binaries validation & duplicate check
 	seenBinaryNames := make(map[string]bool)
 	seenBinaryPaths := make(map[string]bool)
@@ -645,6 +669,13 @@ func (m *RuntimeManifest) allArtifacts() []artifactTarget {
 		},
 	}
 
+	if m.Worker.BackendRelativePath != "" {
+		targets = append(targets, artifactTarget{
+			RelativePath: m.Worker.BackendRelativePath,
+			ExpectedHash: m.Worker.BackendSHA256,
+			ExpectedSize: m.Worker.BackendSizeBytes,
+		})
+	}
 	for _, b := range m.Binaries {
 		targets = append(targets, artifactTarget{
 			RelativePath: b.RelativePath,

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/drko-dev/monitoreoedgeis/internal/workerbootstrap"
 )
 
 var (
@@ -184,14 +186,31 @@ func BuildRuntimePackWorkerLaunchSpec(manifest *RuntimeManifest, rootDir, models
 	if err != nil {
 		return spec, fmt.Errorf("resolve bundled worker: %w", err)
 	}
+	// Python -I will not include worker.py's own directory. The fixed
+	// bootstrap imports backend.py from that verified pack directory only.
+	// A release must additionally authenticate backend.py in the full
+	// artifact inventory; file existence alone is not an integrity proof.
+	backendRel := filepath.ToSlash(filepath.Join(filepath.Dir(manifest.Worker.Entrypoint), "backend.py"))
+	if filepath.ToSlash(filepath.Clean(manifest.Worker.BackendRelativePath)) != backendRel ||
+		manifest.Worker.BackendSHA256 == "" || manifest.Worker.BackendSizeBytes <= 0 {
+		return spec, fmt.Errorf("%w: hermetic worker backend is not pinned in the manifest", ErrRuntimePackArtifactsUnverified)
+	}
+	backendPath, err := resolvePackArtifact(root, backendRel)
+	if err != nil {
+		return spec, fmt.Errorf("resolve bundled worker backend: %w", err)
+	}
+	backendInfo, err := os.Stat(backendPath)
+	if err != nil || !backendInfo.Mode().IsRegular() {
+		return spec, fmt.Errorf("%w: bundled worker backend is missing or invalid", ErrRuntimePackArtifactsUnverified)
+	}
 	cleanModelsDir := filepath.Clean(modelsDir)
 	cleanStateDir := filepath.Clean(stateDir)
 	mediaDir := filepath.Dir(media.FFmpeg)
 	return RuntimePackWorkerLaunchSpec{
 		RuntimePackRoot:   root,
 		Command:           pythonPath,
-		Args:              []string{"-I", "-B", workerPath},
-		Environment:       []string{"PATH=" + mediaDir, "HOME=" + cleanStateDir, "TMPDIR=" + filepath.Join(cleanStateDir, "tmp"), "GEOCAM_VIDEO_FFMPEG_PATH=" + media.FFmpeg, "GEOCAM_VIDEO_FFPROBE_PATH=" + media.FFprobe, "GEOCAM_EDGE_YOLO_MODELS_DIR=" + cleanModelsDir},
+		Args:              workerbootstrap.Args(workerPath),
+		Environment:       []string{"PATH=" + mediaDir, "HOME=" + cleanStateDir, "YOLO_CONFIG_DIR=" + cleanStateDir, "TMPDIR=" + filepath.Join(cleanStateDir, "tmp"), "GEOCAM_VIDEO_FFMPEG_PATH=" + media.FFmpeg, "GEOCAM_VIDEO_FFPROBE_PATH=" + media.FFprobe, "GEOCAM_EDGE_YOLO_MODELS_DIR=" + cleanModelsDir},
 		FFmpeg:            media.FFmpeg,
 		FFprobe:           media.FFprobe,
 		ModelsDir:         cleanModelsDir,
