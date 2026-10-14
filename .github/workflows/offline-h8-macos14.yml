@@ -1,0 +1,35 @@
+name: H8 synthetic macOS14 certification guardrails
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/installer/h8-macos14-certification-runner.py'
+      - 'deploy/installer/test-h8-macos14-certification-runner.py'
+      - 'internal/vision/h8_pipeline_test.go'
+      - '.github/workflows/offline-h8-macos14.yml'
+      - 'docs/architecture/H8_MACOS14_CERTIFICATION_REPORT.md'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/installer/h8-macos14-certification-runner.py'
+      - 'deploy/installer/test-h8-macos14-certification-runner.py'
+      - '.github/workflows/offline-h8-macos14.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-guardrails:
+    name: H8 Python fail-closed checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run pure synthetic tests without models, pack, RTSP or privileged VM
+        run: python3 deploy/installer/test-h8-macos14-certification-runner.py -v
+
+# CI cannot prove macOS 14 physical compatibility unless the actual runner
+# runs macOS 14 arm64 with authorized local pack/models. No readiness status.
