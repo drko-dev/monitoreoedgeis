@@ -27,5 +27,7 @@ jobs:
         with:
           pattern: installer-*
           path: artifacts
+      - name: Validate core-only package inventory policy (no model redistribution)
+        run: python3 deploy/installer/test-audit-core-only-installer.py -v
       - name: Cross-check the four packages and write SHA256SUMS.txt
         run: ./deploy/installer/assemble-release.sh "0.0.${{ github.run_number }}" "${{ github.sha }}" artifacts dist

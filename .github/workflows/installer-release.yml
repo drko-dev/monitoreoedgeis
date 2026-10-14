@@ -70,6 +70,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Test
         run: go test ./...
+      - name: Core-only distribution profile negative tests
+        run: python3 deploy/installer/test-audit-core-only-installer.py -v
 
   build:
     needs: verify-tag
@@ -112,6 +114,11 @@ jobs:
           Verify a download: \`sha256sum -c --ignore-missing SHA256SUMS.txt\` (macOS: \`shasum -a 256 -c --ignore-missing SHA256SUMS.txt\`).
 
           These builds are **not code-signed**. Windows SmartScreen may show "Windows protected your PC" (More info → Run anyway) and macOS may say the app cannot be verified (System Settings → Privacy & Security → Open Anyway). Verify the SHA-256 first.
+
+          **CORE-ONLY DISTRIBUTION PROFILE:** these GUI packages are not the Full Edge Offline Runtime Pack.
+          They do not include approved model weights, a wheelhouse, Ultralytics libraries or bundled
+          FFmpeg/Python runtime. AI inference and signed Full Edge runtime installation remain disabled.
+          The archive-path audit is not a license clearance, binary-content proof, or macOS notarization.
 
           This is the desktop installer only. The Linux appliance/OTA package is released separately under \`vX.Y.Z\` tags.
           EOF

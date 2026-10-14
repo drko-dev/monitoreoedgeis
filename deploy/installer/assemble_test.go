@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -246,5 +247,87 @@ func TestAssembleRelease_FailsClosed(t *testing.T) {
 				t.Error("SHA256SUMS.txt was written despite the failure")
 			}
 		})
+	}
+}
+
+// TestAssembleRelease_CoreOnlyRejectsModelEvenIfBuildHashWasUpdated proves
+// that checksum verification alone is NOT a redistribution policy. The
+// malicious package carries a freshly recomputed matching BUILD_INFO digest.
+func TestAssembleRelease_CoreOnlyRejectsModelEvenIfBuildHashWasUpdated(t *testing.T) {
+	requireTools(t)
+	artifacts := writeArtifacts(t, pkgOpts{version: version, commit: commit})
+	dir := filepath.Join(artifacts, "installer-macos-arm64")
+	name := "geocam-edge-installer-macos-arm64.zip"
+	original := filepath.Join(dir, name)
+	in, err := zip.OpenReader(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	temp := filepath.Join(dir, "injected.zip")
+	output, err := os.Create(temp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(output)
+	for _, f := range in.File {
+		src, err := f.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		dst, err := writer.CreateHeader(&f.FileHeader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.Copy(dst, src); err != nil {
+			t.Fatal(err)
+		}
+		src.Close()
+	}
+	payload, err := writer.Create("geocam-edge-ui.app/Contents/Resources/models/yolo11n.pt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := payload.Write([]byte("unauthorized test weight placeholder")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := output.Close(); err != nil {
+		t.Fatal(err)
+	}
+	in.Close()
+	if err := os.Rename(temp, original); err != nil {
+		t.Fatal(err)
+	}
+	info := filepath.Join(dir, "BUILD_INFO-macos-arm64.txt")
+	data, err := os.ReadFile(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "sha256=") {
+			lines[i] = "sha256=" + sha(t, original)
+		}
+	}
+	if err := os.WriteFile(info, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, log, err := runAssemble(t, artifacts)
+	if err == nil || !strings.Contains(log, "core-only installer inventory rejected") {
+		t.Fatalf("modified matching checksum incorrectly permitted bundled model: %v\n%s", err, log)
+	}
+}
+
+func TestAssembleRelease_CoreOnlyRejectsEnvBypass(t *testing.T) {
+	requireTools(t)
+	artifacts := writeArtifacts(t, pkgOpts{version: version, commit: commit})
+	out := t.TempDir()
+	cmd := exec.Command("bash", "assemble-release.sh", version, commit, artifacts, out)
+	cmd.Env = append(os.Environ(), "MODEL_REDISTRIBUTION_APPROVED=true")
+	log, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(log), "rejects MODEL_REDISTRIBUTION_APPROVED override") {
+		t.Fatalf("environment bypass incorrectly enabled model rights: %v\n%s", err, log)
 	}
 }
