@@ -45,6 +45,9 @@ func auditInstalledPackOwnerBoundary(ctx context.Context, root string, report Si
 			report.PackOwnerUID, info.Mode(), false); err != nil {
 			return report, err
 		}
+		if err := auditInstalledPackAccessACL(parent); err != nil {
+			return report, err
+		}
 		report.Ancestors++
 		if parent == string(filepath.Separator) {
 			break
@@ -67,6 +70,9 @@ func auditInstalledPackOwnerBoundary(ctx context.Context, root string, report Si
 		}
 		if err := evaluateSignedPackOwnerAttrs(path, attrs.Uid, report.ProcessUID,
 			report.PackOwnerUID, info.Mode(), true); err != nil {
+			return err
+		}
+		if err := auditInstalledPackAccessACL(path); err != nil {
 			return err
 		}
 		report.Entries++
