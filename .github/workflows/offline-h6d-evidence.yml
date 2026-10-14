@@ -9,6 +9,7 @@ on:
       - 'deploy/installer/build-ffmpeg-r9-macos14-lab.sh'
       - 'deploy/installer/audit-full-edge-macos-minos.py'
       - 'deploy/installer/test-audit-full-edge-macos-minos.py'
+      - 'deploy/installer/test-h6d-r10-candidate-e2e.sh'
       - 'deploy/installer/test-audit-ffmpeg-build-chain.py'
       - 'deploy/installer/verify-ffmpeg-source-pgp.py'
       - 'deploy/installer/test-verify-ffmpeg-source-pgp.py'
@@ -20,6 +21,7 @@ on:
       - 'docs/architecture/OFFLINE_H6D_LICENSE_AUDIT.md'
       - 'docs/architecture/OFFLINE_H6D_R8_BUILD_CHAIN_AUDIT.md'
       - 'docs/architecture/OFFLINE_H6D_R9_MACOS14_CANDIDATE.md'
+      - 'docs/architecture/OFFLINE_H6D_R10_CANDIDATE_E2E_MAC.md'
       - 'docs/architecture/OFFLINE_H6D_R7_FFMPEG_SOURCE_AUTHENTICITY.md'
   push:
     branches: [main]
@@ -30,6 +32,7 @@ on:
       - 'deploy/installer/build-ffmpeg-r9-macos14-lab.sh'
       - 'deploy/installer/audit-full-edge-macos-minos.py'
       - 'deploy/installer/test-audit-full-edge-macos-minos.py'
+      - 'deploy/installer/test-h6d-r10-candidate-e2e.sh'
       - 'deploy/installer/test-audit-ffmpeg-build-chain.py'
       - 'deploy/installer/verify-ffmpeg-source-pgp.py'
       - 'deploy/installer/test-verify-ffmpeg-source-pgp.py'
@@ -60,6 +63,7 @@ jobs:
           python3 deploy/installer/test-audit-ffmpeg-build-chain.py
           python3 deploy/installer/test-audit-full-edge-macos-minos.py
           bash -n deploy/installer/build-ffmpeg-r9-macos14-lab.sh
+          bash -n deploy/installer/test-h6d-r10-candidate-e2e.sh
           python3 deploy/installer/test-runtime-pack-license-audit.py
 
 # CI uses tiny synthetic wheels. Real 36-wheel inspection is owner-local only;

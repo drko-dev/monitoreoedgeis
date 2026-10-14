@@ -727,3 +727,8 @@ Release/deployment are separate from Software 1.0:
 ### Full Edge offline — H6D-R9 candidate baseline (2026-10-14)
 
 macOS ARM64 minimum version is NOT product-approved. R9 proposes **macOS 14.0** from 316 Mach-O headers; duplicate clean FFmpeg builds are byte-identical on one Mac and use minos 14.0, while clean target-Mac execution, independent reproducible builds, code signing, licenses/models and publisher-trusted manifest remain BLOCKED. H6D PR #162 remains open; NO merge/deploy/release. Reference: docs/architecture/OFFLINE_H6D_R9_MACOS14_CANDIDATE.md.
+
+
+### Full Edge H6D-R10 (2026-10-14)
+
+The macOS14-minos FFmpeg/FFprobe R9 candidates now passed real RTSP -> Python Worker -> YOLO/MPS E2E inside a temporary r4 clone with H7B loopback-enabled egress denial, **on macOS 27.0.1 only**. Full macOS14 physical certification, Wails sealed-pack installation, complete airgap, external trust pin, rights and notarization remain NO-GO. No merge/deploy/release authorized. See `docs/architecture/OFFLINE_H6D_R10_CANDIDATE_E2E_MAC.md`.

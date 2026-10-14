@@ -1606,3 +1606,9 @@ Always distinguish, and never collapse these into each other:
 - Two independent clean FFmpeg/FFprobe builds from PGP-validated 8.1.3 source on the same Mac/SDK match SHA-256 exactly. Both are minos 14.0. Proposed candidate substitution passes 316/316 minimum-header checks and H.264 standalone decode smoke, NOT clean-machine runtime or independent reproducibility.
 - Existing r4 pack unchanged; installer fail-closed. No model redistribution rights, complete legal review, trusted release manifest pin, signed release, H7 full airgap or H8 clean-machine test. RUNTIME_READY=false; INFERENCE_READY=false; MODEL_REDISTRIBUTION_APPROVED=false.
 - Evidence: docs/architecture/OFFLINE_H6D_R9_MACOS14_CANDIDATE.md.
+
+
+### 2026-10-14 — H6D-R10 latest lab integration
+
+- **H6D-R10 / PR #162 OPEN:** The macOS14-targeted candidate FFmpeg/FFprobe passed the actual full loopback RTSP -> portable FFmpeg -> Python Worker -> YOLO/MPS person detection E2E on the authorized Mac M4 running macOS 27.0.1. Executed twice under H7B outbound-IP-denial policy in a temporary APFS CoW clone of lab pack r4; H7B reporter LAB_EGRESS_EVIDENCE_PASS_NOT_CERTIFIED, subprocess exit 0. Original r4 hashes unchanged and clone removed. Repeatable test script: `deploy/installer/test-h6d-r10-candidate-e2e.sh`.
+- **Not verified:** macOS 14 real host or usable VM (Parallels installed but its service unavailable), trusted release manifest, full airgap, installed Wails recovery, independent reproducible build, commercial licenses and distribution signing. macOS14 remains a provisional baseline, not a supported release; `RUNTIME_READY=false`, `INFERENCE_READY=false`, `MODEL_REDISTRIBUTION_APPROVED=false`.
