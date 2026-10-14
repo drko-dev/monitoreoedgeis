@@ -73,6 +73,9 @@ func NewSignedRuntimePackPreparationBackend(
 	// This does not claim atomic key revocation across processes, but closes
 	// the long unguarded staging period.
 	backend.preCommitVerify = gated.verify
+	// Recovery must authenticate the INSTALLED copy after journal reconcile,
+	// not demand an original source directory which may be a removed USB.
+	backend.preRecoverVerify = gated.VerifyInstalledRuntimePack
 	return gated, nil
 }
 
@@ -226,9 +229,25 @@ func (p *SignedRuntimePackPreparationBackend) Prepare(ctx context.Context) (Runt
 // failed verification is intentionally not silently downgraded to an
 // unsigned rollback/READY; human recovery is then required.
 func (p *SignedRuntimePackPreparationBackend) Recover(ctx context.Context) (RuntimePackProvisioningResult, error) {
-	if err := p.verify(ctx); err != nil {
+	if err := ctx.Err(); err != nil {
 		return failedPackResult(RuntimePackProvisioningResult{State: "RECOVERY_REQUIRED"}, "SIGNED_MANIFEST_REJECTED", err)
 	}
+	if p == nil || p.backend == nil || p.signed == nil || p.trust == nil {
+		return failedPackResult(RuntimePackProvisioningResult{State: "RECOVERY_REQUIRED"}, "SIGNED_MANIFEST_REJECTED", ErrRuntimePackSignatureRequired)
+	}
+	// Before any journal mutation, authenticate publisher identity, signature,
+	// expiry and revoked-key status without requiring original pack media.
+	o := p.backend.options
+	if err := ValidateSignedManifest(p.signed, p.trust, VerifySignedManifestOptions{
+		TargetPlatform: o.TargetOS,
+		TargetArch:     o.TargetArch,
+		RequireRelease: true,
+	}); err != nil {
+		return failedPackResult(RuntimePackProvisioningResult{State: "RECOVERY_REQUIRED"}, "SIGNED_MANIFEST_REJECTED", err)
+	}
+	// H6B reconciles a possibly interrupted transaction; its newly opt-in
+	// preRecoverVerify then authenticates the actual installed bytes, full
+	// file allowlist and pinned digest BEFORE any trusted success result.
 	result, err := p.backend.Recover(ctx)
 	result.RuntimeReady, result.InferenceReady = false, false
 	return result, err

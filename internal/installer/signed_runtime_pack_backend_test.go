@@ -458,3 +458,69 @@ func TestSignedPackInstalledRecheckCancelAndMissingSource(t *testing.T) {
 		t.Fatal("missing installed pack accepted")
 	}
 }
+
+func TestSignedPackSourceFreeRecoverAfterInstalledCommit(t *testing.T) {
+	o, signed, trust := newSignedPackFixture(t)
+	backend, err := NewSignedRuntimePackPreparationBackend(o, signed, trust)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := backend.Prepare(context.Background())
+	if err != nil || !prepared.TransactionCommitted || prepared.RuntimeReady {
+		t.Fatalf("synthetic signed install failed: %+v %v", prepared, err)
+	}
+	if err := os.RemoveAll(o.PackDir); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := backend.Recover(context.Background())
+	if err != nil || !recovered.TransactionCommitted ||
+		recovered.State != "COMMITTED_UNCERTIFIED" ||
+		!recovered.PinnedReleaseVerified || recovered.RuntimeReady || recovered.InferenceReady {
+		t.Fatalf("offline recovery should use installed signed pack, not source media: %+v %v", recovered, err)
+	}
+}
+
+func TestSignedPackSourceFreeRecoverRefusesRevokedPublisher(t *testing.T) {
+	o, signed, trust := newSignedPackFixture(t)
+	backend, err := NewSignedRuntimePackPreparationBackend(o, signed, trust)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared, err := backend.Prepare(context.Background()); err != nil || !prepared.TransactionCommitted {
+		t.Fatalf("setup failed: %+v %v", prepared, err)
+	}
+	if err := os.RemoveAll(o.PackDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := trust.RevokeKey("fixture-publisher", time.Now().UTC(), "source-free startup revoked"); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := backend.Recover(context.Background())
+	if !errors.Is(err, ErrKeyRevoked) || recovered.TransactionCommitted ||
+		recovered.RuntimeReady || recovered.InferenceReady ||
+		recovered.ErrorCode != "SIGNED_MANIFEST_REJECTED" {
+		t.Fatalf("revoked key admitted source-free recovery: %+v %v", recovered, err)
+	}
+}
+
+func TestSignedPackSourceFreeRecoverRejectsInstalledTamper(t *testing.T) {
+	o, signed, trust := newSignedPackFixture(t)
+	backend, err := NewSignedRuntimePackPreparationBackend(o, signed, trust)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared, err := backend.Prepare(context.Background()); err != nil || !prepared.TransactionCommitted {
+		t.Fatalf("setup failed: %+v %v", prepared, err)
+	}
+	if err := os.RemoveAll(o.PackDir); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(o.DataDir, DefaultRuntimePackTargetName, signed.Manifest.Worker.Entrypoint)
+	if err := os.WriteFile(target, []byte("modified after install"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := backend.Recover(context.Background())
+	if err == nil || recovered.TransactionCommitted || recovered.RuntimeReady || recovered.InferenceReady {
+		t.Fatalf("tampered installed worker admitted during source-free recovery: %+v %v", recovered, err)
+	}
+}

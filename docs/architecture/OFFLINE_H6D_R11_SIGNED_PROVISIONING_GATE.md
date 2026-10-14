@@ -65,4 +65,19 @@ The new explicit read-only method **`SignedRuntimePackPreparationBackend.VerifyI
 
 Adversarial Go tests (race detector) now cover: uninstalled pack denial, valid installed bytes, valid installed bytes with removed source media, later Worker tampering, unlisted injected file, changed installed manifest, active directory symlink replacement, revoked publisher key, and cancelled verification. All synthetic tests pass.
 
-**Limitations:** Per-path hash checks are not an atomic snapshot across concurrent process mutation and cannot prevent an attacker replacing bytes **after the final recheck but before or during execution**. A final authorization architecture will need write-access separation (read-only owner-controlled installed tree and updater boundary), signature/descriptor-based process execution or equivalent platform-specific protection, trusted clean macOS14 H8, code signing, notarization and model licensing approval. Existing `Recover` still explicitly verifies original source media before calling the H6B recovery path; the new installed-tree guard itself is source-independent. Future offline-startup reconciliation needs a separately reviewed source-free signed recovery path. No such runtime activation was performed here.
+**Limitations:** Per-path hash checks are not an atomic snapshot across concurrent process mutation and cannot prevent an attacker replacing bytes **after the final recheck but before or during execution**. A final authorization architecture will need write-access separation (read-only owner-controlled installed tree and updater boundary), signature/descriptor-based process execution or equivalent platform-specific protection, trusted clean macOS14 H8, code signing, notarization and model licensing approval. The signed recovery path has since been updated by R11.3 below to verify the installed bytes without requiring original source media. No actual shipped runtime activation was performed here.
+
+
+## H6D-R11.3 — Offline recovery after source media removal
+
+An offline desktop installer cannot require its original removable/source pack to remain mounted forever. The initial signed `Recover` incorrectly began by verifying the *source* directory, which made previously installed, signed and pinned runtimes impossible to reconcile after the source had been removed.
+
+The signed backend now verifies **publisher signature, key revocation and expiry** using the independently supplied signed envelope and trust root **before journal mutation**, without requiring any source media. H6B then performs its existing locked journal reconciliation. A dedicated opt-in `preRecoverVerify` callback checks the **installed** runtime through `VerifyInstalledRuntimePack` before a trusted recovery result can be returned. The unsigned/digest-only legacy recovery behavior is unchanged.
+
+Adversarial tests under Go race detection confirm:
+
+1. Successfully committed synthetic signed pack, original source directory subsequently removed, **Recover returns `COMMITTED_UNCERTIFIED`**, with release digest and installed bytes independently validated, and with `RuntimeReady=false`/`InferenceReady=false`.
+2. Same setup but signing key revoked before recovery: **fail closed**, no committed or READY result.
+3. Same setup but installed Worker artifact tampered: **fail closed**, no committed or READY result.
+
+**Limits:** This validates recovery of an already committed synthetic pack; crash recovery while no active tree exists, upgrades and concurrent filesystem attacks still need separately adversarial test coverage. Journal reconciliation may change transaction metadata before the installed-tree check, but signature/key status is authenticated before that operation. The result remains UNCERTIFIED. This does not activate Wails or authorize model redistribution or release.

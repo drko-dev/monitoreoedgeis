@@ -63,6 +63,10 @@ type TransactionalRuntimePackProvisioner struct {
 	// immediately before acknowledging an already-active pack or accepting
 	// staged bytes for CommitStaged; legacy digest-only flows are unchanged.
 	preCommitVerify func(context.Context) error
+	// Optional installed-tree verification after transactional journal
+	// reconciliation. Signed backends must not depend on source media to
+	// recover a sealed pack already installed for offline use.
+	preRecoverVerify func(context.Context) error
 }
 
 func NewTransactionalRuntimePackProvisioner(options RuntimePackProvisionerOptions) (*TransactionalRuntimePackProvisioner, error) {
@@ -232,8 +236,12 @@ func (p *TransactionalRuntimePackProvisioner) Recover(ctx context.Context) (Runt
 		result.ErrorCode = "RUNTIME_RECOVERY_REQUIRED"
 		return result, err
 	}
-	if p.preCommitVerify != nil {
-		if err := p.preCommitVerify(ctx); err != nil {
+	verification := p.preRecoverVerify
+	if verification == nil {
+		verification = p.preCommitVerify
+	}
+	if verification != nil {
+		if err := verification(ctx); err != nil {
 			result.ErrorCode = "SIGNED_MANIFEST_REJECTED"
 			return result, err
 		}
