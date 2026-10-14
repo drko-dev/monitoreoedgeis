@@ -346,7 +346,7 @@ def audit_models_manifest(manifest_path: Path) -> Dict[str, Any]:
     return {
         "status": "PASS",
         "pack_version": data.get("pack_version"),
-        "models_verified": list(found_models.keys()),
+        "models_declared": list(found_models.keys()),
         "model_redistribution_approved": False,
     }
 
@@ -457,24 +457,21 @@ def run_synthetic_pipeline_test(
         tmp_path = Path(tmpdir)
         sock_path = tmp_path / "worker.sock"
 
-        # Resolve models
-        resolved_models = models_dir
-        if resolved_models is None:
-            cand_models = Path("/Users/gustavomarcon/Documents/proyectos/monitoreoia/geocam/models")
-            if cand_models.is_dir():
-                resolved_models = cand_models
-
-        person_model = "yolo11s-pose.pt"
-        vehicle_model = "yolo11n.pt"
-        if resolved_models and (resolved_models / "yolo11s-pose.pt").is_file():
-            person_model = str(resolved_models / "yolo11s-pose.pt")
-            vehicle_model = str(resolved_models / "yolo11n.pt")
-        else:
-            # Create synthetic fake model fixtures if real models are not present
-            (tmp_path / "yolo11s-pose.pt").write_bytes(b"synthetic-model-data")
-            (tmp_path / "yolo11n.pt").write_bytes(b"synthetic-model-data")
-            person_model = str(tmp_path / "yolo11s-pose.pt")
-            vehicle_model = str(tmp_path / "yolo11n.pt")
+        # No secret local defaults, fake models or silent host Python fallback.
+        # Caller explicitly supplies locally authorized models; NEVER copy them.
+        if models_dir is None:
+            return {"status": "BLOCKED", "device": test_device,
+                    "reason": "explicit local --models-dir required"}
+        resolved_models = Path(models_dir)
+        if not resolved_models.is_dir() or resolved_models.is_symlink():
+            return {"status": "BLOCKED", "device": test_device,
+                    "reason": "local models directory unavailable"}
+        person_model = str(resolved_models / "yolo11s-pose.pt")
+        vehicle_model = str(resolved_models / "yolo11n.pt")
+        if not all(Path(f).is_file() and not Path(f).is_symlink()
+                   for f in (person_model, vehicle_model)):
+            return {"status": "BLOCKED", "device": test_device,
+                    "reason": "required local model weights unavailable"}
 
         # 1. Start worker process with hermetic clean environment
         env = {
@@ -578,15 +575,24 @@ def run_synthetic_pipeline_test(
             proc.wait(timeout=3)
 
             effective_dev = resp_health.get("device", test_device)
-            pipeline_marker = REQUIRED_PIPELINE_MARKER
-
+            # This tests direct worker IPC with a tiny JPEG, NOT RTSP or FFmpeg,
+            # and must not be advertised as a person-detection proof.
+            response_ok = (resp_health.get("type") == "health_ok"
+                           and resp_health.get("ready") is True
+                           and resp_infer.get("type") == "result"
+                           and resp_infer.get("frame_seq") == 101
+                           and effective_dev == test_device)
             return {
-                "status": "PASS",
+                "status": "PASS" if response_ok else "FAIL",
                 "device_requested": test_device,
                 "device_effective": effective_dev,
-                "health_response": resp_health,
-                "infer_response": resp_infer,
-                "marker": pipeline_marker,
+                "worker_protocol": "direct-jpeg-worker-infer-no-rtsp-no-ffmpeg",
+                "models_loaded_names": sorted(
+                    Path(x).name for x in resp_health.get("models_loaded", [])),
+                "inference_response_type": resp_infer.get("type"),
+                "inference_frame_seq": resp_infer.get("frame_seq"),
+                "detections_count": len(resp_infer.get("detections", [])),
+                "person_detection_proven": False,
             }
 
         except Exception as exc:
@@ -626,20 +632,6 @@ def run_certification(
     resolved_pack = pack_dir
     resolved_candidates = candidates_dir
 
-    if resolved_pack is None:
-        candidate_pack = Path(
-            "/Users/gustavomarcon/Documents/proyectos/monitoreoedgeis-worktrees/offline-h6d/runtime-lab/packs/lab-2026.10.14-0e8657f-r4"
-        )
-        if candidate_pack.is_dir():
-            resolved_pack = candidate_pack
-
-    if resolved_candidates is None:
-        candidate_cands = Path(
-            "/Users/gustavomarcon/Documents/proyectos/monitoreoedgeis-worktrees/offline-h6d/runtime-lab/r9-macos14-double-build"
-        )
-        if candidate_cands.is_dir():
-            resolved_candidates = candidate_cands
-
     macho_files_to_audit: List[Path] = []
     r9_audit: Optional[Dict[str, Any]] = None
     r8_baseline_audit: Optional[Dict[str, Any]] = None
@@ -661,9 +653,9 @@ def run_certification(
 
     # Step 5: Pipeline execution (RTSP -> FFmpeg -> Python -> MPS/CPU)
     # Check if we can run standalone Python from pack or host Python
-    py_exec = sys.executable
+    py_exec = None
     if resolved_pack and (resolved_pack / "python" / "bin" / "python3").is_file():
-        py_exec = str(resolved_pack / "python" / "bin" / "python3")
+        py_exec = resolved_pack / "python" / "bin" / "python3"
 
     ffmpeg_exec = None
     if resolved_candidates and (resolved_candidates / "ffmpeg-1").is_file():
@@ -676,13 +668,19 @@ def run_certification(
         devices_to_test.append("cpu")
 
     for dev in devices_to_test:
-        pipeline_results[dev] = run_synthetic_pipeline_test(
-            python_bin=Path(py_exec),
-            worker_script=worker_dir / "worker.py",
-            ffmpeg_bin=ffmpeg_exec,
-            models_dir=models_dir,
-            test_device=dev,
-        )
+        if py_exec is None or ffmpeg_exec is None or models_dir is None:
+            pipeline_results[dev] = {
+                "status": "BLOCKED", "device": dev,
+                "reason": "explicit local pack, candidate FFmpeg and models required",
+            }
+        else:
+            pipeline_results[dev] = run_synthetic_pipeline_test(
+                python_bin=Path(py_exec),
+                worker_script=worker_dir / "worker.py",
+                ffmpeg_bin=ffmpeg_exec,
+                models_dir=models_dir,
+                test_device=dev,
+            )
 
     # Build structured checks
     checks = []
@@ -711,27 +709,43 @@ def run_certification(
 
     # Check 3: Mach-O minos baseline (Python, Torch, Torchvision, SciPy)
     if pack_macho_audit:
-        # Separate ffmpeg baseline violations from python/torch
+        # r4 FFmpeg/FFprobe are *not* macOS14 compatible; inspect Python and
+        # native wheels separately, and never claim the unmodified pack passes.
+        non_ffmpeg_violations = [
+            issue for issue in pack_macho_audit["violations"]
+            if not issue["file"].startswith("ffmpeg/")
+        ]
+        non_ffmpeg_count = pack_macho_audit["audited_count"] - 2
+        native_pass = (non_ffmpeg_count > 0 and
+                       pack_macho_audit["arm64_count"] == pack_macho_audit["audited_count"]
+                       and not non_ffmpeg_violations)
         checks.append({
             "id": "macho-python-runtime-minos",
             "category": "macho_compatibility",
-            "status": "PASS",
+            "status": "PASS" if native_pass else "FAIL",
             "evidence": (
-                f"{pack_macho_audit['audited_count']} Mach-O binaries audited in pack; "
-                f"minos distribution: {pack_macho_audit['minos_distribution']}"
+                f"{pack_macho_audit['audited_count']} Mach-O files scanned in ORIGINAL r4; "
+                f"non-FFmpeg violations: {len(non_ffmpeg_violations)}; "
+                f"original FFmpeg remains minos 27.0"
             ),
-            "guarantee": "All Python, PyTorch, Torchvision and SciPy extension binaries declare minos <= 14.0.",
+            "guarantee": "Native Python/wheel headers checked, original r4 not certified.",
         })
+    else:
+        checks.append({"id": "macho-python-runtime-minos",
+                       "category": "macho_compatibility", "status": "BLOCKED",
+                       "evidence": "explicit --pack-dir missing; cannot inspect binary headers"})
 
     # Check 4: R9 Candidate FFmpeg / FFprobe
-    if r9_audit:
-        checks.append({
-            "id": "macho-r9-ffmpeg-minos14",
-            "category": "macho_compatibility",
-            "status": "PASS" if r9_audit["pass"] else "FAIL",
-            "evidence": f"FFmpeg/FFprobe R9 candidates audited; minos: {r9_audit['minos_distribution']}",
-            "guarantee": "Candidate FFmpeg R9 explicitly built with macOS minos 14.0 and standard dylibs.",
-        })
+    checks.append({
+        "id": "macho-r9-ffmpeg-minos14",
+        "category": "macho_compatibility",
+        "status": ("PASS" if r9_audit and r9_audit["pass"] and
+                   r9_audit["audited_count"] == 2 else
+                   "FAIL" if r9_audit else "BLOCKED"),
+        "evidence": ("FFmpeg R9 standalone candidates: " + str(r9_audit["minos_distribution"])
+                     if r9_audit else "explicit --candidates-dir missing"),
+        "guarantee": "Only the R9 candidate headers; original r4 is unchanged.",
+    })
 
     # Check 5: Hermetic Worker contracts
     checks.append({
@@ -744,20 +758,20 @@ def run_certification(
 
     # Check 6: Models manifest & legal non-redistribution
     checks.append({
-        "id": "models-manifest-integrity",
+        "id": "models-manifest-declarations",
         "category": "models",
         "status": models_audit["status"],
         "evidence": (
             f"Manifest pack_version: {models_audit.get('pack_version')}, "
-            f"models: {models_audit.get('models_verified')}"
+            f"models: {models_audit.get('models_declared')}"
         ),
-        "guarantee": "MODEL_REDISTRIBUTION_APPROVED=false; model weights strictly external local references.",
+        "guarantee": "Manifest declarations checked only; actual model weight bytes not authenticated here; no redistribution.",
     })
 
     # Check 7: Synthetic Pipeline Execution
     for dev, pres in pipeline_results.items():
         checks.append({
-            "id": f"synthetic-pipeline-{dev}",
+            "id": f"worker-protocol-{dev}",
             "category": "pipeline",
             "status": pres["status"],
             "evidence": (
@@ -765,7 +779,7 @@ def run_certification(
                 f"effective device: {pres.get('device_effective')}, "
                 f"marker: {pres.get('marker', 'NONE')}"
             ),
-            "guarantee": f"RTSP -> FFmpeg -> Python -> {dev.upper()} pipeline execution contract verified.",
+            "guarantee": f"Direct JPEG -> Python Worker {dev.upper()} IPC tested; NOT RTSP/FFmpeg/person detection.",
         })
 
     # Calculate summary
@@ -820,7 +834,6 @@ def main() -> int:
     parser.add_argument("--models-dir", type=Path, default=None, help="Path to external models directory")
     parser.add_argument("--json-out", type=Path, default=None, help="File to write JSON report")
     parser.add_argument("--device", default="mps", choices=["mps", "cpu", "auto"], help="Device to test")
-    parser.add_argument("--require-marker", default=None, help="Require exact marker in pipeline output")
     args = parser.parse_args()
 
     report = run_certification(
@@ -857,11 +870,14 @@ def main() -> int:
         args.json_out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(f"Wrote structured JSON report to: {args.json_out}")
 
-    # Emit required marker for orchestrator/test automation
-    if s["failed"] == 0:
-        print(f"CERTIFICATION_MARKER: {REQUIRED_PIPELINE_MARKER}")
-
-    return 1 if s["failed"] > 0 else 0
+    # No certification marker or exit-0 if a physical/other gate is BLOCKED.
+    if s["failed"]:
+        return 1
+    if s["blocked"]:
+        print("H8_LAB_EVIDENCE_ONLY_PHYSICAL_MACOS14_BLOCKED")
+        return 2
+    print("H8_ALL_CHECKS_PASS_REVIEW_REQUIRED")
+    return 0
 
 
 if __name__ == "__main__":

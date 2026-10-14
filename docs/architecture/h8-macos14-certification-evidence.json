@@ -6,7 +6,7 @@
   "host_os": "27.0.1",
   "host_kernel": "27.0.0",
   "host_arch": "arm64",
-  "head_sha": "4df9aa880faa484d2fb835febbf6939df3f3f820",
+  "head_sha": "b0dabee2cc163d760295ced05baa5ee8c3c7eb9d",
   "physical_macos14_status": "PHYSICAL_MACOS14_BLOCKED",
   "runtime_ready": false,
   "inference_ready": false,
@@ -37,15 +37,15 @@
       "id": "macho-python-runtime-minos",
       "category": "macho_compatibility",
       "status": "PASS",
-      "evidence": "316 Mach-O binaries audited in pack; minos distribution: {'11.0': 152, '11.1': 5, '13.0': 46, '14.0': 111, '27.0': 2}",
-      "guarantee": "All Python, PyTorch, Torchvision and SciPy extension binaries declare minos <= 14.0."
+      "evidence": "316 Mach-O files scanned in ORIGINAL r4; non-FFmpeg violations: 0; original FFmpeg remains minos 27.0",
+      "guarantee": "Native Python/wheel headers checked, original r4 not certified."
     },
     {
       "id": "macho-r9-ffmpeg-minos14",
       "category": "macho_compatibility",
       "status": "PASS",
-      "evidence": "FFmpeg/FFprobe R9 candidates audited; minos: {'14.0': 2}",
-      "guarantee": "Candidate FFmpeg R9 explicitly built with macOS minos 14.0 and standard dylibs."
+      "evidence": "FFmpeg R9 standalone candidates: {'14.0': 2}",
+      "guarantee": "Only the R9 candidate headers; original r4 is unchanged."
     },
     {
       "id": "hermetic-worker-contracts",
@@ -55,25 +55,25 @@
       "guarantee": "Worker operates hermetically, conforms to protocol, never crashes supervisor on frame defect."
     },
     {
-      "id": "models-manifest-integrity",
+      "id": "models-manifest-declarations",
       "category": "models",
       "status": "PASS",
       "evidence": "Manifest pack_version: 1.0.0, models: ['yolo11s-pose.pt', 'yolo11n.pt']",
       "guarantee": "MODEL_REDISTRIBUTION_APPROVED=false; model weights strictly external local references."
     },
     {
-      "id": "synthetic-pipeline-mps",
+      "id": "worker-protocol-mps",
       "category": "pipeline",
       "status": "PASS",
-      "evidence": "Requested device: mps, effective device: mps, marker: H8_MACOS14_PIPELINE_PASS",
-      "guarantee": "RTSP -> FFmpeg -> Python -> MPS pipeline execution contract verified."
+      "evidence": "Requested device: mps, effective device: mps, marker: NONE",
+      "guarantee": "Direct JPEG -> Python Worker MPS IPC tested; NOT RTSP/FFmpeg/person detection."
     },
     {
-      "id": "synthetic-pipeline-cpu",
+      "id": "worker-protocol-cpu",
       "category": "pipeline",
       "status": "PASS",
-      "evidence": "Requested device: cpu, effective device: cpu, marker: H8_MACOS14_PIPELINE_PASS",
-      "guarantee": "RTSP -> FFmpeg -> Python -> CPU pipeline execution contract verified."
+      "evidence": "Requested device: cpu, effective device: cpu, marker: NONE",
+      "guarantee": "Direct JPEG -> Python Worker CPU IPC tested; NOT RTSP/FFmpeg/person detection."
     }
   ],
   "r9_candidate_evidence": {
@@ -92,45 +92,29 @@
       "status": "PASS",
       "device_requested": "mps",
       "device_effective": "mps",
-      "health_response": {
-        "type": "health_ok",
-        "ready": true,
-        "device": "mps",
-        "device_requested": "mps",
-        "models_loaded": [
-          "/Users/gustavomarcon/Documents/proyectos/monitoreoia/geocam/models/yolo11s-pose.pt",
-          "/Users/gustavomarcon/Documents/proyectos/monitoreoia/geocam/models/yolo11n.pt"
-        ]
-      },
-      "infer_response": {
-        "type": "result",
-        "frame_seq": 101,
-        "inference_ms": 1641.356458188966,
-        "detections": []
-      },
-      "marker": "H8_MACOS14_PIPELINE_PASS"
+      "worker_protocol": "direct-jpeg-worker-infer-no-rtsp-no-ffmpeg",
+      "models_loaded_names": [
+        "yolo11n.pt",
+        "yolo11s-pose.pt"
+      ],
+      "inference_response_type": "result",
+      "inference_frame_seq": 101,
+      "detections_count": 0,
+      "person_detection_proven": false
     },
     "cpu": {
       "status": "PASS",
       "device_requested": "cpu",
       "device_effective": "cpu",
-      "health_response": {
-        "type": "health_ok",
-        "ready": true,
-        "device": "cpu",
-        "device_requested": "cpu",
-        "models_loaded": [
-          "/Users/gustavomarcon/Documents/proyectos/monitoreoia/geocam/models/yolo11s-pose.pt",
-          "/Users/gustavomarcon/Documents/proyectos/monitoreoia/geocam/models/yolo11n.pt"
-        ]
-      },
-      "infer_response": {
-        "type": "result",
-        "frame_seq": 101,
-        "inference_ms": 346.5331250336021,
-        "detections": []
-      },
-      "marker": "H8_MACOS14_PIPELINE_PASS"
+      "worker_protocol": "direct-jpeg-worker-infer-no-rtsp-no-ffmpeg",
+      "models_loaded_names": [
+        "yolo11n.pt",
+        "yolo11s-pose.pt"
+      ],
+      "inference_response_type": "result",
+      "inference_frame_seq": 101,
+      "detections_count": 0,
+      "person_detection_proven": false
     }
   }
 }

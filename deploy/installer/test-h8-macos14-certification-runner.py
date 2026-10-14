@@ -235,5 +235,38 @@ class TestH8CertificationRunner(unittest.TestCase):
             self.assertFalse(audit["model_redistribution_approved"])
 
 
+
+class TestH8FailClosedRegressions(unittest.TestCase):
+    def test_missing_explicit_models_cannot_pass_or_use_fake_weights(self):
+        result = h8.run_synthetic_pipeline_test(
+            python_bin=Path("/missing/python"),
+            worker_script=Path("/missing/worker.py"),
+            models_dir=None, test_device="cpu")
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertNotIn("marker", result)
+
+    def test_missing_explicit_pack_and_candidates_blocks_certification(self):
+        report = h8.run_certification(
+            pack_dir=None, candidates_dir=None, models_dir=None, device="cpu")
+        statuses = {check["id"]: check["status"] for check in report["checks"]}
+        self.assertEqual(statuses["macho-python-runtime-minos"], "BLOCKED")
+        self.assertEqual(statuses["macho-r9-ffmpeg-minos14"], "BLOCKED")
+        self.assertEqual(statuses["worker-protocol-cpu"], "BLOCKED")
+        self.assertFalse(report["runtime_ready"])
+        self.assertFalse(report["inference_ready"])
+
+    def test_evidence_scoping_no_person_detection_claim(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "models").mkdir()
+            # An absent model is blocked, not replaced with a fake success.
+            result = h8.run_synthetic_pipeline_test(
+                python_bin=root / "python3",
+                worker_script=root / "worker.py",
+                models_dir=root / "models", test_device="mps")
+            self.assertEqual(result["status"], "BLOCKED")
+            self.assertNotIn("health_response", result)
+
+
 if __name__ == "__main__":
     unittest.main()
