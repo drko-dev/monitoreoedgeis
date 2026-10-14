@@ -28,6 +28,26 @@ type privateLabHarnessReport struct {
 	SandboxedCommandExit int    `json:"sandboxed_command_exit"`
 }
 
+// Build-tag-only CLI uses the same button handler; no UI automation needed.
+// Does not install services, enroll the Edge or access real cameras.
+func init() {
+	for _, arg := range os.Args[1:] {
+		if arg != "--private-lab-self-test" {
+			continue
+		}
+		result, err := NewApp().RunPrivateFullEdgeLabTest()
+		if err != nil {
+			result = PrivateFullEdgeLabResult{Passed: false, Status: "LAB_TEST_FAILED",
+				Detail: "No se pudo iniciar la comprobacion local."}
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(result)
+		if !result.Passed {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+}
+
 func labReadableFile(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -42,17 +62,13 @@ func labReadableFile(path string) error {
 // RunPrivateFullEdgeLabTest is compiled ONLY with privatefullgelab.
 // It offers no user-supplied command, credentials, camera address, model
 // redistribution, installation, deploy or production readiness control.
-// It uses the locally existing user models and a loopback-only test stream.
+// It uses the bundled models and runtime with a loopback-only test stream.
 func (a *App) RunPrivateFullEdgeLabTest() (PrivateFullEdgeLabResult, error) {
 	fail := func(detail string) (PrivateFullEdgeLabResult, error) {
 		return PrivateFullEdgeLabResult{Passed: false, Status: "LAB_TEST_FAILED", Detail: detail}, nil
 	}
 	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
 		return fail("Esta prueba privada requiere macOS Apple Silicon.")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fail("No se pudo encontrar el directorio personal.")
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -62,11 +78,11 @@ func (a *App) RunPrivateFullEdgeLabTest() (PrivateFullEdgeLabResult, error) {
 	binary := filepath.Join(resources, "geocam-lab-e2e.test")
 	runner := filepath.Join(resources, "h7b-egress-cert.py")
 	policy := filepath.Join(resources, "mac-h7b-loopback-egress.sb")
-	pack := filepath.Join(home, "Documents", "proyectos", "monitoreoedgeis-worktrees",
-		"offline-h6d", "runtime-lab", "packs", "lab-2026.10.14-0e8657f-r4")
-	fixture := filepath.Join(home, "Documents", "proyectos", "monitoreoedgeis-worktrees",
-		"offline-h6d", "runtime-lab", "media-smoke", "person-annexb.h264")
-	models := filepath.Join(home, "geocam-edge-data-fulledge", "models")
+	// All runtime components, models and the test video are inside this app.
+	// Never fall back to the developer's worktree, Downloads or host Python.
+	pack := filepath.Join(resources, "RuntimePack")
+	fixture := filepath.Join(resources, "Fixtures", "person-annexb.h264")
+	models := filepath.Join(resources, "Models")
 	for _, p := range []string{binary, runner, policy, fixture,
 		filepath.Join(models, "yolo11n.pt"),
 		filepath.Join(models, "yolo11s-pose.pt"),
@@ -91,6 +107,10 @@ func (a *App) RunPrivateFullEdgeLabTest() (PrivateFullEdgeLabResult, error) {
 		runner, "--require-marker", "RTSP_GO_FFMPEG_YOLO_PASS",
 		"--", binary, "-test.run", "^TestLabRTSPToRealYOLO$", "-test.v")
 	cmd.Dir = resources
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fail("No se pudo identificar el usuario local.")
+	}
 	cmd.Env = []string{
 		"HOME=" + home, "USER=" + filepath.Base(home),
 		"TMPDIR=" + os.TempDir(), "PATH=/usr/bin:/bin",
@@ -118,7 +138,7 @@ func (a *App) RunPrivateFullEdgeLabTest() (PrivateFullEdgeLabResult, error) {
 		Passed: true,
 		Status: report.Status,
 		Detail: strings.Join([]string{
-			"Persona detectada con modelos locales.",
+			"Persona detectada con modelos incluidos en esta aplicación.",
 			"RTSP simulado → FFmpeg → Worker Python → YOLO (MPS).",
 			"Conexiones externas bloqueadas para el proceso de prueba.",
 			"Sin cámaras reales, sin publicar modelos."}, " "),
