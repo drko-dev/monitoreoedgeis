@@ -23,8 +23,9 @@ type SignedInstalledRuntimeWorkerLaunchSpec struct {
 	// Do not anonymously embed RuntimePackWorkerLaunchSpec: its exported
 	// Command/RuntimePackRoot/Environment fields are freely mutable by the
 	// consumer AFTER an authenticated launch spec was constructed.
-	launch        RuntimePackWorkerLaunchSpec
-	signedBackend *SignedRuntimePackPreparationBackend
+	launch                      RuntimePackWorkerLaunchSpec
+	signedBackend               *SignedRuntimePackPreparationBackend
+	enforceIndependentOwnership bool
 }
 
 // The release-owned signed contract intentionally exposes only read-only
@@ -62,6 +63,12 @@ func (s SignedInstalledRuntimeWorkerLaunchSpec) ProcessStartTimeout() time.Durat
 func (s SignedInstalledRuntimeWorkerLaunchSpec) VerifyBeforeSpawn(ctx context.Context) error {
 	if s.signedBackend == nil {
 		return ErrRuntimePackSignatureRequired
+	}
+	if s.enforceIndependentOwnership {
+		if _, err := s.signedBackend.AuditIndependentInstalledPackOwnership(ctx); err != nil {
+			return fmt.Errorf("installed owner-separated Runtime Pack rejected before Worker spawn: %w", err)
+		}
+		return nil
 	}
 	if err := s.signedBackend.verifyReadOnlyInstalledRuntimePack(ctx); err != nil {
 		return fmt.Errorf("installed signed Runtime Pack rejected before Worker spawn: %w", err)
