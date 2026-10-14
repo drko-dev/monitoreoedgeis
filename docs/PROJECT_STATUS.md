@@ -1598,3 +1598,11 @@ Always distinguish, and never collapse these into each other:
 **VALIDATED LOCAL** — observed running in the local environment.
 **MERGED** — merged into `main`.
 **DEPLOYED PROD** — running on the production VPS.
+
+
+### 2026-10-14 — H6D-R9 latest Apple Silicon lab checkpoint (supersedes older current snapshots)
+
+- **H6D-R9 / PR #162: OPEN, NOT MERGED.** Original r4 316 native Mach-O files: two FFmpeg/FFprobe minos 27.0; 111 wheel/native files minos 14.0; 46 minos 13.0. Candidate release comparison **macOS 14.0** is provisional and requires product acceptance/physical validation.
+- Two independent clean FFmpeg/FFprobe builds from PGP-validated 8.1.3 source on the same Mac/SDK match SHA-256 exactly. Both are minos 14.0. Proposed candidate substitution passes 316/316 minimum-header checks and H.264 standalone decode smoke, NOT clean-machine runtime or independent reproducibility.
+- Existing r4 pack unchanged; installer fail-closed. No model redistribution rights, complete legal review, trusted release manifest pin, signed release, H7 full airgap or H8 clean-machine test. RUNTIME_READY=false; INFERENCE_READY=false; MODEL_REDISTRIBUTION_APPROVED=false.
+- Evidence: docs/architecture/OFFLINE_H6D_R9_MACOS14_CANDIDATE.md.
