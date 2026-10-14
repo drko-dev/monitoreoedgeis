@@ -15,3 +15,12 @@ Next gate: authorized provenance/licensing inventory, real sealed artifact input
 Run `python3 deploy/installer/runtime-pack-inventory.py` for a machine-readable, read-only inventory of the manifest template. As of this revision it enumerates 40 declarations: 1 Python interpreter, 1 worker, 2 FFmpeg utilities and 36 Python wheels. All source-provenance, verified-artifact, and redistribution-approval flags are deliberately false: a pinned version/hash written in a repository is not independent upstream evidence or legal authorization. Run `python3 deploy/installer/test-runtime-pack-inventory.py` to verify fail-closed flags.
 
 Do not replace the template with a `release` manifest or invoke downloads on the development Mac based on this inventory. Resolve source URLs, licenses (including FFmpeg compile flags/codecs and Ultralytics terms), publisher trust, and a disk budget first. The packaging scripts currently stage Python/wheels but `assemble-release.sh` assembles the installer binary packages rather than a sealed vision Runtime Pack.
+
+
+## H6D-R6 — Hardening selected-artifact preflight
+
+`check-runtime-pack-release.py` remains a **read-only selected-artifact check**, not a release sign-off. The required non-pack trusted SHA256 pin remains a caller-supplied prerequisite, not an attestation of its trustworthiness. The new checks reject missing/unpinned `worker/backend.py`, require its independent SHA-256 and size beside `worker.py`, require both `ffmpeg` and `ffprobe` declarations, at least one pinned wheel dependency, missing/duplicate/traversing paths, symlinks, or corrupted declared data. Passing checks verify **only explicitly referenced files**: they do not prove the whole Python/runtime tree, legal permissions, trusted provenance, clean-machine portability or airgap. The CLI now prints `DECLARED ARTIFACT PRECHECK PASS`, deliberately not a release readiness declaration.
+
+Eleven synthetic adversarial tests pass; the untrusted local r4 pack still fails closed because it has a `lab-manifest.json`, no release manifest or externally trusted pin. H6D-R6 adds macOS/Ubuntu synthetic CI checks without downloading models/wheels. Normal Wails launch remains disabled, `MODEL_REDISTRIBUTION_APPROVED=false`.
+
+Separate release-go gates still require human-reviewed license texts/NOTICE obligations, trusted FFmpeg PGP signature identity and source/build chain, authenticated independent manifest pin, full-tree runtime integrity, model rights, H7 airgap and H8 clean-machine validation. **No merge, deploy or release from this slice.**

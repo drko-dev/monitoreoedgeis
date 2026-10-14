@@ -1,0 +1,46 @@
+name: H6D wheel evidence and release preflight
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/installer/audit-wheelhouse-evidence.py'
+      - 'deploy/installer/test-audit-wheelhouse-evidence.py'
+      - 'deploy/installer/check-runtime-pack-release.py'
+      - 'deploy/installer/test-runtime-pack-release-preflight.py'
+      - 'deploy/installer/runtime-pack-license-audit.py'
+      - 'deploy/installer/test-runtime-pack-license-audit.py'
+      - '.github/workflows/offline-h6d-evidence.yml'
+      - 'docs/architecture/OFFLINE_H6D_LICENSE_AUDIT.md'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/installer/audit-wheelhouse-evidence.py'
+      - 'deploy/installer/test-audit-wheelhouse-evidence.py'
+      - 'deploy/installer/check-runtime-pack-release.py'
+      - 'deploy/installer/test-runtime-pack-release-preflight.py'
+      - '.github/workflows/offline-h6d-evidence.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-integrity:
+    name: Synthetic read-only audit and fail-closed preflight (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run synthetic tests without downloading models, wheels or FFmpeg
+        env:
+          PIP_NO_INDEX: '1'
+          GOPROXY: 'off'
+          HF_HUB_OFFLINE: '1'
+        run: |
+          python3 deploy/installer/test-audit-wheelhouse-evidence.py
+          python3 deploy/installer/test-runtime-pack-release-preflight.py
+          python3 deploy/installer/test-runtime-pack-license-audit.py
+
+# CI uses tiny synthetic wheels. Real 36-wheel inspection is owner-local only;
+# even passing these checks does not authenticate origin or grant legal rights.

@@ -46,3 +46,26 @@ La herramienta deja explícitamente legal_go=false para los 36 wheels y release_
 5. Resolver inmutabilidad/TOCTOU y certificar offline antes de READY.
 
 Esta revisión no descargó, distribuyó ni ejecutó artefactos de release.
+
+
+## H6D-R6 — Wheel archives physically inspected (2026-10-14)
+
+A new **read-only, offline and bounded** script, `deploy/installer/audit-wheelhouse-evidence.py`, has inspected the **actual 36 pinned wheel archives** inside `runtime-lab/packs/lab-2026.10.14-0e8657f-r4/wheelhouse`. It does not download packages, import third-party modules, copy wheels or distribute license texts.
+
+Observed on Mac M4:
+- **36/36** wheel files matched the exact pinned SHA-256, name/version and byte size; **0** unexpected .whl files and **0** technical errors.
+- **36/36** wheel archives contained readable `.dist-info/METADATA` and at least one file under `.dist-info/licenses/` or a legacy license/copying/notice file. The script records internal paths, SHA-256 and sizes of the notice text, plus observed package license fields; it does not interpret or approve the legal obligations.
+- **9/36** have a `License-Expression` in METADATA; **25/36** have a nonempty legacy `License` field. Presence/absence does not authorize redistribution. Examples: Ultralytics 8.3.1 reports a legacy AGPL-3.0 field; Torch 2.4.0 reports BSD-3; Torchvision 0.19.0 reports BSD; OpenCV 4.11.0.86 reports Apache 2.0. These are **distribution metadata observations only**, not a complete legal review.
+- Local FFmpeg portable 8.1.3 `-buildconf` recorded `--disable-network`, `--disable-autodetect`, `--disable-everything`, H.264 decoding and static binaries; it did not show `--enable-libx264` or `--enable-gpl`. This only describes the **laboratory binary**, and does not clear source-archive signature validation, potential linker/library obligations, runtime codec usage by other product components, or legal redistribution.
+- Detached signature file `runtime-lab/ffmpeg-source/ffmpeg-8.1.3.tar.xz.asc` is present. Its authenticity and binding to a trusted upstream signing identity remain **NOT VERIFIED**; presence of .asc alone is insufficient.
+- The reviewed source artifact's repository lock does not authenticate the downloader or build provenance. The audit intentionally reports `signed_origin_verified=false`, `human_legal_review_complete=false`, `redistribution_approved=false` and `release_eligible=false`.
+
+Local reproduction:
+
+```bash
+W=/Users/gustavomarcon/Documents/proyectos/monitoreoedgeis-worktrees/offline-h6d
+python3 "$W/deploy/installer/audit-wheelhouse-evidence.py"   --repo "$W"   --wheelhouse "$W/runtime-lab/packs/lab-2026.10.14-0e8657f-r4/wheelhouse" --summary
+python3 "$W/deploy/installer/test-audit-wheelhouse-evidence.py"
+```
+
+All eight archive-adversarial tests passed (corrupt SHA, wrong distribution identity, ZIP path traversal, missing/symlink wheel, unexpected wheel, missing notices and successful synthetic fixture). The result improves technical evidence but **does not change the NO-GO for release**.
