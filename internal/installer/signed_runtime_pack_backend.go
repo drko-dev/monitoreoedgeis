@@ -68,7 +68,12 @@ func NewSignedRuntimePackPreparationBackend(
 	if err != nil {
 		return nil, err
 	}
-	return &SignedRuntimePackPreparationBackend{backend: backend, signed: &frozen, trust: trust}, nil
+	gated := &SignedRuntimePackPreparationBackend{backend: backend, signed: &frozen, trust: trust}
+	// Revalidate as late as RecoveryManager's staged verification permits.
+	// This does not claim atomic key revocation across processes, but closes
+	// the long unguarded staging period.
+	backend.preCommitVerify = gated.verify
+	return gated, nil
 }
 
 // verify checks signature validity, revocation/expiry, artifact integrity and

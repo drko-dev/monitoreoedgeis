@@ -59,6 +59,10 @@ type RuntimePackProvisioningResult struct {
 type TransactionalRuntimePackProvisioner struct {
 	options                RuntimePackProvisionerOptions
 	recoveryManagerFactory func(string) (*RecoveryManager, error)
+	// Opt-in final authorization check for signed releases. Runs once more
+	// immediately before acknowledging an already-active pack or accepting
+	// staged bytes for CommitStaged; legacy digest-only flows are unchanged.
+	preCommitVerify func(context.Context) error
 }
 
 func NewTransactionalRuntimePackProvisioner(options RuntimePackProvisionerOptions) (*TransactionalRuntimePackProvisioner, error) {
@@ -144,6 +148,11 @@ func (p *TransactionalRuntimePackProvisioner) Prepare(ctx context.Context) (Runt
 	if _, err := os.Lstat(activePath); err == nil {
 		active, verifyErr := inspectRuntimePack(activePath, p.options.ManifestName, p.options.ExpectedManifestSHA256, p.options.TargetOS, p.options.TargetArch)
 		if verifyErr == nil && active.manifestSHA256 == preflight.manifestSHA256 {
+			if p.preCommitVerify != nil {
+				if err := p.preCommitVerify(ctx); err != nil {
+					return failedPackResult(result, "SIGNED_MANIFEST_REJECTED", err)
+				}
+			}
 			result.State = "COMMITTED_UNCERTIFIED"
 			result.TransactionCommitted = true
 			result.AlreadyActive = true
@@ -177,6 +186,13 @@ func (p *TransactionalRuntimePackProvisioner) Prepare(ctx context.Context) (Runt
 		}
 		if staged.manifestSHA256 != preflight.manifestSHA256 || staged.manifest.RuntimeVersion != preflight.manifest.RuntimeVersion {
 			return ErrRuntimePackManifestPinMismatch
+		}
+		// The selected signer may have been revoked during file staging.
+		// Reject BEFORE RecoveryManager renames the staged bytes to active.
+		if p.preCommitVerify != nil {
+			if err := p.preCommitVerify(ctx); err != nil {
+				return fmt.Errorf("signed Runtime Pack pre-commit authorization: %w", err)
+			}
 		}
 		return nil
 	}); err != nil {
@@ -215,6 +231,12 @@ func (p *TransactionalRuntimePackProvisioner) Recover(ctx context.Context) (Runt
 	if err := manager.Reconcile(ctx); err != nil {
 		result.ErrorCode = "RUNTIME_RECOVERY_REQUIRED"
 		return result, err
+	}
+	if p.preCommitVerify != nil {
+		if err := p.preCommitVerify(ctx); err != nil {
+			result.ErrorCode = "SIGNED_MANIFEST_REJECTED"
+			return result, err
+		}
 	}
 	activePath := filepath.Join(p.options.DataDir, p.options.TargetName)
 	active, err := inspectRuntimePack(activePath, p.options.ManifestName, p.options.ExpectedManifestSHA256, p.options.TargetOS, p.options.TargetArch)

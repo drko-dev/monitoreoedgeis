@@ -36,3 +36,17 @@ The H6B transactional provisioner historically accepted an independently supplie
 4. `MODEL_REDISTRIBUTION_APPROVED=false`, `READY_FOR_INSTALLER=false`, `READY_FOR_RELEASE=false`. No default Wails runtime activation, model weights, binary packaging, deploy, merge, release or production actions.
 
 **This PR implements the signed-to-transaction security integration boundary, not commercial certification.**
+
+## H6D-R11.1 — Late authorization recheck (2026-10-14)
+
+Security review identified a bounded **revocation/time-of-check-to-time-of-use window**: the initial signed manifest check happens before H6B begins transactional staging, so a publisher key could be revoked while the release files were being copied. The original H6D-R11 adapter would not consult the updated trust store again before treating staged bytes as committed.
+
+This follow-up adds an **opt-in internal pre-commit verification callback** to the transactional provisioner. Only the new signed Runtime Pack backend attaches it; legacy digest-only H6B behaviors remain unchanged. The signed backend now revalidates all checks including signer revocation, signature expiry, pinned source manifest, signed payload identity and artifact hashes at three relevant boundaries:
+
+1. **At staged verification, before RecoveryManager's atomic rename:** if the signature/trust status changed since initial preflight, H6A rejects and cleans the staged candidate without installing it.
+2. **Before acknowledging an already-active, pin-matching runtime:** if the signer was revoked during the existing-runtime check, return failure without success flags.
+3. **After Reconcile and before returning a Recover result:** a key revoked during recovery cannot be silently reported as trusted after reconciliation.
+
+Added adversarial Go tests for revocation injected during staging, revocation immediately before already-active short-circuit, and source Worker modification between preflight and final staging verification. These tests verify false readiness flags, no successful commit, and absent active install for rejected first-time transactions. Targeted signed-manifest security tests pass with the race detector.
+
+**Limitations:** This closes the long staging interval but **does not provide global atomic key revocation** between the final validation and rename across processes, replace signed-release ownership infrastructure, or make previously installed executables immutable. A complete protection against filesystem race/TOCTOU attacks requires a defined immutable installed-pack trust model or descriptor-based verification/execution. Recover may still reconcile journal state before a late revalidation; the result remains fail-closed and not READY. No live release identity or production deployment was created.

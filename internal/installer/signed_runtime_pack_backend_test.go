@@ -302,3 +302,75 @@ func TestSignedPackGateRejectsOversizedManifest(t *testing.T) {
 		t.Fatal("oversized manifest unexpectedly accepted")
 	}
 }
+
+func TestSignedPackGateRevokedDuringStagingDoesNotCommit(t *testing.T) {
+	o, signed, store := newSignedPackFixture(t)
+	backend, err := NewSignedRuntimePackPreparationBackend(o, signed, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := backend.backend.preCommitVerify
+	calls := 0
+	backend.backend.preCommitVerify = func(ctx context.Context) error {
+		calls++
+		if err := store.RevokeKey("fixture-publisher", time.Now().UTC(), "revoked during staging"); err != nil {
+			return err
+		}
+		return original(ctx)
+	}
+	result, err := backend.Prepare(context.Background())
+	if !errors.Is(err, ErrKeyRevoked) || result.TransactionCommitted || result.RuntimeReady ||
+		result.InferenceReady || calls != 1 {
+		t.Fatalf("revocation during staging was not denied: result=%+v err=%v calls=%d", result, err, calls)
+	}
+	if _, err := os.Stat(filepath.Join(o.DataDir, DefaultRuntimePackTargetName)); !os.IsNotExist(err) {
+		t.Fatalf("revoked release became active: %v", err)
+	}
+}
+
+func TestSignedPackGateRevokedDuringAlreadyActiveRecheck(t *testing.T) {
+	o, signed, store := newSignedPackFixture(t)
+	backend, err := NewSignedRuntimePackPreparationBackend(o, signed, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := backend.Prepare(context.Background())
+	if err != nil || !first.TransactionCommitted {
+		t.Fatalf("setup: %+v %v", first, err)
+	}
+	original := backend.backend.preCommitVerify
+	backend.backend.preCommitVerify = func(ctx context.Context) error {
+		if err := store.RevokeKey("fixture-publisher", time.Now().UTC(), "revoked during active shortcut"); err != nil {
+			return err
+		}
+		return original(ctx)
+	}
+	result, err := backend.Prepare(context.Background())
+	if !errors.Is(err, ErrKeyRevoked) || result.TransactionCommitted || result.AlreadyActive ||
+		result.RuntimeReady || result.InferenceReady {
+		t.Fatalf("revoke before already-active return must not acknowledge: %+v %v", result, err)
+	}
+}
+
+func TestSignedPackGateTamperedSourceDuringStagingDoesNotCommit(t *testing.T) {
+	o, signed, store := newSignedPackFixture(t)
+	backend, err := NewSignedRuntimePackPreparationBackend(o, signed, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := backend.backend.preCommitVerify
+	backend.backend.preCommitVerify = func(ctx context.Context) error {
+		path := filepath.Join(o.PackDir, signed.Manifest.Worker.Entrypoint)
+		if err := os.WriteFile(path, []byte("tamper after first check"), 0o600); err != nil {
+			return err
+		}
+		return original(ctx)
+	}
+	result, err := backend.Prepare(context.Background())
+	if err == nil || result.TransactionCommitted || result.RuntimeReady {
+		t.Fatalf("source tamper during staging accepted: %+v %v", result, err)
+	}
+	if _, err := os.Stat(filepath.Join(o.DataDir, DefaultRuntimePackTargetName)); !os.IsNotExist(err) {
+		t.Fatalf("tampered release installed: %v", err)
+	}
+}
