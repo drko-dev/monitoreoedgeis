@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/installer"
@@ -27,6 +28,10 @@ func NewAppWithPinnedRuntimePack(options installer.RuntimePackProvisionerOptions
 	if err != nil {
 		return nil, err
 	}
+	// Bootstrap from transactional evidence, not H5B's in-memory default.
+	// An absent/corrupt active pack remains FAILED (never READY); the
+	// operation error is exposed through Status/Diagnostic, not ignored.
+	_, _ = adapter.RestoreFromTransaction(context.Background())
 	app := NewApp()
 	app.preparation = adapter
 	return app, nil

@@ -46,6 +46,40 @@ func (a *RuntimePackPreparationAdapter) Status(ctx context.Context) (FullEdgePre
 	return a.snapshot, nil
 }
 
+// RestoreFromTransaction reconstructs state from H6A/H6B journal and active-pack
+// evidence after a desktop restart. It does not trust or deserialize a UI
+// snapshot. Recover may reconcile an interrupted transaction on disk, so callers
+// must use it only after explicit release-owned opt-in.
+func (a *RuntimePackPreparationAdapter) RestoreFromTransaction(ctx context.Context) (FullEdgePreparationSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return FullEdgePreparationSnapshot{}, err
+	}
+	a.mu.Lock()
+	if a.running {
+		snapshot := a.snapshot
+		a.mu.Unlock()
+		return snapshot, ErrPreparationInProgress
+	}
+	a.running = true
+	a.snapshot = FullEdgePreparationSnapshot{
+		State: StateChecking, ProgressPercent: 1,
+		DiagnosticsAvailable: true, Components: DefaultComponentProgress(),
+	}
+	a.mu.Unlock()
+
+	result, err := a.backend.Recover(ctx)
+	snapshot := mapPackResult(result, err)
+	// Recovery evidence is not a durable request-id receipt.
+	snapshot.OperationID = ""
+	a.mu.Lock()
+	a.snapshot = snapshot
+	a.running = false
+	a.requestID = ""
+	a.completedID = ""
+	a.mu.Unlock()
+	return snapshot, err
+}
+
 func (a *RuntimePackPreparationAdapter) Start(ctx context.Context, requestID string) (FullEdgePreparationSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return FullEdgePreparationSnapshot{}, err
