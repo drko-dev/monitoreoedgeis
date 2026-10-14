@@ -61,3 +61,15 @@ The harness produces a machine-readable JSON report and **never** emits `RUNTIME
 5. H7B needs review of platform network policy, negative cases and release evidence before it can claim complete certification. Do not merge solely on the above E2E evidence.
 
 **State:** H7B LAB PARTIAL / RELEASE BLOCKED. No tag, release, merge, deploy, production or model redistribution authorized.
+
+
+## H7B security-review hardening
+
+The first independent review of PR #163 found two false-assurance windows. The harness now:
+
+- Uses `sandbox-exec -p` with the **fixed, audited in-memory policy**, rather than reopening the on-disk `.sb` file between `policy_matches()` and execution. A symlinked or changed policy file is refused; changes can neither race the executed policy nor silently replace it.
+- For commands beyond the boundary-only test, requires a **nonempty `--require-marker`** before claiming a functional lab pass; `-- /usr/bin/true` is deliberately rejected with `NOT_VERIFIED`. The marker is only test evidence, **not cryptographic attestation**, and a malicious arbitrary command could forge it. The reporter never asserts product/runtime readiness.
+- Builds a minimal child-process environment: OS home/temp/locale, explicit H6D laboratory fixtures, Go cache paths, fixed `/usr/bin:/bin`, and offline package/hub flags. Proxy variables, host Python import overrides, DYLD injections, developer tokens and arbitrary credentials are not inherited. This applies to both the boundary self-test and the integrated lab subprocess.
+- Adds regression tests for in-memory policy execution, symlink rejection, absent marker and secret/environment filtering (9 synthetic cases total), plus a macOS CI negative functional-proof case.
+
+The actual loopback-safe sandbox E2E was rerun on the Mac M4 with these restrictions: `LAB_EGRESS_EVIDENCE_PASS_NOT_CERTIFIED`, `RTSP_GO_FFMPEG_YOLO_PASS` marker found, exit code 0. This does not resolve the known localhost-relay/proxy, clean-machine and release blockers.

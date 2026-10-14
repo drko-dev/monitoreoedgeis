@@ -30,10 +30,19 @@ DENIED_ERRNOS = (errno.EPERM, errno.EACCES)
 
 
 def policy_matches():
+    # Keep the audited repository file in sync with the embedded immutable
+    # policy. Never pass this mutable file path to sandbox-exec (TOCTOU).
     try:
-        return POLICY_PATH.is_file() and POLICY_PATH.read_text() == POLICY
+        return (not POLICY_PATH.is_symlink() and POLICY_PATH.is_file() and
+                POLICY_PATH.read_text() == POLICY)
     except OSError:
         return False
+
+
+def sandboxed_command(command):
+    # -p loads the fixed audited policy from this process's memory, rather
+    # than allowing a file replacement after policy_matches() returned true.
+    return [SANDBOX_EXEC, "-p", POLICY, *command]
 
 
 def outbound_tcp_result():
@@ -147,9 +156,12 @@ def self_test():
         port = server.getsockname()[1]
         try:
             run = subprocess.run(
-                [SANDBOX_EXEC, "-f", str(POLICY_PATH), sys.executable,
-                 "-I", str(Path(__file__).resolve()), "--child", str(port)],
-                capture_output=True, text=True, timeout=20, check=False
+                sandboxed_command([
+                    sys.executable, "-I", str(Path(__file__).resolve()),
+                    "--child", str(port),
+                ]),
+                capture_output=True, text=True, timeout=20, check=False,
+                env=audited_environment(),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return {"status": "NOT_VERIFIED", "reason": type(exc).__name__}
@@ -169,13 +181,18 @@ def self_test():
 
 
 def audited_environment():
-    env = os.environ.copy()
-    for key in tuple(env):
-        if key.startswith(("DYLD_", "PYTHONPATH", "PYTHONHOME")) or (
-            key.lower() in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
-        ):
-            env.pop(key, None)
+    # Opt-in laboratory command: pass only expected fixture/tooling paths and
+    # minimum OS defaults. Never inherit credentials, proxies, host PYTHONPATH,
+    # dynamically injected libraries, or developer Homebrew PATH fallbacks.
+    allowed = {
+        "HOME", "USER", "TMPDIR", "LANG", "LC_ALL",
+        "H6D_LAB_PACK", "H6D_LAB_MODELS", "H6D_LAB_H264",
+        "H6D_LAB_DEVICE", "GOCACHE", "GOMODCACHE",
+    }
+    env = {key: value for key, value in os.environ.items()
+           if key in allowed}
     env.update({
+        "PATH": "/usr/bin:/bin",
         "PIP_NO_INDEX": "1", "GOPROXY": "off", "GOSUMDB": "off",
         "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
     })
@@ -217,9 +234,15 @@ def main():
         report["reason"] = "sandboxed executable must have an absolute path"
         print(json.dumps(report, sort_keys=True))
         return 2
+    if not args.require_marker:
+        report["reason"] = (
+            "a nonempty --require-marker is required for functional evidence"
+        )
+        print(json.dumps(report, sort_keys=True))
+        return 2
     try:
         run = subprocess.run(
-            [SANDBOX_EXEC, "-f", str(POLICY_PATH), *command],
+            sandboxed_command(command),
             capture_output=True, text=True, timeout=150,
             check=False, env=audited_environment(),
         )

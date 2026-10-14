@@ -46,6 +46,19 @@ jobs:
           assert report["status"] == "BOUNDARY_PROBE_PASS_NOT_AIRGAP_CERTIFIED"
           assert report["boundary"]["child"]["grandchild_policy_inherited"]
           PY
+      - name: Prove missing functional marker never certifies arbitrary command
+        run: |
+          set +e
+          python3 deploy/installer/h7b-egress-cert.py -- /usr/bin/true > "$RUNNER_TEMP/h7b-negative.json"
+          code=$?
+          set -e
+          test "$code" -ne 0
+          python3 - "$RUNNER_TEMP/h7b-negative.json" <<'PY'
+          import json, sys
+          report = json.load(open(sys.argv[1]))
+          assert report["status"] == "NOT_VERIFIED"
+          assert "require-marker" in report.get("reason", "")
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: offline-h7b-macos-boundary
