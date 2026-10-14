@@ -1,131 +1,56 @@
-# Offline H6A — Crash Recovery & Atomic Activation
+# Offline H6A — Transactional Runtime Recovery
 
 ## Scope and status
 
-Milestone H6A implements the transactional core, persistent write-ahead journal (`recovery.journal`), staging isolation, dual-layer concurrency locking, directory confinement, atomic activation, and idempotent crash reconciliation for GEO CAM Edge runtime directories.
+H6A provides a recovery primitive for runtime directory activation. It is not connected to active provisioning and does not certify `PREPARATION_READY`, `RUNTIME_READY`, or `INFERENCE_READY`. `MODEL_REDISTRIBUTION_APPROVED=false` remains unchanged.
 
-H6A does **not** declare H6 complete, `RUNTIME_READY`, or `INFERENCE_READY`. It does not bypass model redistribution constraints (`MODEL_REDISTRIBUTION_APPROVED=false`). It provides the crash-safe foundation that allows Python runtimes, wheelhouse packages, models, and workers to be installed, upgraded, or rolled back without leaving the edge node in an unbootable or corrupted state.
+The manager uses a persistent journal, isolated staging, versioned backup, transaction-bound tree digests, directory confinement, a dual-layer lock, and idempotent reconciliation. The caller must hold the recovery lock for `Begin`, `CommitStaged`, and `Reconcile`.
 
----
+## Integrity evidence and trust boundary
 
-## POSIX Directory Swap Semantics & The Crash Window
+- `ExpectedHash` is caller-supplied release metadata. It is **not** accepted as proof that a runtime tree is intact.
+- Before activation, H6A calculates a deterministic SHA-256 over relative paths, file types, permission bits, sizes, and file contents. It rejects symlinks and special files. `StagingHash`, `BackupHash`, and `ActiveHash` are written into the transaction journal and compared on restore/reconcile.
+- A rollback requires `HadActive=true`, a transaction-bound `BackupHash`, and a confined real backup directory whose tree digest matches. Missing, malformed, or altered backup evidence fails closed without deleting active, backup, staging, or quarantine data.
+- The journal checksum detects accidental truncation/changes. It is unkeyed and does not authenticate a journal against a malicious local administrator. The tree digest likewise proves consistency with the journal, not provenance or code safety; release signature/manifest validation belongs to the caller and later integration.
+- `COMMITTED` and `IDLE` are transaction states, not readiness claims. When active integrity evidence exists, reconciliation verifies it. `COMMITTED` without valid evidence, or a missing/altered active tree, returns a non-certified recovery error and preserves backups. A first install interrupted before verification has no prior runtime and is not reported as a successful rollback.
 
-In POSIX file systems (macOS APFS, Linux ext4), `rename(2)` / `os.Rename` cannot overwrite a non-empty directory (`ENOTEMPTY` / `EEXIST`). Consequently, upgrading a directory containing executable runtimes or libraries requires a multi-step sequence:
-1. `active` directory is renamed to `backup` (`.backup.<target>.<txid>`).
-2. `staging` directory (`.staging.<target>.<txid>`) is renamed to `active`.
-3. Post-activation verification executes smoke tests against `active`.
-4. `backup` directory is pruned.
+## Write and rename ordering
 
-### The Crash Window Problem
-Between step 1 and step 2, the `active` directory does not exist on disk. If the process receives a `SIGKILL`, the machine loses power, or an unexpected OS reboot occurs during this window, a subsequent process start would find `active` missing and fail.
+For a successful activation, the intended order is:
 
-Without persistent state, a recovering process cannot distinguish between:
-- A clean first-time installation that was interrupted before completion.
-- An interrupted upgrade where the previous runtime is in a backup directory.
-- A failed rollback where both directories contain divergent files.
+1. `Begin` verifies and hashes an existing active tree (if any), creates staging, then writes the `PREPARING` journal. Journal replacement uses a temporary regular file, file `Sync`, atomic rename, and parent-directory `Sync`.
+2. The caller populates staging. Before activation, `CommitStaged` runs the caller verifier, hashes and syncs each regular staged payload file, then syncs staged directories bottom-up. Symlinks and special files are rejected.
+3. The `STAGED` journal records the computed staging digest. For an upgrade, H6A re-hashes active against the baseline captured by `Begin`, writes `BACKING_UP` with the required backup path/hash, renames active to backup, syncs the parent, then writes `BACKED_UP`.
+4. H6A writes `ACTIVATING`, renames staging to active, syncs the parent, and writes `ACTIVATED`. These are **two separate renames**, not one atomic directory swap; the journal makes the gap recoverable.
+5. The caller verifier runs again. H6A re-hashes/syncs active and requires it to equal the staged digest. Only then does it write `COMMITTED`. Backup pruning occurs only after this verified commit; an uncertain or failed recovery never prunes a backup.
+6. The final `IDLE` journal is written only after cleanup. Failed journal/file/directory syncs return errors; they do not count as a successful commit.
 
-### The Write-Ahead Journal Solution
-`RecoveryManager` solves this problem by maintaining a write-ahead journal (`recovery.journal`) on disk. Every state transition is written and synchronized (`fsync`) before executing filesystem renames. On startup, `RecoveryManager.Reconcile()` reads the journal, validates cryptographic integrity, inspects filesystem evidence, and idempotently rolls back or commits the pending transaction.
+Rollback verifies the backup *before* changing active. An unverified active tree is renamed to a transaction-specific quarantine path (never `RemoveAll`'d), the parent directory is synced, the verified backup is renamed into active, the parent is synced again, and the restored tree is verified before `ROLLED_BACK` is persisted. If any step fails, the journal stays recoverable where possible and the artifacts are retained for retry/diagnosis.
 
----
+## Filesystem guarantees and limits
 
-## Transaction Lifecycle & State Machine
+A same-filesystem POSIX rename is atomic for one directory entry. The active-to-backup and staging-to-active renames are not jointly atomic; crash consistency comes from the write-ahead state and recovery rules. File `Sync` flushes file data/metadata as provided by the OS; directory `Sync` requests persistence of entry changes. The code uses Go `File.Sync` and does not issue macOS `F_FULLFSYNC`. APFS, device caches, virtualized disks, and hardware may weaken guarantees under sudden power loss. Therefore H6A does not claim an absolute guarantee against every power failure. Windows directory sync is currently a no-op. Physical power-loss qualification is outside this synthetic test suite.
 
-The transaction lifecycle is modeled by an explicit 11-state machine:
+The manager serializes cooperating processes. It is not a defense against an uncooperative privileged process mutating the same tree concurrently; tree reads perform lstat/open identity checks, but H6A is not implemented with descriptor-relative `openat` traversal. The trusted boundary is the locked, product-owned runtime directory.
 
-| State | Description | Recovery Behavior on Crash |
-| --- | --- | --- |
-| `IDLE` | No active transaction; system is quiescent. | No-op. Remove stale staging dirs if found. |
-| `PREPARING` | Staging directory created; files being unpacked/prepared. | Remove staging directory; revert to `IDLE`. `active` was untouched. |
-| `STAGED` | Staging verified and ready for activation swap. | Remove staging directory; revert to `IDLE`. `active` was untouched. |
-| `BACKING_UP` | Initiating rename from `active` to `backup`. | If `backup` exists and `active` is missing, restore `backup` → `active`. Revert to `ROLLED_BACK`. |
-| `BACKED_UP` | `active` moved to `backup`; `active` currently missing on disk. | Restore `backup` → `active`. Clean staging. Revert to `ROLLED_BACK`. |
-| `ACTIVATING` | Initiating rename from `staging` to `active`. | Staging was uncommitted. Restore `backup` → `active`. Revert to `ROLLED_BACK`. |
-| `ACTIVATED` | `staging` moved to `active`; awaiting post-activation checks. | Verification unacknowledged. Restore `backup` → `active`. Revert to `ROLLED_BACK`. |
-| `ROLLING_BACK` | Rollback in progress due to test failure or error. | Complete restoring `backup` → `active`. Clean staging. Advance to `ROLLED_BACK`. |
-| `ROLLED_BACK` | Rollback completed cleanly; previous active restored. | Advance to `IDLE`. Clean leftover staging. |
-| `COMMITTED` | Activation verified successfully; backup pruned. | Advance to `IDLE`. Clean leftover staging. |
-| `FAILED` | Rollback failed (e.g. disk I/O error). Manual recovery needed. | **Fail-closed.** Preserves all backups. Emits operator manual command. |
+## Reconciliation behavior
 
----
+| Journal and disk evidence | Action | Result |
+|---|---|---|
+| `PREPARING`/`STAGED`, previous runtime digest matches | Remove only confined staging; retain/record verified active digest | `IDLE` |
+| `BACKING_UP`, active and backup both exist | Preserve both; require diagnosis | Error / recovery required |
+| `BACKING_UP`/`BACKED_UP`/`ACTIVATING`/`ACTIVATED`/`ROLLING_BACK`, backup exists and matches `BackupHash` | Quarantine active if present; restore and verify backup; sync parent after each rename | `ROLLED_BACK` |
+| Rollback state, backup missing but active matches the transaction's prior digest | Treat as an already-completed restore; persist `ROLLED_BACK` | Idempotent success |
+| Rollback state, required backup missing/corrupt/unreadable, or active does not match prior digest | Preserve journal and all available artifacts | Error / recovery required |
+| First install interrupted during activation; no previous runtime | Preserve active/staging/journal; do not claim rollback or readiness | Error / operator recovery |
+| `ROLLED_BACK`, active equals prior digest | Verify before advancing to `IDLE`; preserve quarantine | `IDLE` |
+| `COMMITTED`/`IDLE`, active digest matches journal | Verify active; do not remove a backup merely due to state | Transaction reconciled; readiness still separate |
+| `COMMITTED`/`IDLE`, active missing/altered or evidence absent | Preserve artifacts; return non-certified error | Error / recovery required |
+| No journal, unjournaled backup exists | Do not infer trust from its filename; preserve backup and active | Error / operator review |
+| Invalid journal, unsafe path, symlink/special runtime entry, or unsupported state | Do not mutate referenced artifacts | Error / recovery required |
 
-## Durability & Fsync Guarantees
+## Test coverage
 
-File and directory metadata durability is guaranteed via strict sync boundaries:
+Tests use temporary directories and small synthetic trees. They cover normal first install/upgrade, process termination during activation, missing/corrupt backups, active+backup ambiguity, quarantine before restoration, interrupted restore and retry, repeated reconciliation, altered finalized runtime, path/journal symlinks, malformed journal, lock contention, and payload/directory sync failures.
 
-1. **Atomic Journal Updates**:
-   - The updated journal record is serialized to JSON and formatted.
-   - A SHA-256 checksum over all record payload fields is computed and embedded in the record.
-   - The record is written to a temporary file (`recovery.journal.tmp.<pid>`).
-   - `f.Sync()` is called to flush dirty buffers to physical storage.
-   - The file is atomically renamed to `recovery.journal`.
-   - `syncDir(baseDir)` is called to flush parent directory metadata to storage.
-
-2. **Directory Sync (`syncDir`)**:
-   - Renaming directories in POSIX updates directory entry catalogs in the parent directory.
-   - `syncDir()` opens the parent directory with `os.Open` and issues `d.Sync()`. On Windows, where directory syncing is a no-op, this safely returns `nil`.
-
----
-
-## Backup Preservation Invariant
-
-The core safety rule of `RecoveryManager` is: **Never delete a backup under ambiguous or corrupt state.**
-
-1. **Post-Activation Verification Requirement**:
-   A backup directory is pruned **only** after:
-   - Staging is renamed to `active`.
-   - All post-activation verifications and smoke tests pass.
-   - The journal record has transitioned to `COMMITTED`.
-
-2. **Ambiguity Handling (`RECOVERY_AMBIGUOUS_BACKUP`)**:
-   If both `active` and `backup` exist with non-empty content and the journal is missing or ambiguous, `Reconcile()` refuses to overwrite or delete either. It returns `ErrRecoveryAmbiguous` and leaves all files intact for operator diagnosis.
-
-3. **Failed Rollback Handling (`RECOVERY_ROLLBACK_FAILED`)**:
-   If an error occurs while restoring `backup` → `active` during rollback:
-   - The transaction state transitions to `FAILED`.
-   - The backup is strictly preserved.
-   - The system returns a structured `SafeError` with a non-destructive manual recovery instruction:
-     `mv <backup> <active>`
-
-4. **Corrupted Journal Handling (`RECOVERY_JOURNAL_CORRUPT`)**:
-   If `recovery.journal` is empty, truncated, or fails SHA-256 record verification, `Reconcile()` fails closed immediately without modifying the filesystem.
-
----
-
-## Directory Confinement & Symlink Security
-
-`RecoveryManager` validates all path targets via `validateConfinement`:
-- Targets are resolved against the canonicalized `baseDir` via `filepath.EvalSymlinks`.
-- Any relative escape (`..`) is rejected.
-- Any symlink pointing outside `baseDir` (either at the leaf or in any parent segment) is rejected with `ErrSecurityEscapingSymlink`.
-- Persisted journal paths are revalidated before cleanup or rename. A malformed or truncated journal does not authorize deleting staging or backup data; journal entries that are not regular files are rejected.
-
----
-
-## Dual-Layer Concurrency Locking
-
-To prevent race conditions and concurrent installer/recovery execution:
-1. **In-Process Layer**: An in-memory mutex (`sync.Mutex`) is indexed by canonicalized `baseDir`. Multiple goroutines attempting concurrent recovery within the same process are serialized or rejected.
-2. **Cross-Process Layer**: Advisory file locking via `fileLock` (`flock` on Unix, `LockFileEx` on Windows) is acquired on `.recovery.lock`. If another installer or background updater holds the lock, `AcquireLock` immediately fails with `ErrCodeRecoveryLockHeld`.
-
-`Begin`, `CommitStaged`, and `Reconcile` require the caller to hold this lock; they fail closed otherwise. `ReleaseLock` is idempotent and never unlocks a lock owned by another manager. `CommitStaged` requires a non-nil verifier and returns directory-sync errors instead of advancing the journal as though the filesystem operation were durable.
-
-For an interrupted first install (`ACTIVATING`/`ACTIVATED` with no backup), there is no previous runtime to restore and the post-activation verifier may not have completed. Reconciliation preserves the active files and journal and returns a recovery-ambiguous error; it does not mark the runtime committed or ready. The caller must resolve this state explicitly.
-
-Journal records are validated semantically as well as by checksum: target names must be single safe path components; active, staging, and backup paths must match the transaction naming contract; and resolved paths must remain under the canonical recovery root.
-
----
-
-## Crash Recovery & Reconciliation Matrix
-
-| Disk State at Startup | Journal State | Target Directory Action | Resulting State |
-| --- | --- | --- | --- |
-| `active` ok, no backups | `IDLE` / `COMMITTED` | None | `IDLE` |
-| `active` ok, staging exists | `PREPARING` / `STAGED` | Remove `staging` | `IDLE` |
-| `active` missing, backup exists | `BACKING_UP` / `BACKED_UP` | `os.Rename(backup, active)` | `ROLLED_BACK` |
-| `active` unverified, backup exists | `ACTIVATING` / `ACTIVATED` | Remove `active`, `os.Rename(backup, active)` | `ROLLED_BACK` |
-| `active` missing, backup exists | `ROLLING_BACK` | `os.Rename(backup, active)` | `ROLLED_BACK` |
-| `active` ok, backup exists | Corrupted / No journal | Preserves both; returns `RECOVERY_AMBIGUOUS_BACKUP` | Error (Safe) |
-| Any | `FAILED` | Preserves all; instructions logged | Error (Safe) |
-
-H6A tests include a child process forcibly terminated after activation rename and a separate child process holding the advisory lock, in addition to injected state/rename/fsync failures. These are synthetic filesystem tests; they do not invoke the active Full Edge runtime or certify readiness.
+They do not certify macOS/APFS behavior under physical power loss, protection from a privileged non-cooperating writer, release authenticity, runtime compatibility, or operational readiness. H6A remains disconnected from the installer/runtime; integration and readiness certification require later milestones.

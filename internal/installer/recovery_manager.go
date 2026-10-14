@@ -7,10 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -60,16 +60,23 @@ type JournalRecord struct {
 	State        JournalState `json:"state"`
 	Target       string       `json:"target"`
 	TargetVer    string       `json:"target_ver"`
-	ActivePath   string       `json:"active_path"`  // Relative to baseDir
-	StagingPath  string       `json:"staging_path"` // Relative to baseDir
-	BackupPath   string       `json:"backup_path"`  // Relative to baseDir
-	ExpectedHash string       `json:"expected_hash"`
-	Timestamp    time.Time    `json:"timestamp"`
-	RecordHash   string       `json:"record_hash"` // SHA-256 of payload fields
+	ActivePath   string       `json:"active_path"`   // Relative to baseDir
+	StagingPath  string       `json:"staging_path"`  // Relative to baseDir
+	BackupPath   string       `json:"backup_path"`   // Relative to baseDir
+	ExpectedHash string       `json:"expected_hash"` // Caller metadata only; never runtime integrity evidence.
+	// HadActive distinguishes an upgrade rollback (a prior runtime is required)
+	// from an interrupted first install (there is no prior runtime to restore).
+	HadActive      bool      `json:"had_active"`
+	BackupHash     string    `json:"backup_tree_sha256,omitempty"`
+	StagingHash    string    `json:"staging_tree_sha256,omitempty"`
+	ActiveHash     string    `json:"active_tree_sha256,omitempty"`
+	QuarantinePath string    `json:"quarantine_path,omitempty"`
+	Timestamp      time.Time `json:"timestamp"`
+	RecordHash     string    `json:"record_hash"` // SHA-256 of payload fields
 }
 
 func (r *JournalRecord) computeHash() string {
-	payload := fmt.Sprintf("%d|%s|%s|%s|%s|%s|%s|%s|%s|%d",
+	payload := fmt.Sprintf("%d|%s|%s|%s|%s|%s|%s|%s|%s|%t|%s|%s|%s|%s|%d",
 		r.Version,
 		r.TxID,
 		r.State,
@@ -79,6 +86,11 @@ func (r *JournalRecord) computeHash() string {
 		r.StagingPath,
 		r.BackupPath,
 		r.ExpectedHash,
+		r.HadActive,
+		r.BackupHash,
+		r.StagingHash,
+		r.ActiveHash,
+		r.QuarantinePath,
 		r.Timestamp.UnixNano(),
 	)
 	h := sha256.Sum256([]byte(payload))
@@ -89,19 +101,64 @@ func (r *JournalRecord) isValid() bool {
 	if r == nil || r.Version != 1 || r.TxID == "" || !validTargetName(r.Target) || r.Timestamp.IsZero() {
 		return false
 	}
+	if r.Timestamp.UnixNano() <= 0 {
+		return false
+	}
 	if strings.ContainsAny(r.TxID, "/\\:\x00") || strings.Contains(r.TxID, "..") || r.ActivePath != r.Target ||
 		r.StagingPath != fmt.Sprintf(".staging.%s.%s", r.Target, r.TxID) {
+		return false
+	}
+	if filepath.IsAbs(r.ActivePath) || filepath.IsAbs(r.StagingPath) || filepath.IsAbs(r.BackupPath) || filepath.IsAbs(r.QuarantinePath) {
+		return false
+	}
+	if strings.ContainsAny(r.TargetVer, "/\\:\x00") || strings.Contains(r.TargetVer, "..") {
 		return false
 	}
 	if r.BackupPath != "" && r.BackupPath != fmt.Sprintf(".backup.%s.%s", r.Target, r.TxID) {
 		return false
 	}
+	if r.QuarantinePath != "" && r.QuarantinePath != fmt.Sprintf(".quarantine.%s.%s", r.Target, r.TxID) {
+		return false
+	}
 	switch r.State {
-	case JournalStateIdle, JournalStatePreparing, JournalStateStaged, JournalStateBackingUp,
-		JournalStateBackedUp, JournalStateActivating, JournalStateActivated,
-		JournalStateRollingBack, JournalStateRolledBack, JournalStateCommitted, JournalStateFailed:
+	case JournalStateBackingUp, JournalStateBackedUp:
+		if r.BackupPath == "" || !r.HadActive || !isSHA256(r.BackupHash) {
+			return false
+		}
+	case JournalStatePreparing, JournalStateStaged:
+		if r.BackupPath != "" || (r.HadActive && !isSHA256(r.BackupHash)) || (r.State == JournalStateStaged && !isSHA256(r.StagingHash)) {
+			return false
+		}
+	case JournalStateIdle:
+		if r.BackupPath != "" || (r.HadActive && !isSHA256(r.ActiveHash)) {
+			return false
+		}
+	case JournalStateActivating, JournalStateActivated:
+		if r.HadActive && (!isSHA256(r.BackupHash) || r.BackupPath == "") {
+			return false
+		}
+		if !isSHA256(r.StagingHash) {
+			return false
+		}
+	case JournalStateRollingBack, JournalStateRolledBack:
+		if !r.HadActive || !isSHA256(r.BackupHash) || r.BackupPath == "" {
+			return false
+		}
+		if r.State == JournalStateRolledBack && r.ActiveHash != r.BackupHash {
+			return false
+		}
+	case JournalStateCommitted:
+		if !isSHA256(r.ActiveHash) || !isSHA256(r.StagingHash) || (r.HadActive && !isSHA256(r.BackupHash)) {
+			return false
+		}
+	case JournalStateFailed:
 	default:
 		return false
+	}
+	for _, digest := range []string{r.BackupHash, r.StagingHash, r.ActiveHash} {
+		if digest != "" && !isSHA256(digest) {
+			return false
+		}
 	}
 	return r.RecordHash == r.computeHash()
 }
@@ -109,6 +166,114 @@ func (r *JournalRecord) isValid() bool {
 func validTargetName(name string) bool {
 	return name != "" && name != "." && name != ".." && filepath.Base(name) == name &&
 		filepath.Clean(name) == name && !strings.ContainsAny(name, "/\\:\x00")
+}
+
+func isSHA256(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil && value == strings.ToLower(value)
+}
+
+// syncAndHashTree fsyncs every regular payload file and directory before returning
+// a deterministic digest. Symlinks and special files are rejected. The digest is
+// transaction evidence for accidental corruption, not an authenticity signature.
+func (m *RecoveryManager) syncAndHashTree(root string) (string, error) {
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return "", err
+	}
+	if !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("runtime tree root is not a real directory: %s", root)
+	}
+
+	var paths []string
+	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
+			return fmt.Errorf("runtime tree contains a symlink or special file: %s", path)
+		}
+		paths = append(paths, path)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+
+	h := sha256.New()
+	var directories []string
+	for _, path := range paths {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return "", err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return "", err
+		}
+		if rel == "." {
+			rel = ""
+		}
+		kind := "file"
+		if info.IsDir() {
+			kind = "dir"
+			directories = append(directories, path)
+		}
+		if _, err := fmt.Fprintf(h, "%s:%d:%s:%d:%d:", kind, len(rel), rel, info.Mode().Perm(), info.Size()); err != nil {
+			return "", err
+		}
+		if info.IsDir() {
+			continue
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return "", err
+		}
+		openedInfo, statErr := f.Stat()
+		if statErr != nil || !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() {
+			_ = f.Close()
+			if statErr != nil {
+				return "", statErr
+			}
+			return "", fmt.Errorf("runtime file changed during verification: %s", path)
+		}
+		if err := f.Sync(); err != nil {
+			_ = f.Close()
+			return "", fmt.Errorf("sync runtime file %s: %w", path, err)
+		}
+		if _, err := io.Copy(h, f); err != nil {
+			_ = f.Close()
+			return "", err
+		}
+		finalInfo, statErr := f.Stat()
+		pathInfo, pathErr := os.Lstat(path)
+		if statErr != nil || pathErr != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedInfo, pathInfo) || finalInfo.Size() != openedInfo.Size() || !finalInfo.ModTime().Equal(openedInfo.ModTime()) {
+			_ = f.Close()
+			if statErr != nil {
+				return "", statErr
+			}
+			if pathErr != nil {
+				return "", pathErr
+			}
+			return "", fmt.Errorf("runtime file changed during integrity validation: %s", path)
+		}
+		if err := f.Close(); err != nil {
+			return "", err
+		}
+	}
+	for i := len(directories) - 1; i >= 0; i-- {
+		if err := m.syncDirectory(directories[i]); err != nil {
+			return "", fmt.Errorf("sync runtime directory %s: %w", directories[i], err)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // FaultInjector allows synthetic injection of failures to test crash and recovery behavior.
@@ -307,38 +472,32 @@ func (m *RecoveryManager) writeJournal(record *JournalRecord) error {
 	}
 	tmpJournal := f.Name()
 	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpJournal)
-		return fmt.Errorf("failed to set temporary journal permissions: %w", err)
+		return errors.Join(fmt.Errorf("failed to set temporary journal permissions: %w", err), f.Close(), os.Remove(tmpJournal))
 	}
 
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpJournal)
-		return fmt.Errorf("failed to write temporary journal: %w", err)
+	n, err := f.Write(data)
+	if err != nil || n != len(data) {
+		if err == nil {
+			err = io.ErrShortWrite
+		}
+		return errors.Join(fmt.Errorf("failed to write temporary journal: %w", err), f.Close(), os.Remove(tmpJournal))
 	}
 
 	if m.faultInjector != nil && m.faultInjector.BeforeSync != nil {
 		if err := m.faultInjector.BeforeSync(tmpJournal); err != nil {
-			_ = f.Close()
-			_ = os.Remove(tmpJournal)
-			return err
+			return errors.Join(err, f.Close(), os.Remove(tmpJournal))
 		}
 	}
 
 	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpJournal)
-		return fmt.Errorf("failed to fsync temporary journal: %w", err)
+		return errors.Join(fmt.Errorf("failed to fsync temporary journal: %w", err), f.Close(), os.Remove(tmpJournal))
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(tmpJournal)
-		return fmt.Errorf("failed to close temporary journal: %w", err)
+		return errors.Join(fmt.Errorf("failed to close temporary journal: %w", err), os.Remove(tmpJournal))
 	}
 
 	if err := os.Rename(tmpJournal, m.journalPath); err != nil {
-		_ = os.Remove(tmpJournal)
-		return fmt.Errorf("failed to atomic rename journal to %s: %w", m.journalPath, err)
+		return errors.Join(fmt.Errorf("failed to atomic rename journal to %s: %w", m.journalPath, err), os.Remove(tmpJournal))
 	}
 
 	if err := m.syncDirectory(m.baseDir); err != nil {
@@ -440,6 +599,29 @@ func (m *RecoveryManager) Begin(ctx context.Context, targetName, targetVer, expe
 	if _, err := m.validateConfinement(targetName); err != nil {
 		return "", err
 	}
+	activeFull, err := m.validateConfinement(targetName)
+	if err != nil {
+		return "", err
+	}
+	activeExists, err := realDirectoryExists(activeFull)
+	if err != nil {
+		return "", fmt.Errorf("active runtime cannot be safely inspected: %w", err)
+	}
+	var activeHash string
+	if activeExists {
+		activeHash, err = m.syncAndHashTree(activeFull)
+		if err != nil {
+			return "", fmt.Errorf("active runtime cannot be durably verified before staging: %w", err)
+		}
+		if m.currentTx != nil && m.currentTx.ActiveHash != "" {
+			if err := m.verifyTreeHash(activeFull, m.currentTx.ActiveHash); err != nil {
+				return "", fmt.Errorf("existing active runtime does not match its committed evidence: %w", err)
+			}
+		}
+		if m.currentTx != nil && m.currentTx.ActiveHash == "" && m.currentTx.State == JournalStateIdle {
+			return "", errors.New("active runtime exists without committed integrity evidence")
+		}
+	}
 
 	txID := fmt.Sprintf("tx_%d_%d", os.Getpid(), time.Now().UnixNano())
 	stagingRel := fmt.Sprintf(".staging.%s.%s", targetName, txID)
@@ -462,11 +644,15 @@ func (m *RecoveryManager) Begin(ctx context.Context, targetName, targetVer, expe
 		StagingPath:  stagingRel,
 		BackupPath:   "",
 		ExpectedHash: expectedHash,
+		HadActive:    activeExists,
+		BackupHash:   activeHash,
+		ActiveHash:   activeHash,
 		Timestamp:    time.Now().UTC(),
 	}
 
 	if err := m.writeJournal(rec); err != nil {
-		_ = os.RemoveAll(stagingFull)
+		// The journal rename may have happened even when its directory sync failed.
+		// Preserve staging so either possible on-disk journal state remains recoverable.
 		return "", err
 	}
 
@@ -494,7 +680,7 @@ func (m *RecoveryManager) CommitStaged(ctx context.Context, verifyFn func(path s
 
 	// 1. Verify staging directory contents
 	if err := verifyFn(stagingFull); err != nil {
-		if removeErr := os.RemoveAll(stagingFull); removeErr != nil {
+		if removeErr := removeConfinedTree(m, stagingFull); removeErr != nil {
 			return fmt.Errorf("staging verification failed (%v); staging cleanup failed: %w", err, removeErr)
 		}
 		m.currentTx.State = JournalStateIdle
@@ -503,17 +689,31 @@ func (m *RecoveryManager) CommitStaged(ctx context.Context, verifyFn func(path s
 		}
 		return fmt.Errorf("staging verification failed: %w", err)
 	}
+	stagingHash, err := m.syncAndHashTree(stagingFull)
+	if err != nil {
+		return fmt.Errorf("staging durability/integrity validation failed: %w", err)
+	}
 
 	// 2. Mark STAGED
 	m.currentTx.State = JournalStateStaged
+	m.currentTx.StagingHash = stagingHash
 	m.currentTx.Timestamp = time.Now().UTC()
 	if err := m.writeJournal(m.currentTx); err != nil {
 		return err
 	}
 
 	var backupFull string
-	activeFi, activeErr := os.Stat(activeFull)
+	activeFi, activeErr := os.Lstat(activeFull)
 	activeExists := activeErr == nil
+	if activeErr != nil && !os.IsNotExist(activeErr) {
+		return fmt.Errorf("failed to inspect active runtime: %w", activeErr)
+	}
+	if activeExists && (!activeFi.IsDir() || activeFi.Mode()&os.ModeSymlink != 0) {
+		return fmt.Errorf("active runtime is not a real directory; refusing activation")
+	}
+	if activeExists != m.currentTx.HadActive {
+		return fmt.Errorf("active runtime presence changed during transaction; refusing activation")
+	}
 
 	// 3. Backup active if it exists
 	if activeExists {
@@ -524,6 +724,13 @@ func (m *RecoveryManager) CommitStaged(ctx context.Context, verifyFn func(path s
 			return err
 		}
 
+		backupHash, hashErr := m.syncAndHashTree(activeFull)
+		if hashErr != nil {
+			return fmt.Errorf("active runtime cannot be durably verified before backup: %w", hashErr)
+		}
+		if backupHash != m.currentTx.BackupHash {
+			return fmt.Errorf("active runtime changed after transaction began; refusing activation")
+		}
 		m.currentTx.BackupPath = backupRel
 		m.currentTx.State = JournalStateBackingUp
 		m.currentTx.Timestamp = time.Now().UTC()
@@ -556,6 +763,11 @@ func (m *RecoveryManager) CommitStaged(ctx context.Context, verifyFn func(path s
 			return err
 		}
 	}
+	if !activeExists {
+		m.currentTx.HadActive = false
+		m.currentTx.BackupHash = ""
+		m.currentTx.BackupPath = ""
+	}
 
 	// 4. Activate staging -> active
 	m.currentTx.State = JournalStateActivating
@@ -573,16 +785,7 @@ func (m *RecoveryManager) CommitStaged(ctx context.Context, verifyFn func(path s
 	if err := os.Rename(stagingFull, activeFull); err != nil {
 		// Staging rename failed! If backup exists, restore active from backup immediately
 		if backupFull != "" {
-			if restoreErr := os.Rename(backupFull, activeFull); restoreErr != nil {
-				return m.failRollback(backupFull, activeFull, restoreErr)
-			}
-			if syncErr := m.syncDirectory(m.baseDir); syncErr != nil {
-				return fmt.Errorf("backup restored but directory sync failed: %w", syncErr)
-			}
-		}
-		m.currentTx.State = JournalStateRolledBack
-		if journalErr := m.writeJournal(m.currentTx); journalErr != nil {
-			return fmt.Errorf("activation failed and rollback journal update failed: %w", journalErr)
+			return m.rollbackInternal(activeFull, backupFull, err)
 		}
 		return fmt.Errorf("failed to activate staging to active: %w", err)
 	}
@@ -609,8 +812,16 @@ func (m *RecoveryManager) CommitStaged(ctx context.Context, verifyFn func(path s
 	if err := verifyFn(activeFull); err != nil {
 		return m.rollbackInternal(activeFull, backupFull, err)
 	}
+	activeHash, err := m.syncAndHashTree(activeFull)
+	if err != nil || activeHash != m.currentTx.StagingHash {
+		if err == nil {
+			err = errors.New("active runtime tree differs from verified staging tree")
+		}
+		return m.rollbackInternal(activeFull, backupFull, err)
+	}
 
 	// 6. Commit transaction
+	m.currentTx.ActiveHash = activeHash
 	m.currentTx.State = JournalStateCommitted
 	m.currentTx.Timestamp = time.Now().UTC()
 	if err := m.writeJournal(m.currentTx); err != nil {
@@ -619,6 +830,12 @@ func (m *RecoveryManager) CommitStaged(ctx context.Context, verifyFn func(path s
 
 	// Remove backup only after verification and commit succeed
 	if backupFull != "" {
+		if _, err := m.validateConfinement(backupFull); err != nil {
+			return fmt.Errorf("committed runtime is verified, but backup confinement check failed; backup preserved: %w", err)
+		}
+		if err := m.verifyTreeHash(backupFull, m.currentTx.BackupHash); err != nil {
+			return fmt.Errorf("committed runtime is verified, but backup failed its transaction integrity check; backup preserved: %w", err)
+		}
 		if err := os.RemoveAll(backupFull); err != nil {
 			return fmt.Errorf("runtime committed; unable to prune verified backup: %w", err)
 		}
@@ -628,72 +845,115 @@ func (m *RecoveryManager) CommitStaged(ctx context.Context, verifyFn func(path s
 	}
 
 	m.currentTx.State = JournalStateIdle
+	m.currentTx.BackupPath = ""
 	m.currentTx.Timestamp = time.Now().UTC()
 	if err := m.writeJournal(m.currentTx); err != nil {
 		return fmt.Errorf("runtime committed but idle journal update failed: %w", err)
 	}
 
-	_ = activeFi
 	return nil
 }
 
 func (m *RecoveryManager) rollbackInternal(activeFull, backupFull string, causeErr error) error {
+	if m.currentTx == nil {
+		return fmt.Errorf("cannot rollback without a transaction record: %w", causeErr)
+	}
+	if !m.currentTx.HadActive || backupFull == "" || m.currentTx.BackupHash == "" {
+		return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "No verified prior runtime is available for rollback; current files and journal are preserved", Recoverable: false, Err: errors.Join(ErrRecoveryAmbiguous, causeErr)}
+	}
+	backupFull, err := m.validateConfinement(backupFull)
+	if err != nil {
+		return fmt.Errorf("backup path failed confinement; preserving runtime: %w", err)
+	}
+	backupHash, err := m.hashRuntimeTree(backupFull)
+	if err != nil || backupHash != m.currentTx.BackupHash {
+		if err == nil {
+			err = errors.New("backup runtime digest does not match the transaction journal")
+		}
+		return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Required backup is missing or failed integrity validation; active and backup artifacts are preserved", Recoverable: false, Err: errors.Join(ErrRecoveryAmbiguous, err)}
+	}
+	if _, err := m.validateConfinement(activeFull); err != nil {
+		return fmt.Errorf("active path failed confinement; preserving backup: %w", err)
+	}
+	quarantineRel := fmt.Sprintf(".quarantine.%s.%s", m.currentTx.Target, m.currentTx.TxID)
+	quarantineFull, err := m.validateConfinement(quarantineRel)
+	if err != nil {
+		return err
+	}
+	m.currentTx.QuarantinePath = quarantineRel
 	m.currentTx.State = JournalStateRollingBack
 	m.currentTx.Timestamp = time.Now().UTC()
 	if err := m.writeJournal(m.currentTx); err != nil {
 		return fmt.Errorf("failed to persist rollback intent; active and backup preserved: %w", err)
 	}
 
-	// Clean defective active directory
-	if err := os.RemoveAll(activeFull); err != nil {
-		return m.failRollback(backupFull, activeFull, err)
+	if _, err := os.Lstat(quarantineFull); err == nil {
+		return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Rollback quarantine already exists alongside the active runtime; preserving active, backup, and quarantine", Recoverable: false, Err: ErrRecoveryAmbiguous}
+	} else if !os.IsNotExist(err) {
+		return err
 	}
-	if err := m.syncDirectory(m.baseDir); err != nil {
-		return fmt.Errorf("failed to sync active removal before rollback: %w", err)
-	}
-
-	if backupFull != "" {
+	if _, err := os.Lstat(activeFull); err == nil {
 		if m.faultInjector != nil && m.faultInjector.BeforeRename != nil {
-			if err := m.faultInjector.BeforeRename(backupFull, activeFull); err != nil {
-				m.currentTx.State = JournalStateFailed
-				if journalErr := m.writeJournal(m.currentTx); journalErr != nil {
-					err = errors.Join(err, journalErr)
-				}
-				return &SafeError{
-					Code: ErrCodeRollbackFailed,
-					SafeMessage: fmt.Sprintf("CRITICAL: Error restaurando backup %s a %s: %v. Backup preservado. Recuperación manual: mv %s %s",
-						backupFull, activeFull, err, backupFull, activeFull),
-					Recoverable: false,
-					Err:         ErrRollbackFailed,
-				}
+			if err := m.faultInjector.BeforeRename(activeFull, quarantineFull); err != nil {
+				return rollbackRequiredError("failed to quarantine unverified active runtime; backup preserved", err)
 			}
 		}
-
-		if err := os.Rename(backupFull, activeFull); err != nil {
-			m.currentTx.State = JournalStateFailed
-			if journalErr := m.writeJournal(m.currentTx); journalErr != nil {
-				err = errors.Join(err, journalErr)
-			}
-			return &SafeError{
-				Code: ErrCodeRollbackFailed,
-				SafeMessage: fmt.Sprintf("CRITICAL: Error restaurando backup %s a %s: %v. Backup preservado. Recuperación manual: mv %s %s",
-					backupFull, activeFull, err, backupFull, activeFull),
-				Recoverable: false,
-				Err:         ErrRollbackFailed,
-			}
+		if err := os.Rename(activeFull, quarantineFull); err != nil {
+			return rollbackRequiredError("failed to quarantine unverified active runtime; backup preserved", err)
 		}
 		if err := m.syncDirectory(m.baseDir); err != nil {
-			return fmt.Errorf("backup restored but directory sync failed: %w", err)
+			return rollbackRequiredError("active quarantined but parent directory sync failed; backup preserved", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if m.faultInjector != nil && m.faultInjector.BeforeRename != nil {
+		if err := m.faultInjector.BeforeRename(backupFull, activeFull); err != nil {
+			return rollbackRequiredError("verified backup preserved after injected restore failure", err)
 		}
 	}
-
+	if err := os.Rename(backupFull, activeFull); err != nil {
+		return rollbackRequiredError("verified backup preserved after restore rename failure", err)
+	}
+	if err := m.syncDirectory(m.baseDir); err != nil {
+		return rollbackRequiredError("backup moved to active but parent directory sync failed; journal retained", err)
+	}
+	if err := m.verifyTreeHash(activeFull, m.currentTx.BackupHash); err != nil {
+		return rollbackRequiredError("restored runtime verification failed; journal and quarantine retained", err)
+	}
 	m.currentTx.State = JournalStateRolledBack
+	m.currentTx.ActiveHash = m.currentTx.BackupHash
 	m.currentTx.Timestamp = time.Now().UTC()
 	if err := m.writeJournal(m.currentTx); err != nil {
 		return fmt.Errorf("runtime rollback completed but journal update failed: %w", err)
 	}
 
 	return fmt.Errorf("post-activation verification failed, rolled back to prior version: %w", causeErr)
+}
+
+func rollbackRequiredError(message string, err error) error {
+	return &SafeError{Code: ErrCodeRollbackFailed, SafeMessage: message, Recoverable: false, Err: errors.Join(ErrRollbackFailed, err)}
+}
+
+func (m *RecoveryManager) hashRuntimeTree(path string) (string, error) {
+	if _, err := m.validateConfinement(path); err != nil {
+		return "", err
+	}
+	return m.syncAndHashTree(path)
+}
+
+func (m *RecoveryManager) verifyTreeHash(path, expected string) error {
+	if expected == "" || !isSHA256(expected) {
+		return errors.New("runtime integrity evidence is absent or invalid")
+	}
+	actual, err := m.hashRuntimeTree(path)
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return fmt.Errorf("runtime tree SHA-256 mismatch: got %s", actual)
+	}
+	return nil
 }
 
 // Reconcile performs persistent crash recovery by checking disk evidence and the journal.
@@ -723,22 +983,29 @@ func (m *RecoveryManager) Reconcile(ctx context.Context) error {
 		backupFull = filepath.Join(m.baseDir, rec.BackupPath)
 	}
 
-	activeFi, activeErr := os.Stat(activeFull)
-	if activeErr != nil && !os.IsNotExist(activeErr) {
-		return fmt.Errorf("failed to inspect active runtime: %w", activeErr)
+	activeExists, err := realDirectoryExists(activeFull)
+	if err != nil {
+		return fmt.Errorf("failed to inspect active runtime: %w", err)
 	}
-	activeExists := activeErr == nil
-	backupFi, backupErr := os.Stat(backupFull)
-	if backupFull != "" && backupErr != nil && !os.IsNotExist(backupErr) {
-		return fmt.Errorf("failed to inspect runtime backup: %w", backupErr)
+	backupExists := false
+	if backupFull != "" {
+		backupExists, err = realDirectoryExists(backupFull)
+		if err != nil {
+			return fmt.Errorf("failed to inspect runtime backup: %w", err)
+		}
 	}
-	backupExists := (backupFull != "" && backupErr == nil)
 
 	switch rec.State {
-	case JournalStateIdle, JournalStateCommitted:
-		// System was in clean state. Clean any orphan staging if present.
+	case JournalStateIdle:
+		if rec.ActiveHash != "" {
+			if err := m.verifyTreeHash(activeFull, rec.ActiveHash); err != nil {
+				return &SafeError{Code: ErrCodeRecoveryFailed, SafeMessage: "Transaction is finalized but runtime integrity is not certified; artifacts are preserved", Recoverable: false, Err: errors.Join(ErrRecoveryAmbiguous, err)}
+			}
+		} else if activeExists || rec.HadActive {
+			return &SafeError{Code: ErrCodeRecoveryFailed, SafeMessage: "IDLE state lacks integrity evidence for the expected active runtime; artifacts are preserved", Recoverable: false, Err: ErrRecoveryAmbiguous}
+		}
 		if stagingFull != "" {
-			if err := os.RemoveAll(stagingFull); err != nil {
+			if err := removeConfinedTree(m, stagingFull); err != nil {
 				return err
 			}
 			if err := m.syncDirectory(m.baseDir); err != nil {
@@ -747,10 +1014,45 @@ func (m *RecoveryManager) Reconcile(ctx context.Context) error {
 		}
 		return nil
 
-	case JournalStatePreparing, JournalStateStaged:
-		// Crashed before touching active. Active was untouched. Clean staging.
+	case JournalStateCommitted:
+		if !activeExists {
+			return &SafeError{Code: ErrCodeRecoveryFailed, SafeMessage: "Journal state is COMMITTED but active runtime is missing on disk; artifacts are preserved", Recoverable: false, Err: ErrRecoveryAmbiguous}
+		}
+		if err := m.verifyTreeHash(activeFull, rec.ActiveHash); err != nil {
+			return &SafeError{Code: ErrCodeRecoveryFailed, SafeMessage: "Transaction is finalized as COMMITTED but active runtime integrity does not match; artifacts are preserved", Recoverable: false, Err: errors.Join(ErrRecoveryAmbiguous, err)}
+		}
+		if backupFull != "" && backupExists {
+			if err := removeConfinedTree(m, backupFull); err != nil {
+				return err
+			}
+			if err := m.syncDirectory(m.baseDir); err != nil {
+				return err
+			}
+		}
 		if stagingFull != "" {
-			if err := os.RemoveAll(stagingFull); err != nil {
+			if err := removeConfinedTree(m, stagingFull); err != nil {
+				return err
+			}
+			if err := m.syncDirectory(m.baseDir); err != nil {
+				return err
+			}
+		}
+		rec.State = JournalStateIdle
+		rec.Timestamp = time.Now().UTC()
+		return m.writeJournal(rec)
+
+	case JournalStatePreparing, JournalStateStaged:
+		// The active tree has not entered a swap; verify prior evidence before cleanup.
+		if rec.HadActive {
+			if err := m.verifyTreeHash(activeFull, rec.BackupHash); err != nil {
+				return &SafeError{Code: ErrCodeRecoveryFailed, SafeMessage: "Previous runtime cannot be verified; staging and active files are preserved", Recoverable: false, Err: errors.Join(ErrRecoveryAmbiguous, err)}
+			}
+			rec.ActiveHash = rec.BackupHash
+		} else if activeExists {
+			return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "An active runtime appeared during a first-install staging transaction; files are preserved", Recoverable: false, Err: ErrRecoveryAmbiguous}
+		}
+		if stagingFull != "" {
+			if err := removeConfinedTree(m, stagingFull); err != nil {
 				return err
 			}
 			if err := m.syncDirectory(m.baseDir); err != nil {
@@ -762,147 +1064,37 @@ func (m *RecoveryManager) Reconcile(ctx context.Context) error {
 		return m.writeJournal(rec)
 
 	case JournalStateBackingUp:
-		// Crashed during/before active -> backup
-		if backupExists && activeExists {
-			return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Both active runtime and backup exist during backup transition; both preserved", Recoverable: false, Err: ErrRecoveryAmbiguous}
+		if activeExists && backupExists {
+			return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Active and backup both exist during the backup transition; neither was modified", Recoverable: false, Err: ErrRecoveryAmbiguous}
 		}
-		if backupExists && !activeExists {
-			// Active was moved to backup before crash. Restore backup -> active.
-			if err := os.Rename(backupFull, activeFull); err != nil {
-				return m.failRollback(backupFull, activeFull, err)
-			}
-			if err := m.syncDirectory(m.baseDir); err != nil {
-				return err
-			}
-		} else if !activeExists {
-			return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Active runtime and expected backup are both missing; journal preserved", Recoverable: false, Err: ErrRecoveryAmbiguous}
-		}
-		if stagingFull != "" {
-			if err := os.RemoveAll(stagingFull); err != nil {
-				return err
-			}
-		}
-		rec.State = JournalStateRolledBack
-		rec.Timestamp = time.Now().UTC()
-		return m.writeJournal(rec)
+		return m.reconcileRollback(rec, activeFull, backupFull, activeExists, backupExists, stagingFull)
 
 	case JournalStateBackedUp:
-		// Active was moved to backup, but staging was not moved to active. Active is MISSING!
-		if backupExists {
-			if activeExists {
-				// Both exist! Ambiguity! Check if active is empty
-				if activeFi.IsDir() && dirIsEmpty(activeFull) {
-					if err := os.Remove(activeFull); err != nil {
-						return err
-					}
-					if err := os.Rename(backupFull, activeFull); err != nil {
-						return m.failRollback(backupFull, activeFull, err)
-					}
-					if err := m.syncDirectory(m.baseDir); err != nil {
-						return err
-					}
-				} else {
-					return &SafeError{
-						Code: ErrCodeRecoveryAmbiguous,
-						SafeMessage: fmt.Sprintf("Ambiguous recovery: both active %s and backup %s exist with data. Backup preserved.",
-							activeFull, backupFull),
-						Recoverable: false,
-						Err:         ErrRecoveryAmbiguous,
-					}
-				}
-			} else {
-				if err := os.Rename(backupFull, activeFull); err != nil {
-					return m.failRollback(backupFull, activeFull, err)
-				}
-				if err := m.syncDirectory(m.baseDir); err != nil {
-					return err
-				}
-			}
-		} else {
-			return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Expected backup is missing during BACKED_UP state; journal and active files preserved", Recoverable: false, Err: ErrRecoveryAmbiguous}
-		}
-		if stagingFull != "" {
-			if err := os.RemoveAll(stagingFull); err != nil {
-				return err
-			}
-		}
-		rec.State = JournalStateRolledBack
-		rec.Timestamp = time.Now().UTC()
-		return m.writeJournal(rec)
+		return m.reconcileRollback(rec, activeFull, backupFull, activeExists, backupExists, stagingFull)
 
 	case JournalStateActivating, JournalStateActivated:
-		// Crashed during or immediately after activation.
-		// If active is missing and backup exists: restore backup.
-		if !activeExists && backupExists {
-			if err := os.Rename(backupFull, activeFull); err != nil {
-				return m.failRollback(backupFull, activeFull, err)
-			}
-			if err := m.syncDirectory(m.baseDir); err != nil {
-				return err
-			}
-			rec.State = JournalStateRolledBack
-			rec.Timestamp = time.Now().UTC()
-			return m.writeJournal(rec)
-		}
-		// If active exists and backup exists:
-		// To be fail-closed, restore backup if available and not yet verified
-		if backupExists {
-			if err := os.RemoveAll(activeFull); err != nil {
-				return err
-			}
-			if err := os.Rename(backupFull, activeFull); err != nil {
-				return m.failRollback(backupFull, activeFull, err)
-			}
-			if err := m.syncDirectory(m.baseDir); err != nil {
-				return err
-			}
-			rec.State = JournalStateRolledBack
-			rec.Timestamp = time.Now().UTC()
-			return m.writeJournal(rec)
-		}
-		// An interrupted first install has no previous runtime to restore and was
-		// not verified before the crash. Preserve its files and fail closed.
-		if activeExists {
-			return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "First installation was activated but not verified before interruption; runtime preserved for operator review", Recoverable: false, Err: ErrRecoveryAmbiguous}
-		}
-		return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Interrupted first installation left no active runtime; journal preserved for operator review", Recoverable: false, Err: ErrRecoveryAmbiguous}
+		return m.reconcileRollback(rec, activeFull, backupFull, activeExists, backupExists, stagingFull)
 
 	case JournalStateRollingBack:
-		// Crashed during rollback: finish restoring backup -> active
-		if backupExists {
-			if activeExists {
-				if err := os.RemoveAll(activeFull); err != nil {
-					return err
-				}
-			}
-			if err := os.Rename(backupFull, activeFull); err != nil {
-				return m.failRollback(backupFull, activeFull, err)
-			}
-			if err := m.syncDirectory(m.baseDir); err != nil {
-				return err
-			}
-		}
-		if stagingFull != "" {
-			if err := os.RemoveAll(stagingFull); err != nil {
-				return err
-			}
-			if err := m.syncDirectory(m.baseDir); err != nil {
-				return err
-			}
-		}
-		rec.State = JournalStateRolledBack
-		rec.Timestamp = time.Now().UTC()
-		return m.writeJournal(rec)
+		return m.reconcileRollback(rec, activeFull, backupFull, activeExists, backupExists, stagingFull)
 
 	case JournalStateRolledBack:
+		if !rec.HadActive || rec.BackupHash == "" {
+			return &SafeError{Code: ErrCodeRecoveryFailed, SafeMessage: "Rollback has no evidence of a prior runtime; journal and artifacts are preserved", Recoverable: false, Err: ErrRecoveryAmbiguous}
+		}
+		if err := m.verifyTreeHash(activeFull, rec.BackupHash); err != nil {
+			return &SafeError{Code: ErrCodeRecoveryFailed, SafeMessage: "Rollback state is not backed by a valid restored runtime; artifacts are preserved", Recoverable: false, Err: errors.Join(ErrRecoveryAmbiguous, err)}
+		}
 		if stagingFull != "" {
-			if err := os.RemoveAll(stagingFull); err != nil {
+			if err := removeConfinedTree(m, stagingFull); err != nil {
 				return err
 			}
 			if err := m.syncDirectory(m.baseDir); err != nil {
 				return err
 			}
 		}
+		rec.ActiveHash = rec.BackupHash
+		rec.BackupPath = ""
 		rec.State = JournalStateIdle
 		rec.Timestamp = time.Now().UTC()
 		return m.writeJournal(rec)
@@ -916,22 +1108,116 @@ func (m *RecoveryManager) Reconcile(ctx context.Context) error {
 		}
 	}
 
-	_ = backupFi
-	return nil
+	return &SafeError{Code: ErrCodeRecoveryFailed, SafeMessage: "Unsupported journal state; all recovery artifacts are preserved", Recoverable: false, Err: ErrJournalCorrupt}
 }
 
-func (m *RecoveryManager) failRollback(backup, active string, err error) error {
-	m.currentTx.State = JournalStateFailed
-	if journalErr := m.writeJournal(m.currentTx); journalErr != nil {
-		err = errors.Join(err, journalErr)
+func realDirectoryExists(path string) (bool, error) {
+	if path == "" {
+		return false, nil
 	}
-	return &SafeError{
-		Code: ErrCodeRollbackFailed,
-		SafeMessage: fmt.Sprintf("CRITICAL: Error reconciliando y restaurando backup previo %s a %s: %v. Backup preservado. Comando manual: mv %s %s",
-			backup, active, err, backup, active),
-		Recoverable: false,
-		Err:         ErrRollbackFailed,
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
 	}
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("path is not a real directory: %s", path)
+	}
+	return true, nil
+}
+
+func removeConfinedTree(m *RecoveryManager, path string) error {
+	if _, err := m.validateConfinement(path); err != nil {
+		return err
+	}
+	exists, err := realDirectoryExists(path)
+	if err != nil || !exists {
+		return err
+	}
+	if err := os.RemoveAll(path); err != nil {
+		return err
+	}
+	return m.syncDirectory(m.baseDir)
+}
+
+func (m *RecoveryManager) reconcileRollback(rec *JournalRecord, active, backup string, activeExists, backupExists bool, staging string) error {
+	var err error
+	if !rec.HadActive || !isSHA256(rec.BackupHash) || backup == "" {
+		return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "No transaction-bound, verified prior runtime is available; active, staging, and journal are preserved", Recoverable: false, Err: ErrRecoveryAmbiguous}
+	}
+	if backupExists {
+		if err := m.verifyTreeHash(backup, rec.BackupHash); err != nil {
+			return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Required backup is corrupt or unverifiable; active, backup, staging, and journal are preserved", Recoverable: false, Err: errors.Join(ErrRecoveryAmbiguous, err)}
+		}
+	} else {
+		// The backup may already have been renamed to active by an interrupted
+		// recovery. Accept only an exact match to the transaction-bound digest.
+		if !activeExists || m.verifyTreeHash(active, rec.BackupHash) != nil {
+			return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Required backup is missing and active runtime does not prove restoration; all artifacts are preserved", Recoverable: false, Err: ErrRecoveryAmbiguous}
+		}
+		rec.ActiveHash = rec.BackupHash
+		rec.State = JournalStateRolledBack
+		rec.Timestamp = time.Now().UTC()
+		if err := m.writeJournal(rec); err != nil {
+			return err
+		}
+		return removeConfinedTree(m, staging)
+	}
+
+	quarantine := ""
+	if activeExists {
+		if rec.QuarantinePath == "" {
+			rec.QuarantinePath = fmt.Sprintf(".quarantine.%s.%s", rec.Target, rec.TxID)
+		}
+		quarantine, err = m.validateConfinement(rec.QuarantinePath)
+		if err != nil {
+			return err
+		}
+		if err := m.writeJournal(rec); err != nil {
+			return err
+		}
+		quarantineExists, err := realDirectoryExists(quarantine)
+		if err != nil || quarantineExists {
+			if err != nil {
+				return err
+			}
+			return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Active runtime and rollback quarantine both exist; preserving active, backup, and quarantine", Recoverable: false, Err: ErrRecoveryAmbiguous}
+		}
+		if m.faultInjector != nil && m.faultInjector.BeforeRename != nil {
+			if err := m.faultInjector.BeforeRename(active, quarantine); err != nil {
+				return rollbackRequiredError("failed to quarantine active runtime; verified backup preserved", err)
+			}
+		}
+		if err := os.Rename(active, quarantine); err != nil {
+			return rollbackRequiredError("failed to quarantine active runtime; verified backup preserved", err)
+		}
+		if err := m.syncDirectory(m.baseDir); err != nil {
+			return rollbackRequiredError("active quarantined but directory sync failed; verified backup preserved", err)
+		}
+	}
+	if m.faultInjector != nil && m.faultInjector.BeforeRename != nil {
+		if err := m.faultInjector.BeforeRename(backup, active); err != nil {
+			return rollbackRequiredError("verified backup preserved after restore interruption", err)
+		}
+	}
+	if err := os.Rename(backup, active); err != nil {
+		return rollbackRequiredError("failed to restore verified backup; backup remains recoverable", err)
+	}
+	if err := m.syncDirectory(m.baseDir); err != nil {
+		return rollbackRequiredError("backup moved to active but parent directory sync failed", err)
+	}
+	if err := m.verifyTreeHash(active, rec.BackupHash); err != nil {
+		return rollbackRequiredError("restored runtime did not verify; journal and quarantine preserved", err)
+	}
+	rec.ActiveHash = rec.BackupHash
+	rec.State = JournalStateRolledBack
+	rec.Timestamp = time.Now().UTC()
+	if err := m.writeJournal(rec); err != nil {
+		return err
+	}
+	return removeConfinedTree(m, staging)
 }
 
 func (m *RecoveryManager) reconcileUnjournaled() error {
@@ -939,118 +1225,25 @@ func (m *RecoveryManager) reconcileUnjournaled() error {
 	if err != nil {
 		return err
 	}
-
-	var backups []string
-	var stagings []string
-
+	var backups, stagings []string
 	for _, e := range entries {
 		name := e.Name()
-		if !e.IsDir() {
-			continue
-		}
 		if strings.HasPrefix(name, ".backup.") {
 			backups = append(backups, filepath.Join(m.baseDir, name))
 		} else if strings.HasPrefix(name, ".staging.") {
+			if !e.IsDir() {
+				return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Unjournaled staging artifact is not a directory; artifact preserved", Recoverable: false, Err: ErrRecoveryAmbiguous}
+			}
 			stagings = append(stagings, filepath.Join(m.baseDir, name))
 		}
 	}
-
-	if len(backups) == 0 {
-		// Clean up any stale staging
-		for _, s := range stagings {
-			if err := os.RemoveAll(s); err != nil {
-				return err
-			}
-		}
-		return nil
+	if len(backups) > 0 {
+		return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Unjournaled backups lack transaction-bound integrity evidence; every backup and active path is preserved for operator review", Recoverable: false, Err: ErrRecoveryAmbiguous}
 	}
-
-	// Sort backups by mod time descending
-	sort.Slice(backups, func(i, j int) bool {
-		fi1, err1 := os.Stat(backups[i])
-		fi2, err2 := os.Stat(backups[j])
-		if err1 == nil && err2 == nil {
-			return fi1.ModTime().After(fi2.ModTime())
-		}
-		return backups[i] > backups[j]
-	})
-
-	for _, b := range backups {
-		// Infer target from name: .backup.<target>.<txid>
-		backupName := strings.TrimPrefix(filepath.Base(b), ".backup.")
-		lastDot := strings.LastIndex(backupName, ".")
-		if lastDot <= 0 || lastDot == len(backupName)-1 {
-			continue
-		}
-		target := backupName[:lastDot]
-		if !validTargetName(target) {
-			return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Unjournaled backup has an unsafe target name; backup preserved", Recoverable: false, Err: ErrRecoveryAmbiguous}
-		}
-		active := filepath.Join(m.baseDir, target)
-		if _, err := m.validateConfinement(b); err != nil {
-			return &SafeError{Code: ErrCodeRecoveryAmbiguous, SafeMessage: "Unjournaled backup path is unsafe; backup preserved", Recoverable: false, Err: ErrRecoveryAmbiguous}
-		}
-		if _, err := m.validateConfinement(active); err != nil {
-			return err
-		}
-
-		activeFi, activeErr := os.Stat(active)
-		if activeErr != nil && !os.IsNotExist(activeErr) {
-			return fmt.Errorf("failed to inspect active runtime %s: %w", active, activeErr)
-		}
-		if activeErr != nil && os.IsNotExist(activeErr) {
-			// Active is missing! Restore backup to active!
-			if err := os.Rename(b, active); err != nil {
-				return &SafeError{
-					Code: ErrCodeRollbackFailed,
-					SafeMessage: fmt.Sprintf("CRITICAL: Error restaurando backup previo %s a %s: %v. Backup preservado. Comando manual: mv %s %s",
-						b, active, err, b, active),
-					Recoverable: false,
-					Err:         ErrRollbackFailed,
-				}
-			}
-			if err := m.syncDirectory(m.baseDir); err != nil {
-				return err
-			}
-		} else if activeErr == nil && activeFi.IsDir() && dirIsEmpty(active) {
-			// Active exists but is empty
-			if err := os.Remove(active); err != nil {
-				return err
-			}
-			if err := os.Rename(b, active); err != nil {
-				return &SafeError{
-					Code: ErrCodeRollbackFailed,
-					SafeMessage: fmt.Sprintf("CRITICAL: Error restaurando backup previo %s a %s: %v. Backup preservado. Comando manual: mv %s %s",
-						b, active, err, b, active),
-					Recoverable: false,
-					Err:         ErrRollbackFailed,
-				}
-			}
-			if err := m.syncDirectory(m.baseDir); err != nil {
-				return err
-			}
-		} else if activeErr == nil {
-			// Active exists and has content! Ambiguous! Preserve backup!
-			return &SafeError{
-				Code: ErrCodeRecoveryAmbiguous,
-				SafeMessage: fmt.Sprintf("Ambiguous recovery state: both active %s and backup %s exist with content. Backup preserved.",
-					active, b),
-				Recoverable: false,
-				Err:         ErrRecoveryAmbiguous,
-			}
-		}
-	}
-
 	for _, s := range stagings {
-		if err := os.RemoveAll(s); err != nil {
+		if err := removeConfinedTree(m, s); err != nil {
 			return err
 		}
 	}
-
 	return nil
-}
-
-func dirIsEmpty(path string) bool {
-	entries, err := os.ReadDir(path)
-	return err == nil && len(entries) == 0
 }
