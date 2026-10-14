@@ -22,7 +22,7 @@ type App struct {
 func NewApp() *App {
 	return &App{
 		installer:   installer.NewService("", ""),
-		preparation: installer.UnavailableFullEdgePreparation{},
+		preparation: installer.NewWailsSafeFullEdgePreparationAPI(installer.UnavailableFullEdgePreparation{}),
 	}
 }
 
@@ -96,27 +96,12 @@ func validatedPreparationSnapshot(snapshot installer.FullEdgePreparationSnapshot
 	// it must never relay an invalid/READY status alongside a rejected Promise.
 	// Some frontends may retain the returned data on error, and an explicitly
 	// injected backend is not authorization to report fake certification.
-	if installer.ValidateFullEdgePreparationSnapshot(snapshot) != nil {
-		return blockedPreparationSnapshot("INVALID_PREPARATION_STATUS"), structuredError(err)
-	}
-	if err != nil {
-		if snapshot.State == installer.StateReady || snapshot.CertifiedReady() {
-			return blockedPreparationSnapshot("PREPARATION_BACKEND_ERROR"), structuredError(err)
-		}
-		return snapshot, structuredError(err)
-	}
-	return snapshot, nil
+	sanitized, sanitizeErr := installer.ValidateAndSanitizeWailsSnapshot(snapshot, err)
+	return sanitized, structuredError(sanitizeErr)
 }
 
 func blockedPreparationSnapshot(code string) installer.FullEdgePreparationSnapshot {
-	return installer.FullEdgePreparationSnapshot{
-		State:                installer.StateFailed,
-		ProgressPercent:      0,
-		ErrorCode:            code,
-		SafeMessage:          "Full Edge preparation was not certified; no readiness can be reported.",
-		DiagnosticsAvailable: true,
-		Components:           installer.DefaultComponentProgress(),
-	}
+	return installer.BlockedPreparationSnapshot(code)
 }
 
 func (a *App) preparationAPI() installer.FullEdgePreparationAPI {

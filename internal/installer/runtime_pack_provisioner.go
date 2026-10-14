@@ -541,6 +541,12 @@ func packErrorCode(err error) string {
 		return "RUNTIME_PACK_NOT_RELEASE"
 	case errors.Is(err, ErrManifestIncompatible):
 		return "RUNTIME_PACK_INCOMPATIBLE"
+	case errors.Is(err, ErrManifestInvalidJSON):
+		return "MANIFEST_INVALID_JSON"
+	case errors.Is(err, ErrArtifactMissing):
+		return "ARTIFACT_MISSING"
+	case errors.Is(err, ErrArtifactCorrupted):
+		return "ARTIFACT_CORRUPTED"
 	case errors.Is(err, ErrRuntimePackModelGovernance):
 		return "MODEL_GOVERNANCE_BLOCKED"
 	case errors.Is(err, ErrRuntimePackUnlistedArtifact):

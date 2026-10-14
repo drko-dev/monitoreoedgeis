@@ -39,7 +39,7 @@ func NewRuntimePackPreparationAdapter(backend RuntimePackPreparationBackend, opt
 
 func (a *RuntimePackPreparationAdapter) Status(ctx context.Context) (FullEdgePreparationSnapshot, error) {
 	if err := ctx.Err(); err != nil {
-		return FullEdgePreparationSnapshot{}, err
+		return mapPackResult(RuntimePackProvisioningResult{}, err), err
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -52,7 +52,7 @@ func (a *RuntimePackPreparationAdapter) Status(ctx context.Context) (FullEdgePre
 // must use it only after explicit release-owned opt-in.
 func (a *RuntimePackPreparationAdapter) RestoreFromTransaction(ctx context.Context) (FullEdgePreparationSnapshot, error) {
 	if err := ctx.Err(); err != nil {
-		return FullEdgePreparationSnapshot{}, err
+		return mapPackResult(RuntimePackProvisioningResult{}, err), err
 	}
 	a.mu.Lock()
 	if a.running {
@@ -82,7 +82,7 @@ func (a *RuntimePackPreparationAdapter) RestoreFromTransaction(ctx context.Conte
 
 func (a *RuntimePackPreparationAdapter) Start(ctx context.Context, requestID string) (FullEdgePreparationSnapshot, error) {
 	if err := ctx.Err(); err != nil {
-		return FullEdgePreparationSnapshot{}, err
+		return mapPackResult(RuntimePackProvisioningResult{}, err), err
 	}
 	requestID = strings.TrimSpace(requestID)
 	if requestID == "" {
@@ -121,7 +121,7 @@ func (a *RuntimePackPreparationAdapter) Start(ctx context.Context, requestID str
 
 func (a *RuntimePackPreparationAdapter) Recover(ctx context.Context, operationID string) (FullEdgePreparationSnapshot, error) {
 	if err := ctx.Err(); err != nil {
-		return FullEdgePreparationSnapshot{}, err
+		return mapPackResult(RuntimePackProvisioningResult{}, err), err
 	}
 	operationID = strings.TrimSpace(operationID)
 	if operationID == "" {
@@ -187,7 +187,7 @@ func mapPackResult(result RuntimePackProvisioningResult, err error) FullEdgePrep
 		}
 		return s
 	}
-	if errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		s.State = StateCancelled
 		s.CanStart = true
 		s.ErrorCode = "PREPARATION_CANCELLED"
