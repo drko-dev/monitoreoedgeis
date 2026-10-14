@@ -356,6 +356,116 @@ Thirteen mandatory rollback safety failure modes across twelve categories are va
 
 Go unit test suite in `secure_extractor_test.go` (14 cases) validates entry confinement, tar bomb bounds, same-filesystem staging, post-activation validation rollback (`Case 13`), and backup preservation upon rollback failure (`Case 14`).
 
+---
+
+## 10. Hermetic Offline Wheelhouse Architecture (Milestone H3)
+
+Implemented in `internal/installer/wheelhouse.go` with complete 25-scenario test suite in `internal/installer/wheelhouse_test.go`, lockfile in `internal/installer/assets/wheelhouse-lock.json`, and packaging tooling in `deploy/installer/fetch-wheelhouse.sh`.
+
+### 10.1 Deterministic Transitive Dependency Resolution
+- **Core Dependencies:**
+  - `torch==2.4.0`
+  - `torchvision==0.19.0`
+  - `ultralytics==8.3.1`
+  - `pillow==10.4.0`
+- **Complete Transitive Closure (36 wheels):**
+  - Numerical & Scientific: `numpy==1.26.4`, `scipy==1.17.1`, `pandas==3.0.6`, `sympy==1.14.0`, `mpmath==1.3.0`.
+  - Vision & Image Processing: `opencv-python==4.11.0.86`, `contourpy==1.3.3`, `fonttools==4.66.1`, `kiwisolver==1.5.1`.
+  - Plotting & Visualization: `matplotlib==3.11.2`, `seaborn==0.13.2`, `cycler==0.12.1`, `pyparsing==3.3.3`.
+  - Utilities & System: `pyyaml==6.0.3`, `requests==2.34.2`, `urllib3==2.8.0`, `certifi==2026.7.22`, `charset-normalizer==3.5.2`, `idna==3.20`, `psutil==7.2.2`, `py-cpuinfo==9.0.0`, `tqdm==4.70.1`, `filelock==4.1.1`, `fsspec==2026.9.0`, `jinja2==3.1.6`, `MarkupSafe==3.0.4`, `networkx==3.6.1`, `packaging==26.3`, `python-dateutil==2.9.0.post0`, `six==1.17.0`, `typing-extensions==4.16.0`, `ultralytics-thop==2.2.2`.
+- **Zero Local Compilation:** 100% of wheels are pure binary wheels (`--only-binary=:all:`). No C/C++ compiler, CMake, or Xcode Command Line Tools are required on the client machine.
+- **Strict ABI & Tag Compatibility:**
+  - CPython 3.11 (`cp311`): Matches standalone Python interpreter.
+  - Stable ABI (`abi3`): Accepted for packages targeting limited C API (e.g., `opencv-python`, `psutil`) where `PythonTag` indicates minimum supported CPython version (`cp37`, `cp36`).
+  - Architecture: `macosx_11_0_arm64`, `macosx_10_9_universal2`, or architecture-independent `any`.
+
+### 10.2 Cryptographic Lock Contract (`assets/wheelhouse-lock.json`)
+The lock document formally seals the entire wheelhouse:
+```json
+{
+  "schema_version": "1.0.0",
+  "target_platform": "darwin",
+  "target_architecture": "arm64",
+  "python_version": "3.11.9",
+  "python_abi": "cp311",
+  "wheel_count": 36,
+  "total_size_bytes": 173935126,
+  "dependencies": [ ... ]
+}
+```
+Every dependency specifies exact `name`, `version`, `filename`, `size_bytes`, `sha256`, `origin`, and `license`. Open ranges (`>=`, `~=`, `*`) are strictly rejected.
+
+### 10.3 Strict Offline Client Provisioning
+Client provisioning executes with complete isolation from external networks:
+```bash
+python -I -m pip install \
+  --no-index \
+  --find-links=<wheelhouse> \
+  --only-binary=:all: \
+  --disable-pip-version-check \
+  --no-cache-dir \
+  torch torchvision ultralytics pillow
+```
+Security and hermetic containment flags:
+1. `PIP_CONFIG_FILE=/dev/null`: Ignores host `~/.pip/pip.conf` or `/etc/pip.conf`.
+2. `PIP_NO_INDEX=1` and `--no-index`: Prohibits package index lookup.
+3. Subprocess Proxy Blackholing (`http_proxy=http://127.0.0.1:9`): Guarantees immediate fail-closed behavior if any internal component attempts network socket creation.
+4. `IsolateEnv()`: Scrubs host `PYTHONPATH`, `PYTHONHOME`, `VIRTUAL_ENV`, Homebrew, and user site packages.
+
+### 10.4 Apple Silicon Hardware Acceleration (MPS)
+Physical execution on Apple Silicon (M1/M2/M3/M4) validates Metal Performance Shaders (MPS):
+- `torch.backends.mps.is_available() == True`.
+- In-process probe validates tensor operations on the MPS device (`torch.ones(..., device='mps')`).
+- Controlled fallback to CPU is preserved if MPS is unavailable.
+
+### 10.5 Sizing, Footprint & Performance Metrics
+- **Wheelhouse Bundle Payload:** 36 binary wheels, `173,935,126` bytes (~165.88 MB).
+- **Python Standalone Archive:** `17,915,401` bytes (~17.08 MB).
+- **Installed Runtime Footprint:** `site-packages` consumes ~879 MB uncompressed on disk.
+- **Offline Installation Duration:** ~18–20 seconds on Apple Silicon M4 without internet latency.
+
+### 10.6 Licensing Audit & Legal Boundary Gate
+- **Dependencies Licensing:**
+  - Permissive licenses: BSD-3-Clause (PyTorch, Torchvision, NumPy, SciPy, Pandas), MIT (Pillow, PyYAML, urllib3), Apache-2.0 (OpenCV, Requests), MPL-2.0 (Certifi), PSF-2.0 (CPython, Typing-extensions).
+  - Copyleft / Network copyleft: `ultralytics` and `ultralytics-thop` are licensed under GNU AGPL-3.0.
+  - **Legal Boundary Clarification:** The IPC separation via loopback Unix domain socket (`protocol.go` / `worker.py`) provides architectural process isolation, but legally does NOT constitute an automatic waiver of AGPL-3.0 copyleft obligations if distributed commercially without source disclosure. Commercial redistribution of GEO CAM Edge without releasing complete application source code requires an explicit enterprise commercial license from Ultralytics Inc.
+  - **Commercial Legal Gate:** Commercial and legal approval remains an independent blocking prerequisite (`LEGAL_COMMERCIAL_APPROVAL_PENDING=true`).
+- **Model Gate:** `MODEL_REDISTRIBUTION_APPROVED=false` remains strictly enforced in all builds and CI. Commercial YOLO model weights (`.pt`) are NOT bundled in the repository or wheelhouse.
+
+### 10.7 Deterministic Pinned Installation & Transactional Safety
+- **Cryptographic Lock Enforcement:** Ephemeral `requirements.lock.txt` is autogenerated from `wheelhouse-lock.json`, enforcing `--require-hashes` across all 36 locked packages. Pip operates in fail-closed mode: undeclared packages, unhashed transitive dependencies, and source distributions (sdists) are strictly rejected.
+- **Isolated Staging on Same Filesystem:** Installation targets `.site-packages.tmp.<unique>` within `<prefix>/lib/python3.11`, pre-seeded with base interpreter tools (`pip`, `setuptools`). The active runtime is never modified in-place.
+- **Pre-Activation Staging Audit:** Staging directory is verified for all 36 `.dist-info` packages before executing the directory swap.
+- **Transactional Directory Swap:** Two-step rename sequence moves existing `site-packages` to `.site-packages.old.<unique>` and swaps staging into place.
+- **Post-Activation Verification:** `python -I -m pip check`, `importlib.metadata` distribution audit, and in-process `VerifyImports` run against the activated interpreter.
+- **Automatic Rollback:** Any post-activation failure restores previous `site-packages` from `.site-packages.old.<unique>` and removes failed staging.
+
+### 10.8 Persistent Backup Reconciliation, Concurrency Protection & Non-Destructive Rollback
+To close the final safety gaps identified in the H3 safety review:
+1. **Never Delete Unverified Backups:** `InstallOffline()` strictly avoids deleting `.site-packages.old.*` on startup. Backups are never deleted without cryptographic and operational proof that they are superseded.
+2. **Persistent On-Disk Reconciliation (`ReconcilePendingArtifacts`):**
+   - Before any installation starts, the manager inspects `<prefix>/lib/python3.11` for pending artifacts (`.site-packages.old.*`, `.site-packages.tmp.*`, `.site-packages.broken.*`).
+   - If `site-packages` is absent or empty and a pending backup exists (e.g. from an uncatchable `SIGKILL`, crash, or power loss between the two renames), it automatically restores the latest valid backup to `site-packages`.
+   - If both `site-packages` and `.site-packages.old.*` exist with data, it rejects starting a new installation (`ErrCodeWheelPendingBackupFound`) with manual recovery commands, preventing data loss.
+3. **Dual-Layer Concurrency Protection (`.install.lock`):**
+   - **In-process:** A canonical-path `sync.Mutex` registry prevents concurrent goroutines from running installations against the same runtime simultaneously.
+   - **Cross-process:** Non-blocking advisory file locking via `syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)` on `.install.lock` rejects parallel processes with `ErrCodeWheelConcurrentInstall`.
+4. **Checked Rollback & Safe Backup Preservation:**
+   - Every single `os.Rename` call in all rollback and activation branches is explicitly checked.
+   - If rollback restoration fails, the backup directory is safely preserved on disk, `ErrCodeWheelRollbackFailed` is returned, and the exact manual recovery command (`mv <backup> <target>`) is logged.
+5. **Adversarial Test Suite (Cases A–I):**
+   - Validated across 9 adversarial failure scenarios in `wheelhouse_test.go`:
+     - Case A: Pending backup from prior run restored.
+     - Case B: Name collision of staging and backup.
+     - Case C: Staging rename failure triggers rollback.
+     - Case D: Rollback restore failure preserves backup.
+     - Case E: Concurrent execution protection (in-process and flock).
+     - Case F: Interruption between renames.
+     - Case G: Retry after interruption restores previous state.
+     - Case H: Cryptographic bit-for-bit preservation of previous runtime.
+     - Case I: Clean and idempotent installation.
+
+
 
 
 

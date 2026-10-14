@@ -80,6 +80,72 @@ export interface VisionRuntimeStatus {
   message?: string;
 }
 
+export type FullEdgePreparationState =
+  | 'NOT_PREPARED'
+  | 'CHECKING'
+  | 'PREPARING'
+  | 'VERIFYING'
+  | 'READY'
+  | 'RECOVERY_REQUIRED'
+  | 'FAILED'
+  | 'CANCELLED';
+
+export type ComponentStatus = 'PENDING' | 'IN_PROGRESS' | 'READY' | 'FAILED';
+
+export interface ComponentProgressItem {
+  key: string;
+  name: string;
+  status: ComponentStatus;
+  detail?: string;
+}
+
+export interface RuntimeCertification {
+  certification_id: string;
+  runtime_pack_version: string;
+  runtime_manifest_sha256: string;
+  platform: string;
+  evidence_level: string;
+  runtime_pack_verified: boolean;
+  dependencies_verified: boolean;
+  vision_worker_ready: boolean;
+  ffmpeg_verified: boolean;
+  ffprobe_verified: boolean;
+  model_pack_version: string;
+  model_manifest_sha256: string;
+  model_authorized: boolean;
+  model_integrity_verified: boolean;
+  inference_smoke_test_passed: boolean;
+  certified_at: string;
+}
+
+export interface FullEdgePreparationSnapshot {
+  state: FullEdgePreparationState;
+  stage?: string;
+  progress_percent: number;
+  operation_id?: string;
+  can_start: boolean;
+  retryable: boolean;
+  cancellation_allowed: boolean;
+  recovery_available: boolean;
+  error_code?: string;
+  safe_message?: string;
+  diagnostics_available: boolean;
+  components?: ComponentProgressItem[];
+  certification?: RuntimeCertification;
+}
+
+export interface PreparationCheckResult {
+  name: string;
+  status: string;
+  detail?: string;
+}
+
+export interface FullEdgePreparationDiagnostic {
+  code: string;
+  summary: string;
+  checks?: PreparationCheckResult[];
+}
+
 export interface InstallerState {
   state: StateCode;
   reason_code: string;

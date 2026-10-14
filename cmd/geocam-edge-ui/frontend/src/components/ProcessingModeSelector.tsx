@@ -7,6 +7,7 @@ import { useI18n } from '../i18n/I18nContext';
 import { docsLinks } from '../config/docsLinks';
 import { useFFmpeg } from '../hooks/useFFmpeg';
 import { useVisionRuntime } from '../hooks/useVisionRuntime';
+import { FullEdgePreparationPanel } from './FullEdgePreparationPanel';
 
 interface ProcessingModeSelectorProps {
   options: ProcessingModeOption[];
@@ -25,6 +26,7 @@ interface ProcessingModeSelectorProps {
   provisioningVision?: boolean;
   visionError?: string | null;
   onRefreshModes?: () => void;
+  showLegacySetup?: boolean;
 }
 
 export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
@@ -44,6 +46,7 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
   provisioningVision,
   visionError,
   onRefreshModes,
+  showLegacySetup = false,
 }) => {
   const { t } = useI18n();
   const hookFFmpeg = useFFmpeg();
@@ -103,7 +106,14 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
         <HelpLink href={docsLinks.processingModes}>{t('mode.whichShouldIChoose')}</HelpLink>
       </div>
 
-      {status && !status.ready && (
+      {showLegacySetup && (
+        <div className="full-edge-legacy-warning" role="note">
+          <strong>{t('preparation.legacyTitle')}</strong>
+          <p>{t('preparation.legacyWarning')}</p>
+        </div>
+      )}
+
+      {showLegacySetup && status && !status.ready && (
         <div
           className="card"
           style={{
@@ -157,7 +167,7 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
         </div>
       )}
 
-      {status && status.ready && (
+      {showLegacySetup && status && status.ready && (
         <div
           className="card"
           style={{
@@ -226,8 +236,10 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
         })}
       </div>
 
-      {/* Full Edge Vision Runtime Provisioning / Status Section */}
-      {(selected === 'full_edge' || (fullEdgeOption && fullEdgeOption.capability === 'UNAVAILABLE')) && currentVision && (
+      {selected === 'full_edge' && <FullEdgePreparationPanel selected />}
+
+      {/* Legacy provisioning is available only under Advanced and is not offline-certified. */}
+      {showLegacySetup && (selected === 'full_edge' || (fullEdgeOption && fullEdgeOption.capability === 'UNAVAILABLE')) && currentVision && (
         <div
           className="card"
           style={{
