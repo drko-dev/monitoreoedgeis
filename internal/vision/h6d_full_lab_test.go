@@ -219,28 +219,33 @@ func TestLabRTSPToRealYOLO(t *testing.T) {
 	}
 	var seq uint16
 	var stamp uint32 = 90000
-	for _, n := range nals {
-		if len(n) == 0 {
-			continue
-		}
-		for j, p := range labPackets(n) {
-			seq++
-			r := make([]byte, 12+len(p))
-			r[0] = 0x80
-			r[1] = 96
-			if j == len(labPackets(n))-1 {
-				r[1] |= 0x80
+	// Repeat the finite 4-frame fixture in a bounded local-only simulator:
+	// FFmpeg can buffer a few H264 frames before emitting rawvideo over pipe.
+	// Without a live stream or EOF a single short fixture may yield zero frames.
+	for repeat := 0; repeat < 12; repeat++ {
+		for _, n := range nals {
+			if len(n) == 0 {
+				continue
 			}
-			binary.BigEndian.PutUint16(r[2:4], seq)
-			binary.BigEndian.PutUint32(r[4:8], stamp)
-			binary.BigEndian.PutUint32(r[8:12], 0x1)
-			copy(r[12:], p)
-			if e := sim.SendPacket(r); e != nil {
-				t.Fatal(e)
+			for j, p := range labPackets(n) {
+				seq++
+				r := make([]byte, 12+len(p))
+				r[0] = 0x80
+				r[1] = 96
+				if j == len(labPackets(n))-1 {
+					r[1] |= 0x80
+				}
+				binary.BigEndian.PutUint16(r[2:4], seq)
+				binary.BigEndian.PutUint32(r[4:8], stamp)
+				binary.BigEndian.PutUint32(r[8:12], 0x1)
+				copy(r[12:], p)
+				if e := sim.SendPacket(r); e != nil {
+					t.Fatal(e)
+				}
+				time.Sleep(time.Millisecond)
 			}
-			time.Sleep(time.Millisecond)
+			stamp += 18000
 		}
-		stamp += 18000
 	}
 	select {
 	case result := <-events.results:
@@ -258,7 +263,10 @@ func TestLabRTSPToRealYOLO(t *testing.T) {
 		}
 		t.Logf("RTSP_GO_FFMPEG_YOLO_PASS frame=%d detections=%d", result.FrameSeq, len(result.Detections))
 	case <-time.After(12 * time.Second):
-		t.Fatalf("no real detection; worker status=%+v", w.Status())
+		if p := pm.Pipeline("h6d-real"); p != nil {
+			t.Fatalf("no real detection; worker=%+v pipeline=%+v", w.Status(), p.Status())
+		}
+		t.Fatalf("no real detection; worker=%+v pipeline missing", w.Status())
 	}
 }
 
