@@ -200,7 +200,7 @@ func TestTransactionalRuntimePackProvisionerCrashDuringUpgradePreservesOldRuntim
 			return nil, err
 		}
 		manager.SetFaultInjector(&FaultInjector{AfterRename: func(from, to string) error {
-			if strings.Contains(filepath.Base(from), ".staging.") {
+			if (strings.HasPrefix(filepath.Base(from), ".staging.") || strings.Contains(from, ".staging.")) && filepath.Base(to) == DefaultRuntimePackTargetName {
 				return errors.New("simulated abrupt interruption after activation rename")
 			}
 			return nil
@@ -246,6 +246,16 @@ func TestTransactionalRuntimePackProvisionerCrashDuringUpgradePreservesOldRuntim
 	repeatedRecovery, err := upgrade.Recover(context.Background())
 	if err != nil || repeatedRecovery.State != "ROLLED_BACK_UNCERTIFIED" || repeatedRecovery.RuntimeReady {
 		t.Fatalf("repeated recovery = %+v, %v; want idempotent non-ready recovery", repeatedRecovery, err)
+	}
+
+	// Verify that after successful rollback recovery, a subsequent Prepare cleanly upgrades to v2
+	rePrepare, err := upgrade.Prepare(context.Background())
+	if err != nil || rePrepare.State != "COMMITTED_UNCERTIFIED" || !rePrepare.TransactionCommitted || rePrepare.RuntimeReady {
+		t.Fatalf("subsequent Prepare after recovery = %+v, %v; want successful upgrade", rePrepare, err)
+	}
+	activeV2, verifyV2Err := inspectRuntimePack(filepath.Join(data, DefaultRuntimePackTargetName), DefaultRuntimePackManifestName, digestV2, PlatformDarwin, ArchArm64)
+	if verifyV2Err != nil || activeV2.manifest.RuntimeVersion != "1.0.1" {
+		t.Fatalf("runtime was not upgraded to v2: manifest=%+v err=%v", activeV2.manifest, verifyV2Err)
 	}
 }
 

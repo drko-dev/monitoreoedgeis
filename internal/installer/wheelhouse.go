@@ -1269,17 +1269,17 @@ func (m *WheelhouseManager) InstallOffline(ctx context.Context) (*InstallReport,
 	if execErr != nil {
 		_ = os.RemoveAll(stagingDir)
 		return &InstallReport{
-				Success:        false,
-				InstalledCount: 0,
-				DurationMs:     durationMs,
-				Output:         string(outBytes),
-			}, &SafeError{
-				Code:        ErrCodeWheelOfflineInstallFailed,
-				SafeMessage: fmt.Sprintf("Error durante la instalación offline de dependencias: %v", execErr),
-				Recoverable: false,
-				Details:     string(outBytes),
-				Err:         execErr,
-			}
+			Success:        false,
+			InstalledCount: 0,
+			DurationMs:     durationMs,
+			Output:         string(outBytes),
+		}, &SafeError{
+			Code:        ErrCodeWheelOfflineInstallFailed,
+			SafeMessage: fmt.Sprintf("Error durante la instalación offline de dependencias: %v", execErr),
+			Recoverable: false,
+			Details:     string(outBytes),
+			Err:         execErr,
+		}
 	}
 
 	// Staging audit

@@ -118,6 +118,7 @@ macOS runtime behavior.
 | Repeated provisioning of same release | Verified no-op. |
 | Upgrade interrupted after activation rename | `RECOVERY_REQUIRED`; verified prior pack is preserved/restored. |
 | Rollback interrupted | Backup remains; subsequent reconciliation is idempotent. |
+| Upgrade retry after recovery | Successful clean upgrade to newer version without residual locks. |
 | Injected file/directory sync failure | No successful commit/readiness. |
 | Invalid persistent path / concurrent calls | Fail closed or serialize through H6A lock; no duplicate/ready state. |
 
@@ -126,11 +127,31 @@ backup, quarantine, rename, permissions/path confinement, and low-level sync
 failure behavior. H6B tests exercise the provisioning-to-recovery seam with
 synthetic packs and injected failures.
 
+### Crash during upgrade root cause analysis
+
+During activation (`CommitStaged`), two consecutive renames occur:
+1. Active to backup: `activeFull` -> `.backup.<target>.<txid>`
+2. Staging to active: `stagingFull` -> `activeFull`
+
+If a fault injection predicate in `AfterRename` is underspecified or checks the
+destination path against `.staging.`, it will never match because the destination
+in the activation swap is `activeFull` (`DefaultRuntimePackTargetName`). If the
+fault does not trigger, `CommitStaged` proceeds normally, advances the journal to
+`COMMITTED`, and returns `COMMITTED_UNCERTIFIED` with `err == nil`, bypassing the
+simulated crash and failing the `RECOVERY_REQUIRED` expectation.
+
+The fault injector must bind specifically to `strings.HasPrefix(filepath.Base(from), ".staging.") && filepath.Base(to) == DefaultRuntimePackTargetName`.
+When properly interrupted, the journal remains on disk in `ACTIVATING`.
+Subsequent reconciliation via `Reconcile` reversibly quarantines the unverified
+active directory, restores the verified prior backup, updates the journal to
+`ROLLED_BACK`, and preserves all evidence. Subsequent clean preparation succeeds.
+
 ## Remaining gates and limitations
 
 1. Merge/integrate H4B's actual bundled Worker, FFmpeg/FFprobe, launch
    implementation, compatible pack assembly, source/hashes, and redistribution
-   review for FFmpeg and other bundled components. No files from another
+   review for FFmpeg and other bundled components. Issue #144 remains open and
+   its worker/media integration is not yet in `main`. No files from another
    worktree were copied.
 2. Integrate the provisioner into the H5A production adapter only after H4B
    provides a complete pack contract. Until then `UnavailableFullEdgePreparation`
@@ -138,6 +159,7 @@ synthetic packs and injected failures.
 3. Establish a trusted release build mechanism that supplies the pinned manifest
    digest; no release pack or pin is shipped in this change.
 4. Define approved model manifest/licensing governance; no models are allowed.
+   `ModelRedistributionApproved = false` remains active.
 5. Run H7 offline certification, then physical macOS Apple-Silicon checks. No
    Worker startup, imports, MPS, or inference has been validated here.
 6. The source pack must be immutable or product-owned during preflight/copy.
