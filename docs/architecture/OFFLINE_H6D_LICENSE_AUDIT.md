@@ -69,3 +69,10 @@ python3 "$W/deploy/installer/test-audit-wheelhouse-evidence.py"
 ```
 
 All eight archive-adversarial tests passed (corrupt SHA, wrong distribution identity, ZIP path traversal, missing/symlink wheel, unexpected wheel, missing notices and successful synthetic fixture). The result improves technical evidence but **does not change the NO-GO for release**.
+
+
+## H6D-R7 — FFmpeg source authenticity update (supersedes R6 signature blocker)
+
+The earlier R6 section records **NOT VERIFIED** because it only found the detached signature file. On 2026-10-14, local FFmpeg **8.1.3 source tarball PGP verification is now PASS**: the signer fingerprint matches the value independently published on FFmpeg's official download page, and the upstream detached signature matches the local one byte-for-byte. Verification used GnuPG with an ephemeral isolated keyring. Exact archive SHA-256: `7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3`. See `OFFLINE_H6D_R7_FFMPEG_SOURCE_AUTHENTICITY.md`.
+
+This resolves **only the signed source archive**. Build provenance for the macOS binary, transitive licenses, model rights, independent release pin, H7/H8 certification remain **BLOCKED**. No broad legal or release approval follows.

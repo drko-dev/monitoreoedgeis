@@ -24,3 +24,10 @@ Do not replace the template with a `release` manifest or invoke downloads on the
 Eleven synthetic adversarial tests pass; the untrusted local r4 pack still fails closed because it has a `lab-manifest.json`, no release manifest or externally trusted pin. H6D-R6 adds macOS/Ubuntu synthetic CI checks without downloading models/wheels. Normal Wails launch remains disabled, `MODEL_REDISTRIBUTION_APPROVED=false`.
 
 Separate release-go gates still require human-reviewed license texts/NOTICE obligations, trusted FFmpeg PGP signature identity and source/build chain, authenticated independent manifest pin, full-tree runtime integrity, model rights, H7 airgap and H8 clean-machine validation. **No merge, deploy or release from this slice.**
+
+
+## H6D-R7 — Authenticated FFmpeg source does not enable release
+
+`verify-ffmpeg-source-pgp.py` pins FFmpeg 8.1.3 source SHA-256 and the official PGP release-key fingerprint. It verified the Mac M4 source tarball against the official detached signature (`FFMPEG_SOURCE_PGP_VALID`). Eight synthetic adversarial tests also pass.
+
+Source provenance is **necessary but insufficient** for product release. Signed custom FFmpeg/FFprobe binary provenance, codec/license obligations, model rights, externally authenticated manifest pin, H7 airgap and H8 clean-machine remain **NO-GO**. The lab manifest must not be promoted to release.
