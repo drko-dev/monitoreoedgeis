@@ -2,15 +2,21 @@ package vision
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
-	"github.com/drko-dev/monitoreoedgeis/internal/processing"
-	"github.com/drko-dev/monitoreoedgeis/internal/rtsp"
-	"github.com/drko-dev/monitoreoedgeis/internal/rtsptest"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/drko-dev/monitoreoedgeis/internal/processing"
+	"github.com/drko-dev/monitoreoedgeis/internal/rtsp"
+	"github.com/drko-dev/monitoreoedgeis/internal/rtsptest"
 )
 
 type labEvents struct{ results chan InferenceResult }
@@ -75,7 +81,9 @@ func TestLabRTSPToRealYOLO(t *testing.T) {
 	py := os.Getenv("H6D_LAB_PYTHON")
 	models := os.Getenv("H6D_LAB_MODELS")
 	img := os.Getenv("H6D_LAB_IMAGE")
-	if py == "" || models == "" || img == "" {
+	h264Fixture := os.Getenv("H6D_LAB_H264")
+	pack := os.Getenv("H6D_LAB_PACK")
+	if (pack == "" && (py == "" || img == "")) || (pack != "" && h264Fixture == "") || models == "" {
 		t.Skip("explicit H6D local opt-in paths required")
 	}
 	wd, err := os.Getwd()
@@ -83,10 +91,36 @@ func TestLabRTSPToRealYOLO(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := filepath.Dir(filepath.Dir(wd))
+	workerPath := filepath.Join(root, "deploy/vision-worker/worker.py")
+	decoderPath := os.Getenv("H6D_LAB_FFMPEG_DECODER")
+	workerArgs := []string{workerPath}
+	if pack != "" {
+		if !filepath.IsAbs(pack) {
+			t.Fatal("H6D_LAB_PACK must be an absolute path")
+		}
+		manifest, manifestErr := readH6DLabPackManifest(pack)
+		if manifestErr != nil {
+			t.Fatal(manifestErr)
+		}
+		if manifest.PackType != "laboratory-only" || manifest.ReleaseEligible || manifest.RuntimeReady || manifest.InferenceReady || manifest.ModelRedistributionApproved {
+			t.Fatal("lab pack manifest must remain explicitly non-release and non-ready")
+		}
+		py = verifiedH6DLabArtifact(t, pack, manifest, "python/bin/python3.11")
+		workerPath = verifiedH6DLabArtifact(t, pack, manifest, "worker/worker.py")
+		decoderPath = verifiedH6DLabArtifact(t, pack, manifest, "ffmpeg/ffmpeg")
+		// Python's isolated mode omits the script directory from sys.path.
+		// Add only this verified pack directory before loading its worker module.
+		bootstrap := "import runpy,sys; d=sys.argv.pop(1); p=sys.argv.pop(1); sys.path.insert(0,d); sys.argv[0]=p; runpy.run_path(p,run_name='__main__')"
+		workerArgs = []string{"-I", "-B", "-c", bootstrap, filepath.Dir(workerPath), workerPath}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
 	defer cancel()
 	dir := t.TempDir()
-	w := NewWorker(Config{WorkerCmd: py, WorkerArgs: []string{filepath.Join(root, "deploy/vision-worker/worker.py")}, SocketPath: filepath.Join(dir, "v.sock"), Device: "cpu", ImgSize: 320, PersonConfidence: 0.3, VehicleConfidence: 0.3, NMSIoU: 0.45, InferTimeout: 15 * time.Second, StartTimeout: 40 * time.Second}, NewModelManager(models, "yolo11s-pose.pt", "yolo11n.pt"), nil)
+	device := os.Getenv("H6D_LAB_DEVICE")
+	if device == "" {
+		device = "cpu"
+	}
+	w := NewWorker(Config{WorkerCmd: py, WorkerArgs: workerArgs, SocketPath: filepath.Join(dir, "v.sock"), Device: device, ImgSize: 320, PersonConfidence: 0.3, VehicleConfidence: 0.3, NMSIoU: 0.45, InferTimeout: 15 * time.Second, StartTimeout: 40 * time.Second}, NewModelManager(models, "yolo11s-pose.pt", "yolo11n.pt"), nil)
 	events := &labEvents{results: make(chan InferenceResult, 10)}
 	sink := NewSink(w, w.ModelManager(), nil, events, nil)
 	if err = w.Start(ctx); err != nil {
@@ -104,7 +138,6 @@ func TestLabRTSPToRealYOLO(t *testing.T) {
 	if err = rm.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	decoderPath := os.Getenv("H6D_LAB_FFMPEG_DECODER")
 	if decoderPath != "" {
 		if !filepath.IsAbs(decoderPath) {
 			t.Fatal("H6D_LAB_FFMPEG_DECODER must be an absolute path")
@@ -132,10 +165,27 @@ func TestLabRTSPToRealYOLO(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error", "-loop", "1", "-framerate", "5", "-i", img, "-frames:v", "30", "-vf", "scale=320:320", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "5", "-bf", "0", "-pix_fmt", "yuv420p", "-f", "h264", "-")
-	data, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("lab fixture ffmpeg: %v", err)
+	var data []byte
+	if pack != "" {
+		if !filepath.IsAbs(h264Fixture) {
+			t.Fatal("H6D_LAB_H264 must be an absolute path to the external pre-generated test fixture")
+		}
+		data, err = os.ReadFile(h264Fixture)
+		if err != nil {
+			t.Fatalf("read external H264 lab fixture: %v", err)
+		}
+		sum := sha256.Sum256(data)
+		t.Logf("external fixture H264 bytes=%d sha256=%s", len(data), hex.EncodeToString(sum[:]))
+	} else {
+		fixtureFFmpeg := os.Getenv("H6D_LAB_FIXTURE_FFMPEG")
+		if fixtureFFmpeg == "" {
+			fixtureFFmpeg = "ffmpeg"
+		}
+		cmd := exec.CommandContext(ctx, fixtureFFmpeg, "-hide_banner", "-loglevel", "error", "-loop", "1", "-framerate", "5", "-i", img, "-frames:v", "30", "-vf", "scale=320:320", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "5", "-bf", "0", "-pix_fmt", "yuv420p", "-f", "h264", "-")
+		data, err = cmd.Output()
+		if err != nil {
+			t.Fatalf("lab fixture ffmpeg: %v", err)
+		}
 	}
 	nals := labNals(data)
 	if len(nals) == 0 {
@@ -184,4 +234,73 @@ func TestLabRTSPToRealYOLO(t *testing.T) {
 	case <-time.After(12 * time.Second):
 		t.Fatalf("no real detection; worker status=%+v", w.Status())
 	}
+}
+
+type h6dLabPackManifest struct {
+	PackType                    string `json:"pack_type"`
+	ReleaseEligible             bool   `json:"release_eligible"`
+	RuntimeReady                bool   `json:"runtime_ready"`
+	InferenceReady              bool   `json:"inference_ready"`
+	ModelRedistributionApproved bool   `json:"model_redistribution_approved"`
+	Files                       []struct {
+		Path      string `json:"path"`
+		SizeBytes int64  `json:"size_bytes"`
+		SHA256    string `json:"sha256"`
+	} `json:"files"`
+}
+
+func readH6DLabPackManifest(root string) (h6dLabPackManifest, error) {
+	var manifest h6dLabPackManifest
+	data, err := os.ReadFile(filepath.Join(root, "lab-manifest.json"))
+	if err != nil {
+		return manifest, fmt.Errorf("read lab pack manifest: %w", err)
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return manifest, fmt.Errorf("decode lab pack manifest: %w", err)
+	}
+	return manifest, nil
+}
+
+func verifiedH6DLabArtifact(t *testing.T, root string, manifest h6dLabPackManifest, relative string) string {
+	t.Helper()
+	clean := filepath.Clean(relative)
+	if filepath.IsAbs(clean) || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		t.Fatalf("unsafe lab artifact path %q", relative)
+	}
+	path := filepath.Join(root, clean)
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("resolve lab artifact %s: %v", relative, err)
+	}
+	packRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(packRoot, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		t.Fatalf("lab artifact escapes pack: %s", relative)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("lab artifact is not a regular file: %s", relative)
+	}
+	for _, item := range manifest.Files {
+		if item.Path != filepath.ToSlash(clean) {
+			continue
+		}
+		if info.Size() != item.SizeBytes {
+			t.Fatalf("lab artifact size mismatch: %s", relative)
+		}
+		data, err := os.ReadFile(resolved)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(data)
+		if hex.EncodeToString(sum[:]) != item.SHA256 {
+			t.Fatalf("lab artifact SHA-256 mismatch: %s", relative)
+		}
+		return resolved
+	}
+	t.Fatalf("lab manifest does not inventory artifact %s", relative)
+	return ""
 }
