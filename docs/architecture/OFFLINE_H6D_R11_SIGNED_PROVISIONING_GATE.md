@@ -94,3 +94,13 @@ The previously added VerifyInstalledRuntimePack API detected post-install change
 **Boundaries not claimed:** This is an opt-in callback for a future **separately authorized** launch pathway, not an enabled product runtime. It does not remove the last potential file-swap window between final hash verification and OS exec, does not stop mutation while a process is already running, and does not automatically authorize models. A tamper-resistant production release still needs OS-level owner/permission separation or verified descriptor/code-signature execution, clean macOS 14 physical validation, H7 installed-product isolation and all redistribution/legal permissions.
 
 **No default Wails activation, model copying, deploy, release or merge.**
+
+## H6D-R11.5 — Terminal signed-trust denial in Worker supervisor (2026-10-14)
+
+Further security review found that although the existing opt-in pre-spawn verifier refused to execute Python after a signature/installed-artifact rejection, the Worker supervisor treated **every** startup error as transient. It would retry indefinitely, allowing a later filesystem alteration or trust-store change to turn the initial denial into an automatic launch **without a new owner-selected start**.
+
+The hermetic Worker now wraps a failed optional PreSpawnVerify callback with the typed sentinel ErrHermeticPackTrustRejected (preserving the underlying error via Go wrapping). The supervisor treats that case as **terminal**, logs the trust denial distinctly from retryable worker crashes, leaves StateError/LastError visible to the health reporter, performs process/socket cleanup and exits its supervision loop **without incrementing restart counters or sleeping/backing off**. Ordinary worker crash/handshake retry behavior is unchanged, as are paths without an independently supplied signed guard.
+
+The race-tested TestHermeticSignedTrustRejectionStopsSupervisorWithoutAutomaticRetry uses a synthetic hermetic pack, authorized **fake test** model filenames and a denying signer callback. It verifies supervisor termination, exactly one trust check, zero automatic restarts, no child process, no socket directory creation, and the preserved reason in Status. Nothing is deployed or started against a real camera; a separately authorized user operation would be necessary to restart a denied runtime.
+
+**No OS-level atomic verifier-to-exec guarantee is claimed.** Real publisher trust, model/AGPL licensing, clean macOS14 physical H8 and H7 installed-product isolation remain blocked. This is security policy for the future opt-in signed launch path, not a release authorization.
