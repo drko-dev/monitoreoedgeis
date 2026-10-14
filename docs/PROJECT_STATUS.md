@@ -6,6 +6,28 @@
 ## Current Active Initiative: Full Edge Self-Contained Offline Runtime
 
 
+### 2026-10-14 — Post-merge integration checkpoint (LATEST; supersedes older snapshots below)
+
+**CODE INTEGRATED ON `main` / NOT RELEASED:** Owner explicitly authorized merges in order #165 → #166 → #167 → #168 → #162, all executed on 2026-10-14 after independent PR CI had been green. Final `main` SHA: `f7105c8d14b8880a90e9b71547228b33275fbb89`.
+
+| PR | Integrated scope | Merge commit |
+| --- | --- | --- |
+| #165 | H5/H6 synthetic Wails preparation, cancellation, recovery and rollback tests | `fdd97a4f3c6057acb7c65c364afd045da54f04fe` |
+| #166 | Third-party signed manifest TrustStore/Ed25519/P-256 verification library | `7d1b9387a16c9d7d436f1fdfec02849297657d8d` |
+| #167 | H7 adversarial network guards and **opt-in** RTSP hermetic dialer | `d055832c53f7aac88f7065779fcd46f40c397391` |
+| #168 | H8 macOS14 evidence and fail-closed physical-certification gate | `a3dac66ca41adbcfda4115b6fd647fe409670ca1` |
+| #162 | H6D FFmpeg verified-source provenance, lab runtime artifacts and macOS14-minos R9 candidate E2E | `f7105c8d14b8880a90e9b71547228b33275fbb89` |
+
+**Integrated regression evidence:** Prior to merging, a synthetic Git combination of all five PRs had zero merge conflicts. The combined tree passed Go `-race` for installer, Wails, RTSP, selected H7/H8 vision cases, 28/28 selected Python tests, and `go vet`; the temporary test worktree was removed. All five PRs had green per-HEAD CI immediately before integration. Post-merge main CI is tracked separately and is not the same as independent PR CI.
+
+**Exact release gates:** Desktop shipping `NewApp()` still uses `NewWailsSafeFullEdgePreparationAPI(UnavailableFullEdgePreparation{})`. The signed-manifest `TrustStore` verifier is a library; no production publisher-owned external trust root or runtime-pack release integration exists. R9 FFmpeg candidates are local test files, not promoted or bundled into a signed release. H7 Tier 1 lab isolation is not host Tier 2 or physical Tier 3 airgap. H8 report has **7 PASS, 1 BLOCKED**, specifically missing an actual clean macOS14 arm64 rig; direct JPEG/MPS/CPU IPC tests do not demonstrate full person detection on macOS14. Commercial AGPL/FFmpeg/wheel obligations and YOLO model redistribution permissions remain unresolved.
+
+**Readiness:** `FULL_EDGE_LAB_READY=true` (bounded, with authorized external model references on Mac M4), `READY_FOR_INSTALLER=false`, `READY_FOR_RELEASE=false`, `RUNTIME_READY=false`, `INFERENCE_READY=false`, `MODEL_REDISTRIBUTION_APPROVED=false`. No deploy, release, tags, production changes or model distribution performed.
+
+**Next technical gate:** Build a release-owner opt-in binding from externally authenticated manifest trust roots to the transactional provisioner without auto-enabling Wails, prove fail-closed tamper/revocation/rollback behavior, and obtain an authorized real macOS14 ARM64 system for H8 and a full H7 airgap audit. Legal approvals are a separate mandatory prerequisite for any distribution.
+
+
+
 ### 2026-10-14 — latest integration checkpoint (supersedes the older H3 'Current' snapshot below)
 
 - **H7B** laboratory network-denial harness PR #163 **MERGED** into main at `3ab57fc08456dd2a2eaa4a4ea2903be8578d660c`. macOS IPv4/IPv6 TCP/UDP denial + localhost RTSP functional YOLO/MPS lab E2E PASS. This is **not** full offline/clean-machine certification.
