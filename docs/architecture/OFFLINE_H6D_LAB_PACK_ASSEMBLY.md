@@ -30,6 +30,8 @@ The pack manifest contains 30,676 regular-file entries. A complete post-assembly
 
 `TestLabRTSPToRealYOLO` gained an opt-in `H6D_LAB_PACK` path. In pack mode it verifies the lab-only manifest and SHA-256/size for the interpreter, Worker and FFmpeg, launches the bundled Python/Worker in isolated mode, sets the Go decoder to the bundled FFmpeg, and requires a returned `person` detection.
 
+The E2E invocation used pack revision `r3`. Final documented revision `r4` was reassembled with provenance/license declarations added to the lab manifest; its full 30,676-entry file inventory (all paths, sizes and hashes) exactly matches `r3`. Thus tested runtime bytes are identical, while the final manifest metadata was validated separately.
+
 Observed on Mac M4:
 
 - Pack-backed Go → local RTSP simulator → bundled FFmpeg H.264 decoder → bundled Vision Worker → YOLO on MPS: **PASS**, one person detection (`frame=1`, `detections=1`).
