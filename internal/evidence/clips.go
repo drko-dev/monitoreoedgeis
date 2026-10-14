@@ -29,13 +29,15 @@ var (
 type FrameHistory interface{ Snapshot() []processing.Frame }
 
 type ClipConfig struct {
-	DataDir      string
-	FFmpegPath   string
-	PreEvent     time.Duration
-	PostEvent    time.Duration
-	MaxFrames    int
-	FrameRate    float64
-	PollInterval time.Duration
+	DataDir        string
+	FFmpegPath     string
+	FFmpegMode     processing.FFmpegExecutionMode
+	VerifiedFFmpeg *processing.VerifiedFFmpeg
+	PreEvent       time.Duration
+	PostEvent      time.Duration
+	MaxFrames      int
+	FrameRate      float64
+	PollInterval   time.Duration
 	// MaxSizeBytes rejects a clip locally, before it is ever handed to
 	// edgebacklog/uploaded, once the encoded file exceeds this size —
 	// separate from and unrelated to the SaaS's JPEG-sized
@@ -85,8 +87,20 @@ func NewClipper(cfg ClipConfig) (*Clipper, error) {
 	if cfg.PreEvent < 0 || cfg.PostEvent < 0 {
 		return nil, fmt.Errorf("evidence: event windows cannot be negative")
 	}
-	if cfg.FFmpegPath == "" {
-		cfg.FFmpegPath = "ffmpeg"
+	switch cfg.FFmpegMode {
+	case processing.FFmpegExecutionLegacy:
+		if cfg.FFmpegPath == "" {
+			cfg.FFmpegPath = "ffmpeg"
+		}
+	case processing.FFmpegExecutionHermetic:
+		if cfg.VerifiedFFmpeg == nil {
+			return nil, processing.ErrHermeticFFmpegRequired
+		}
+		if _, err := cfg.VerifiedFFmpeg.Resolve(); err != nil {
+			return nil, fmt.Errorf("evidence: hermetic ffmpeg validation failed: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("evidence: unsupported ffmpeg execution mode %d", cfg.FFmpegMode)
 	}
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 100 * time.Millisecond
@@ -217,7 +231,18 @@ func (c *Clipper) Capture(ctx context.Context, history FrameHistory, eventUUID s
 
 func (c *Clipper) encode(ctx context.Context, output string, frames []processing.Frame) error {
 	f := frames[0]
-	cmd := exec.CommandContext(ctx, c.cfg.FFmpegPath, "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", fmt.Sprintf("%dx%d", f.OutputWidth, f.OutputHeight), "-r", fmt.Sprintf("%.3f", clipFrameRate(frames, c.cfg.FrameRate)), "-i", "pipe:0", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mp4", output)
+	ffmpegPath := c.cfg.FFmpegPath
+	if c.cfg.FFmpegMode == processing.FFmpegExecutionHermetic {
+		var err error
+		ffmpegPath, err = c.cfg.VerifiedFFmpeg.Resolve()
+		if err != nil {
+			return fmt.Errorf("evidence: hermetic ffmpeg validation failed: %w", err)
+		}
+	}
+	cmd := exec.CommandContext(ctx, ffmpegPath, "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", fmt.Sprintf("%dx%d", f.OutputWidth, f.OutputHeight), "-r", fmt.Sprintf("%.3f", clipFrameRate(frames, c.cfg.FrameRate)), "-i", "pipe:0", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mp4", output)
+	if c.cfg.FFmpegMode == processing.FFmpegExecutionHermetic {
+		cmd.Env = []string{"PATH=", "LANG=C", "LC_ALL=C"}
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err

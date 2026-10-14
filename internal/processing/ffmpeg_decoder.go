@@ -1,10 +1,15 @@
 package processing
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,9 +19,15 @@ import (
 
 // FFmpegDecoderConfig configures the ffmpeg subprocess used to decode H.264.
 type FFmpegDecoderConfig struct {
-	// BinaryPath is the ffmpeg executable, resolved via exec.LookPath.
-	// Empty defaults to "ffmpeg" (PATH lookup).
+	// Mode selects the legacy PATH-resolved executable or an explicitly
+	// verified Runtime Pack executable. The zero value preserves legacy behavior.
+	Mode FFmpegExecutionMode
+	// BinaryPath is used only in legacy mode. Empty defaults to "ffmpeg".
 	BinaryPath string
+	// VerifiedFFmpeg is mandatory in hermetic mode and is revalidated before
+	// each subprocess start. Its expected digest must originate in a release
+	// manifest authenticated by a trusted release pin.
+	VerifiedFFmpeg *VerifiedFFmpeg
 	// Codec is H264 (default) or H265/HEVC and selects ffmpeg's elementary
 	// stream demuxer for pipe:0.
 	Codec string
@@ -31,6 +42,16 @@ type FFmpegDecoderConfig struct {
 	// yuv420p frame is large. <=0 defaults to 4.
 	QueueDepth int
 }
+
+// FFmpegExecutionMode identifies the executable-resolution policy.
+type FFmpegExecutionMode uint8
+
+const (
+	// FFmpegExecutionLegacy preserves the historical PATH lookup behavior.
+	FFmpegExecutionLegacy FFmpegExecutionMode = iota
+	// FFmpegExecutionHermetic forbids PATH lookup and requires a verified pack binary.
+	FFmpegExecutionHermetic
+)
 
 // annexBPrefix is the Annex-B NAL unit start code.
 var annexBPrefix = []byte{0, 0, 0, 1}
@@ -95,9 +116,9 @@ func decodeQueueDepth(configured int) int {
 // binding would require CGO_ENABLED=1 and libav* headers, breaking that
 // build. No pure-Go H.264 decoder implementation is production-grade for
 // main/high profile. A hand-written decoder is explicitly out of scope.
-// Running ffmpeg as a subprocess keeps the Go build 100% cgo-free — the only
-// new dependency is a runtime one: the ffmpeg binary must be present in the
-// container/host (see Dockerfile and docs/ARCHITECTURE.md).
+// Running ffmpeg as a subprocess keeps the Go build 100% cgo-free. Legacy
+// callers resolve it from PATH; explicit hermetic callers provide a SHA-256-
+// verified executable confined to their Runtime Pack.
 //
 // One process per camera pipeline (never shared/pooled): a crash or hang is
 // isolated to that one camera. Restart-on-crash is the caller's
@@ -145,13 +166,9 @@ func NewFFmpegDecoder(cfg FFmpegDecoderConfig, width, height int, spropParameter
 		return nil, fmt.Errorf("processing: ffmpeg decoder requires even output width/height for yuv420p, got %dx%d", decodeWidth, decodeHeight)
 	}
 
-	bin := cfg.BinaryPath
-	if bin == "" {
-		bin = "ffmpeg"
-	}
-	resolved, err := exec.LookPath(bin)
+	resolved, err := resolveFFmpegExecutable(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("processing: ffmpeg binary %q not found: %w", bin, err)
+		return nil, err
 	}
 
 	inputFormat := "h264"
@@ -170,6 +187,11 @@ func NewFFmpegDecoder(cfg FFmpegDecoderConfig, width, height int, spropParameter
 	}
 	args = append(args, "-f", "rawvideo", "-pix_fmt", "yuv420p", "-an", "-sn", "pipe:1")
 	cmd := exec.Command(resolved, args...)
+	if cfg.Mode == FFmpegExecutionHermetic {
+		// Do not pass loader injection variables or the host PATH to a bundled
+		// executable. The executable itself is already an absolute path.
+		cmd.Env = []string{"PATH=", "LANG=C", "LC_ALL=C"}
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("processing: ffmpeg stdin pipe: %w", err)
@@ -210,6 +232,191 @@ func NewFFmpegDecoder(cfg FFmpegDecoderConfig, width, height int, spropParameter
 
 	return d, nil
 }
+
+func resolveFFmpegExecutable(cfg FFmpegDecoderConfig) (string, error) {
+	switch cfg.Mode {
+	case FFmpegExecutionLegacy:
+		bin := cfg.BinaryPath
+		if bin == "" {
+			bin = "ffmpeg"
+		}
+		resolved, err := exec.LookPath(bin)
+		if err != nil {
+			return "", fmt.Errorf("processing: ffmpeg binary %q not found: %w", bin, err)
+		}
+		return resolved, nil
+	case FFmpegExecutionHermetic:
+		if cfg.VerifiedFFmpeg == nil {
+			return "", ErrHermeticFFmpegRequired
+		}
+		resolved, err := cfg.VerifiedFFmpeg.Resolve()
+		if err != nil {
+			return "", fmt.Errorf("processing: hermetic ffmpeg validation failed: %w", err)
+		}
+		return resolved, nil
+	default:
+		return "", fmt.Errorf("processing: unsupported ffmpeg execution mode %d", cfg.Mode)
+	}
+}
+
+// VerifiedFFmpeg is a capability for one executable inside a Runtime Pack.
+// It verifies path confinement, file type, executable permissions, and SHA-256.
+// The digest is not a release signature: callers must obtain it from a
+// manifest authenticated by a trusted release pin.
+type VerifiedFFmpeg struct {
+	packRoot string
+	path     string
+	digest   string
+}
+
+// VerifyPackFFmpeg creates a capability only when the executable is a regular,
+// executable, non-symlink file inside packRoot and matches expectedSHA256.
+func VerifyPackFFmpeg(packRoot, executablePath, expectedSHA256 string) (VerifiedFFmpeg, error) {
+	var verified VerifiedFFmpeg
+	if !filepath.IsAbs(packRoot) || !filepath.IsAbs(executablePath) {
+		return verified, fmt.Errorf("Runtime Pack root and FFmpeg path must be absolute")
+	}
+	if filepath.Clean(executablePath) != executablePath {
+		return verified, fmt.Errorf("FFmpeg path must be clean and canonical")
+	}
+	digest, err := normalizeSHA256(expectedSHA256)
+	if err != nil {
+		return verified, err
+	}
+	declaredRoot, err := filepath.Abs(packRoot)
+	if err != nil {
+		return verified, err
+	}
+	declaredPath, err := filepath.Abs(executablePath)
+	if err != nil {
+		return verified, err
+	}
+	declaredRel, err := filepath.Rel(declaredRoot, declaredPath)
+	if err != nil || declaredRel == "." || declaredRel == ".." || filepath.IsAbs(declaredRel) || strings.HasPrefix(declaredRel, ".."+string(filepath.Separator)) {
+		return verified, fmt.Errorf("FFmpeg executable escapes Runtime Pack")
+	}
+	if err := rejectSymlinkComponents(declaredRoot, declaredRel); err != nil {
+		return verified, err
+	}
+	root, err := filepath.EvalSymlinks(declaredRoot)
+	if err != nil {
+		return verified, fmt.Errorf("resolve Runtime Pack root: %w", err)
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return verified, err
+	}
+	path, err := filepath.EvalSymlinks(declaredPath)
+	if err != nil {
+		return verified, fmt.Errorf("resolve bundled FFmpeg path: %w", err)
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return verified, err
+	}
+	if err := verifyPackExecutable(root, path, digest); err != nil {
+		return verified, err
+	}
+	return VerifiedFFmpeg{packRoot: root, path: path, digest: digest}, nil
+}
+
+func rejectSymlinkComponents(root, relativePath string) error {
+	current := root
+	for _, part := range strings.Split(relativePath, string(filepath.Separator)) {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return fmt.Errorf("inspect bundled FFmpeg: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("Runtime Pack FFmpeg path contains a symlink")
+		}
+	}
+	return nil
+}
+
+// Resolve revalidates the capability immediately before process creation.
+func (v VerifiedFFmpeg) Resolve() (string, error) {
+	if v.packRoot == "" || v.path == "" || v.digest == "" {
+		return "", ErrHermeticFFmpegRequired
+	}
+	if err := verifyPackExecutable(v.packRoot, v.path, v.digest); err != nil {
+		return "", err
+	}
+	return v.path, nil
+}
+
+func verifyPackExecutable(root, path, expectedDigest string) error {
+	currentRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return fmt.Errorf("resolve Runtime Pack root: %w", err)
+	}
+	currentRoot, err = filepath.Abs(currentRoot)
+	if err != nil || currentRoot != root {
+		return fmt.Errorf("Runtime Pack root changed or is not canonical")
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." || rel == ".." || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("FFmpeg executable escapes Runtime Pack")
+	}
+	rootInfo, err := os.Stat(root)
+	if err != nil {
+		return fmt.Errorf("Runtime Pack root is not a directory: %w", err)
+	}
+	if !rootInfo.IsDir() {
+		return fmt.Errorf("Runtime Pack root is not a directory")
+	}
+	current := root
+	parts := strings.Split(rel, string(filepath.Separator))
+	for i, part := range parts {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return fmt.Errorf("inspect bundled FFmpeg: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("Runtime Pack FFmpeg path contains a symlink")
+		}
+		if i < len(parts)-1 && !info.IsDir() {
+			return fmt.Errorf("Runtime Pack FFmpeg parent is not a directory")
+		}
+		if i == len(parts)-1 && (!info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0) {
+			return fmt.Errorf("Runtime Pack FFmpeg must be a regular executable file")
+		}
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect bundled FFmpeg: %w", err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open bundled FFmpeg: %w", err)
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(before, opened) {
+		return fmt.Errorf("bundled FFmpeg changed during validation")
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fmt.Errorf("hash bundled FFmpeg: %w", err)
+	}
+	if hex.EncodeToString(h.Sum(nil)) != expectedDigest {
+		return fmt.Errorf("bundled FFmpeg SHA-256 mismatch")
+	}
+	return nil
+}
+
+func normalizeSHA256(value string) (string, error) {
+	decoded, err := hex.DecodeString(strings.TrimSpace(value))
+	if err != nil || len(decoded) != sha256.Size {
+		return "", fmt.Errorf("expected FFmpeg digest must be a SHA-256 hex value")
+	}
+	return hex.EncodeToString(decoded), nil
+}
+
+// ErrHermeticFFmpegRequired indicates that strict execution lacks its capability.
+var ErrHermeticFFmpegRequired = errors.New("processing: hermetic mode requires a verified Runtime Pack FFmpeg")
 
 func annexBFrame(nalu []byte) []byte {
 	out := make([]byte, 0, len(annexBPrefix)+len(nalu))

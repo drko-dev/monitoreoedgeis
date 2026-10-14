@@ -105,7 +105,30 @@ func (a *Agent) Close() error {
 // local health surface can stay available for diagnosis. Managed mode uses
 // LoadExisting and rejects invalid identity/credential state before building
 // runtime modules; Run returns that error to its service manager.
+// New preserves the legacy FFmpeg selection behavior for existing installs.
+// Hermetic Full Edge must be selected explicitly through NewHermetic.
 func New(cfg *config.Config) *Agent {
+	return newAgent(cfg, nil)
+}
+
+// NewHermetic constructs an agent whose Go video decoder is restricted to the
+// supplied Runtime Pack FFmpeg capability. The expected digest in the
+// capability must have come from a release manifest authenticated by a trusted
+// release pin; this constructor does not enable Runtime Pack provisioning.
+func NewHermetic(cfg *config.Config, ffmpeg processing.VerifiedFFmpeg) (*Agent, error) {
+	if cfg == nil {
+		return nil, errors.New("agent: configuration is required")
+	}
+	if cfg.ProcessingMode != config.ModeEdge {
+		return nil, errors.New("agent: hermetic FFmpeg is only supported in Full Edge mode")
+	}
+	if _, err := ffmpeg.Resolve(); err != nil {
+		return nil, fmt.Errorf("agent: invalid hermetic Runtime Pack FFmpeg: %w", err)
+	}
+	return newAgent(cfg, &ffmpeg), nil
+}
+
+func newAgent(cfg *config.Config, hermeticFFmpeg *processing.VerifiedFFmpeg) *Agent {
 	managed := managedRuntime(cfg)
 	var ident identity.Identity
 	var identErr error
@@ -250,6 +273,10 @@ func New(cfg *config.Config) *Agent {
 				MinFreeDiskBytes: cfg.EdgeMinFreeDiskBytes,
 				DiskChecker:      fulledge.PlatformDiskChecker{},
 			}
+			if hermeticFFmpeg != nil {
+				clipCfg.FFmpegMode = processing.FFmpegExecutionHermetic
+				clipCfg.VerifiedFFmpeg = hermeticFFmpeg
+			}
 			var clipErr error
 			clipper, clipErr = evidence.NewClipper(clipCfg)
 			if clipErr != nil {
@@ -319,6 +346,10 @@ func New(cfg *config.Config) *Agent {
 					IdleFPS:         cfg.HybridIdleFPS,
 					IdleAfter:       cfg.HybridIdleAfter,
 				},
+			}
+			if hermeticFFmpeg != nil {
+				procCfg.FFmpegMode = processing.FFmpegExecutionHermetic
+				procCfg.VerifiedFFmpeg = hermeticFFmpeg
 			}
 			// Full Edge Live View: one controller for all cameras, tapping decoded
 			// frames ahead of the preview/inference sampler. Inert until an
