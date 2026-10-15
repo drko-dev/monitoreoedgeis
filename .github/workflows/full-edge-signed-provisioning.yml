@@ -1,0 +1,78 @@
+name: Full Edge signed provisioning security checks
+
+on:
+  pull_request:
+    paths:
+      - 'internal/installer/signed_runtime_pack_backend.go'
+      - 'internal/installer/signed_runtime_pack_backend_test.go'
+      - 'internal/installer/signed_installed_worker_launch.go'
+      - 'internal/installer/signed_installed_worker_launch_test.go'
+      - 'internal/installer/signed_runtime_owner_policy_test.go'
+      - 'internal/installer/signed_runtime_owner_policy_other.go'
+      - 'internal/installer/signed_runtime_owner_policy_windows.go'
+      - 'internal/installer/signed_runtime_owner_policy_unix_test.go'
+      - 'internal/installer/signed_runtime_owner_policy_unix.go'
+      - 'internal/installer/signed_runtime_owner_policy.go'
+      - 'internal/installer/signed_runtime_owner_acl_darwin.go'
+      - 'internal/installer/signed_runtime_owner_acl_darwin_nocgo.go'
+      - 'internal/installer/signed_runtime_owner_acl_darwin_test.go'
+      - 'internal/installer/signed_runtime_owner_acl_linux.go'
+      - 'internal/installer/signed_runtime_owner_acl_other.go'
+      - 'internal/installer/signed_runtime_owner_acl_windows.go'
+      - 'internal/vision/worker.go'
+      - 'internal/vision/signed_pre_spawn_test.go'
+      - 'internal/agent/vision_module.go'
+      - 'cmd/geocam-edge-ui/full_edge_signed_wiring.go'
+      - 'cmd/geocam-edge-ui/full_edge_signed_wiring_test.go'
+      - '.github/workflows/full-edge-signed-provisioning.yml'
+      - 'docs/architecture/OFFLINE_H6D_R11_SIGNED_PROVISIONING_GATE.md'
+  push:
+    branches: [main]
+    paths:
+      - 'internal/installer/signed_runtime_pack_backend.go'
+      - 'internal/installer/signed_runtime_pack_backend_test.go'
+      - 'internal/installer/signed_installed_worker_launch.go'
+      - 'internal/installer/signed_installed_worker_launch_test.go'
+      - 'internal/installer/signed_runtime_owner_policy_test.go'
+      - 'internal/installer/signed_runtime_owner_policy_other.go'
+      - 'internal/installer/signed_runtime_owner_policy_windows.go'
+      - 'internal/installer/signed_runtime_owner_policy_unix_test.go'
+      - 'internal/installer/signed_runtime_owner_policy_unix.go'
+      - 'internal/installer/signed_runtime_owner_policy.go'
+      - 'internal/installer/signed_runtime_owner_acl_darwin.go'
+      - 'internal/installer/signed_runtime_owner_acl_darwin_nocgo.go'
+      - 'internal/installer/signed_runtime_owner_acl_darwin_test.go'
+      - 'internal/installer/signed_runtime_owner_acl_linux.go'
+      - 'internal/installer/signed_runtime_owner_acl_other.go'
+      - 'internal/installer/signed_runtime_owner_acl_windows.go'
+      - 'internal/vision/worker.go'
+      - 'internal/vision/signed_pre_spawn_test.go'
+      - 'internal/agent/vision_module.go'
+      - 'cmd/geocam-edge-ui/full_edge_signed_wiring.go'
+      - 'cmd/geocam-edge-ui/full_edge_signed_wiring_test.go'
+      - '.github/workflows/full-edge-signed-provisioning.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  signed-pack-gate:
+    name: Synthetic signed Runtime Pack gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.2'
+          cache: true
+      - name: Test signature/pin/revocation/transaction boundaries with race detector
+        run: go test -race -count=1 -run 'TestSignedPack|TestSignedOwnerPolicy|TestHermeticWorkerPreSpawn|TestWailsSignedRuntimePack' ./internal/installer ./cmd/geocam-edge-ui ./internal/vision ./internal/agent
+      - name: Static analysis for signed runtime wiring
+        run: go vet ./internal/installer ./cmd/geocam-edge-ui ./internal/vision ./internal/agent
+
+# No production signer keys, models, FFmpeg binaries or sealed release packs
+# are downloaded or included. Passing is NOT installer or release certification.

@@ -96,12 +96,20 @@ func buildBundledVisionSink(cfg *config.Config, reporter *health.Reporter, consu
 	}
 	modelsDir := launch.PersistentModelsDir()
 	models := vision.NewModelManager(modelsDir, cfg.EdgeYOLOPersonModel, cfg.EdgeYOLOVehicleModel)
+	// Signed release launch contracts optionally carry a trusted installed
+	// tree verifier; pass it down to the Worker spawn/restart boundary.
+	// The legacy/lab contracts are unchanged and this does NOT grant models.
+	var preSpawnVerify func(context.Context) error
+	if guarded, ok := launch.(interface{ VerifyBeforeSpawn(context.Context) error }); ok {
+		preSpawnVerify = guarded.VerifyBeforeSpawn
+	}
 	worker := vision.NewWorker(vision.Config{
 		WorkerCmd:           launch.CommandPath(),
 		WorkerArgs:          launch.CommandArgs(),
 		Hermetic:            true,
 		RuntimePackRoot:     launch.RuntimePackRootPath(),
 		ProcessEnv:          launch.ProcessEnvironment(),
+		PreSpawnVerify:      preSpawnVerify,
 		ModelPackAuthorized: launch.ModelsAuthorized(),
 		ModelsDir:           modelsDir,
 		PersonModel:         cfg.EdgeYOLOPersonModel,
