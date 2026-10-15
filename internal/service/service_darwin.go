@@ -93,6 +93,12 @@ func installMacOSService(plistPath, domain, target string, options Options) erro
 		return fmt.Errorf("read existing LaunchAgent definition: %w", err)
 	}
 	if err == nil && bytes.Equal(current, renderMacOSPlist(options, filepath.Join(options.DataDir, "logs"))) {
+		// Identical on-disk plist does not imply loaded job. Install must
+		// not start a deliberately stopped service; only service start may.
+		if macOSJobLoaded(target) {
+			return nil
+		}
+		fmt.Println("LaunchAgent definition is installed but not loaded; run geocam-edge service start to start it.")
 		return nil
 	}
 	// Persist the definition before interrupting a running service. A disk or

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,109 +12,164 @@ import (
 	"github.com/drko-dev/monitoreoedgeis/internal/installer"
 )
 
-// resolveApp inspects the environment and bundle context for explicit opt-in
-// runtime pack configuration. By default, it returns NewApp(), ensuring
-// fail-closed behavior when no authorized signed Runtime Pack is configured.
+// These values are assigned by an approved release build, not the filesystem,
+// GUI, environment or signed Runtime Pack. Without ALL three, the normal
+// desktop application stays disabled for transactional provisioning.
+//
+// Example release linker flags (not a release authorization):
+//
+//	-X main.releaseRuntimeManifestSHA256=<trusted manifest SHA256>
+//	-X main.releaseRuntimeKeyID=<trusted publisher key ID>
+//	-X main.releaseRuntimePublicKeySHA256=<trusted raw public key SHA256>
+var (
+	releaseRuntimeManifestSHA256  string
+	releaseRuntimeKeyID           string
+	releaseRuntimePublicKeySHA256 string
+)
+
+type releaseRuntimeTrust struct {
+	manifestSHA256  string
+	keyID           string
+	publicKeySHA256 string
+}
+
+func (c releaseRuntimeTrust) configured() bool {
+	return validHash(c.manifestSHA256) &&
+		strings.TrimSpace(c.keyID) != "" &&
+		validHash(c.publicKeySHA256)
+}
+
+func validHash(value string) bool {
+	b, err := hex.DecodeString(strings.TrimSpace(value))
+	return err == nil && len(b) == sha256.Size
+}
+
+// resolveApp is intentionally fail-closed without a separately pinned,
+// build-time publisher root. Wails cannot opt into unsigned/digest-only mode.
 func resolveApp() *App {
+	return resolveAppWithReleaseTrust(releaseRuntimeTrust{
+		manifestSHA256:  releaseRuntimeManifestSHA256,
+		keyID:           releaseRuntimeKeyID,
+		publicKeySHA256: releaseRuntimePublicKeySHA256,
+	})
+}
+
+func resolveAppWithReleaseTrust(root releaseRuntimeTrust) *App {
+	off := NewApp()
 	optIn := os.Getenv("GEOCAM_OFFLINE_PROVISIONING")
+	if (optIn != "1" && optIn != "true") || !root.configured() {
+		return off
+	}
+
+	// An env pin can narrow an approved release but cannot authorize a new
+	// manifest. Do NOT accept an environment-only trusted SHA256/key/identity.
+	if supplied := strings.TrimSpace(os.Getenv("GEOCAM_RUNTIME_MANIFEST_SHA256")); supplied != "" &&
+		!strings.EqualFold(supplied, strings.TrimSpace(root.manifestSHA256)) {
+		return off
+	}
+
 	packDir := os.Getenv("GEOCAM_RUNTIME_PACK_DIR")
-	manifestPin := os.Getenv("GEOCAM_RUNTIME_MANIFEST_SHA256")
 	signedPath := os.Getenv("GEOCAM_RUNTIME_SIGNED_MANIFEST")
 	trustPath := os.Getenv("GEOCAM_RUNTIME_TRUST_ANCHOR")
 
-	// If no opt-in is requested, maintain the default fail-closed state.
-	if optIn != "1" && optIn != "true" && packDir == "" {
-		return NewApp()
-	}
-
-	// Resolve macOS bundle resources if running from an .app bundle.
 	exe, exeErr := os.Executable()
-	var resourcesDir string
 	if exeErr == nil && filepath.Base(filepath.Dir(exe)) == "MacOS" {
-		resourcesDir = filepath.Clean(filepath.Join(filepath.Dir(exe), "..", "Resources"))
+		resourcesDir := filepath.Clean(filepath.Join(filepath.Dir(exe), "..", "Resources"))
 		if packDir == "" || packDir == "bundled" {
-			bundledPack := filepath.Join(resourcesDir, "RuntimePack")
-			if info, err := os.Stat(bundledPack); err == nil && info.IsDir() {
-				packDir = bundledPack
+			bundled := filepath.Join(resourcesDir, "RuntimePack")
+			if info, err := os.Lstat(bundled); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+				packDir = bundled
 			}
 		}
-		if signedPath == "" && resourcesDir != "" {
-			candidate := filepath.Join(resourcesDir, "runtime-manifest.signed.json")
-			if _, err := os.Stat(candidate); err == nil {
-				signedPath = candidate
-			}
+		if signedPath == "" {
+			signedPath = filepath.Join(resourcesDir, "runtime-manifest.signed.json")
 		}
-		if trustPath == "" && resourcesDir != "" {
-			candidate := filepath.Join(resourcesDir, "trust-anchors.json")
-			if _, err := os.Stat(candidate); err == nil {
-				trustPath = candidate
-			}
-		}
-		if manifestPin == "" && resourcesDir != "" {
-			candidate := filepath.Join(resourcesDir, "runtime-manifest.sha256")
-			if pinBytes, err := os.ReadFile(candidate); err == nil {
-				manifestPin = strings.TrimSpace(string(pinBytes))
-			}
+		if trustPath == "" {
+			trustPath = filepath.Join(resourcesDir, "trust-anchors.json")
 		}
 	}
+	if packDir == "" || signedPath == "" || trustPath == "" || packDir == "bundled" {
+		return off
+	}
+	// No trust anchor may be taken from within the candidate Runtime Pack,
+	// even if signed metadata exists there. Publisher trust comes from
+	// separately supplied release-owned material and is hash pinned at build.
+	if insidePack(packDir, trustPath) {
+		return off
+	}
 
-	// If signed manifest path is still empty, look inside packDir.
-	if signedPath == "" && packDir != "" {
-		candidate := filepath.Join(packDir, "runtime-manifest.signed.json")
-		if _, err := os.Stat(candidate); err == nil {
-			signedPath = candidate
-		}
+	signed, err := installer.LoadSignedRuntimeManifest(signedPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "[GEO-CAM Edge] signed manifest unavailable; preparation disabled")
+		return off
+	}
+	loaded, err := installer.LoadTrustStoreFromFile(trustPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "[GEO-CAM Edge] publisher trust unavailable; preparation disabled")
+		return off
+	}
+	anchor, err := loaded.GetTrustAnchor(root.keyID)
+	if err != nil || (anchor.Algorithm != installer.SignatureAlgorithmEd25519 &&
+		anchor.Algorithm != installer.SignatureAlgorithmECDSAP256) || anchor.Revoked {
+		return off
+	}
+	digest := sha256.Sum256(anchor.PublicKey)
+	if !strings.EqualFold(hex.EncodeToString(digest[:]), strings.TrimSpace(root.publicKeySHA256)) ||
+		signed.Signature.KeyID != root.keyID {
+		return off
+	}
+
+	// Discard any other signer in the supplied file. The release binary only
+	// trusts the specifically pinned publisher key and digest.
+	trust := installer.NewMemoryTrustStore()
+	if err := trust.AddAnchor(anchor); err != nil {
+		return off
 	}
 
 	dataDir := os.Getenv("GEOCAM_DATA_DIR")
 	if dataDir == "" {
 		home, err := os.UserHomeDir()
-		if err == nil {
-			dataDir = filepath.Join(home, ".geocam", "data")
-		} else {
-			dataDir = filepath.Join(".", "data")
+		if err != nil {
+			return off
 		}
+		dataDir = filepath.Join(home, ".geocam", "data")
 	}
-
 	options := installer.RuntimePackProvisionerOptions{
 		Enabled:                true,
 		PackDir:                packDir,
 		DataDir:                dataDir,
-		ExpectedManifestSHA256: manifestPin,
+		ExpectedManifestSHA256: strings.TrimSpace(root.manifestSHA256),
 		TargetOS:               runtime.GOOS,
 		TargetArch:             runtime.GOARCH,
 	}
-
-	// Signed manifest + trust store branch (preferred, cryptographically authenticated).
-	if signedPath != "" && trustPath != "" {
-		signedManifest, err := installer.LoadSignedRuntimeManifest(signedPath)
-		if err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "[GEO-CAM Edge] Failed to load signed manifest: %v\n", err)
-			return NewApp()
-		}
-		trustStore, err := installer.LoadTrustStoreFromFile(trustPath)
-		if err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "[GEO-CAM Edge] Failed to load trust store: %v\n", err)
-			return NewApp()
-		}
-		app, err := NewAppWithSignedRuntimePack(options, signedManifest, trustStore)
-		if err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "[GEO-CAM Edge] Failed to initialize signed Runtime Pack: %v\n", err)
-			return NewApp()
-		}
-		return app
+	app, err := NewAppWithSignedRuntimePack(options, signed, trust)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "[GEO-CAM Edge] signed Runtime Pack rejected; preparation disabled")
+		return off
 	}
+	return app
+}
 
-	// Unsigned pinned pack branch (fallback only when explicitly opted-in).
-	if os.Getenv("GEOCAM_RUNTIME_PACK_PINNED") == "1" && manifestPin != "" && packDir != "" {
-		app, err := NewAppWithPinnedRuntimePack(options)
-		if err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "[GEO-CAM Edge] Failed to initialize pinned Runtime Pack: %v\n", err)
-			return NewApp()
-		}
-		return app
+func insidePack(pack, file string) bool {
+	root, err := filepath.Abs(pack)
+	if err != nil {
+		return true
 	}
-
-	// Incomplete configuration: fail closed to default safe app.
-	return NewApp()
+	path, err := filepath.Abs(file)
+	if err != nil {
+		return true
+	}
+	// Resolve existing symlinks to avoid a trust anchor smuggled through
+	// an otherwise external-looking symlink path.
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return true
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }

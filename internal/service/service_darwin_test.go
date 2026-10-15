@@ -165,8 +165,9 @@ func TestInstallUnchangedLaunchAgentDoesNotReload(t *testing.T) {
 	}
 	original := launchctlRun
 	t.Cleanup(func() { launchctlRun = original })
+	var calls []string
 	launchctlRun = func(args ...string) ([]byte, error) {
-		t.Errorf("unchanged install called launchctl %v", args)
+		calls = append(calls, strings.Join(args, " "))
 		return nil, nil
 	}
 	if err := installMacOSService(plist, "gui/501", "gui/501/"+macOSLabel, options); err != nil {
@@ -178,6 +179,42 @@ func TestInstallUnchangedLaunchAgentDoesNotReload(t *testing.T) {
 	}
 	if !os.SameFile(before, after) {
 		t.Fatal("unchanged plist was replaced")
+	}
+	if got, want := strings.Join(calls, ","), "print gui/501/"+macOSLabel; got != want {
+		t.Fatalf("expected only loaded-state query: got %q want %q", got, want)
+	}
+}
+
+func TestInstallUnchangedButUnloadedLaunchAgentDoesNotPretendRunning(t *testing.T) {
+	root := t.TempDir()
+	options := macOSInstallFixture(t, root)
+	plist := filepath.Join(root, "agent.plist")
+	if err := writeMacOSPlist(plist, options); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := launchctlRun
+	t.Cleanup(func() { launchctlRun = original })
+	var calls []string
+	launchctlRun = func(args ...string) ([]byte, error) {
+		calls = append(calls, strings.Join(args, " "))
+		return nil, errors.New("job not loaded")
+	}
+	if err := installMacOSService(plist, "gui/501", "gui/501/"+macOSLabel, options); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("unloaded unchanged plist rewritten")
+	}
+	if got, want := strings.Join(calls, ","), "print gui/501/"+macOSLabel; got != want {
+		t.Fatalf("install unexpectedly bootstrapped or unloaded job: %q", got)
 	}
 }
 

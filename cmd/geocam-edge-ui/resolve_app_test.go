@@ -148,7 +148,7 @@ func TestResolveApp_ValidSignedManifestInitializesBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	signedPath := filepath.Join(packDir, "runtime-manifest.signed.json")
+	signedPath := filepath.Join(t.TempDir(), "runtime-manifest.signed.json")
 	signedBytes, err := json.Marshal(signed)
 	if err != nil {
 		t.Fatal(err)
@@ -163,7 +163,7 @@ func TestResolveApp_ValidSignedManifestInitializesBackend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	trustPath := filepath.Join(packDir, "trust-anchors.json")
+	trustPath := filepath.Join(t.TempDir(), "trust-anchors.json")
 	if err := os.WriteFile(trustPath, trustBytes, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,12 @@ func TestResolveApp_ValidSignedManifestInitializesBackend(t *testing.T) {
 	t.Setenv("GEOCAM_RUNTIME_TRUST_ANCHOR", trustPath)
 	t.Setenv("GEOCAM_DATA_DIR", dataDir)
 
-	app := resolveApp()
+	publicKeyDigest := sha256.Sum256(pub)
+	app := resolveAppWithReleaseTrust(releaseRuntimeTrust{
+		manifestSHA256:  pin,
+		keyID:           keyID,
+		publicKeySHA256: hex.EncodeToString(publicKeyDigest[:]),
+	})
 	if app == nil {
 		t.Fatal("expected non-nil app")
 	}
@@ -192,6 +197,20 @@ func TestResolveApp_ValidSignedManifestInitializesBackend(t *testing.T) {
 	// And it must never claim CertifiedReady without real execution
 	if snapshot.CertifiedReady() {
 		t.Fatalf("synthetic pack must not report CertifiedReady")
+	}
+	untrustedApp := resolveApp()
+	untrusted, err := untrustedApp.GetFullEdgePreparationStatus()
+	if err != nil || untrusted.ErrorCode != "PREPARATION_NOT_INTEGRATED" {
+		t.Fatalf("env-only self-signed pack was unexpectedly authorized: %+v %v", untrusted, err)
+	}
+	wrongRoot := resolveAppWithReleaseTrust(releaseRuntimeTrust{
+		manifestSHA256:  pin,
+		keyID:           keyID,
+		publicKeySHA256: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+	})
+	wrongSnapshot, err := wrongRoot.GetFullEdgePreparationStatus()
+	if err != nil || wrongSnapshot.ErrorCode != "PREPARATION_NOT_INTEGRATED" {
+		t.Fatalf("mismatched publisher key was unexpectedly trusted: %+v %v", wrongSnapshot, err)
 	}
 }
 
@@ -214,7 +233,54 @@ func TestResolveApp_PinnedPackOptIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error getting status: %v", err)
 	}
-	if snapshot.ErrorCode == "PREPARATION_NOT_INTEGRATED" {
-		t.Fatalf("expected pinned preparation backend, got PREPARATION_NOT_INTEGRATED")
+	if snapshot.ErrorCode != "PREPARATION_NOT_INTEGRATED" {
+		t.Fatalf("environment-only digest must not enable unsigned preparation: %+v", snapshot)
+	}
+}
+
+func TestResolveApp_EnvOnlySelfSignedReleaseRemainsDisabled(t *testing.T) {
+	t.Setenv("GEOCAM_OFFLINE_PROVISIONING", "1")
+	t.Setenv("GEOCAM_RUNTIME_PACK_DIR", t.TempDir())
+	t.Setenv("GEOCAM_RUNTIME_MANIFEST_SHA256", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	t.Setenv("GEOCAM_RUNTIME_PACK_PINNED", "1")
+	t.Setenv("GEOCAM_RUNTIME_SIGNED_MANIFEST", filepath.Join(t.TempDir(), "signed.json"))
+	t.Setenv("GEOCAM_RUNTIME_TRUST_ANCHOR", filepath.Join(t.TempDir(), "trust.json"))
+	snapshot, err := resolveApp().GetFullEdgePreparationStatus()
+	if err != nil || snapshot.ErrorCode != "PREPARATION_NOT_INTEGRATED" || snapshot.CanStart {
+		t.Fatalf("untrusted environment activated preparation: %+v, %v", snapshot, err)
+	}
+}
+
+func TestResolveApp_RejectsBuildKeyPinMismatch(t *testing.T) {
+	t.Setenv("GEOCAM_OFFLINE_PROVISIONING", "1")
+	t.Setenv("GEOCAM_RUNTIME_PACK_DIR", t.TempDir())
+	t.Setenv("GEOCAM_RUNTIME_MANIFEST_SHA256", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	snapshot, err := resolveAppWithReleaseTrust(releaseRuntimeTrust{
+		manifestSHA256:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		keyID:           "publisher",
+		publicKeySHA256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+	}).GetFullEdgePreparationStatus()
+	if err != nil || snapshot.ErrorCode != "PREPARATION_NOT_INTEGRATED" || snapshot.CanStart {
+		t.Fatalf("environment overwrote build-time release pin: %+v, %v", snapshot, err)
+	}
+}
+
+func TestResolveApp_TrustStoreInsidePackRejected(t *testing.T) {
+	root := t.TempDir()
+	pack := filepath.Join(root, "pack")
+	if err := os.Mkdir(pack, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GEOCAM_OFFLINE_PROVISIONING", "1")
+	t.Setenv("GEOCAM_RUNTIME_PACK_DIR", pack)
+	t.Setenv("GEOCAM_RUNTIME_TRUST_ANCHOR", filepath.Join(pack, "trust-anchors.json"))
+	t.Setenv("GEOCAM_RUNTIME_SIGNED_MANIFEST", filepath.Join(pack, "signed.json"))
+	snapshot, err := resolveAppWithReleaseTrust(releaseRuntimeTrust{
+		manifestSHA256:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		keyID:           "publisher",
+		publicKeySHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}).GetFullEdgePreparationStatus()
+	if err != nil || snapshot.ErrorCode != "PREPARATION_NOT_INTEGRATED" || snapshot.CanStart {
+		t.Fatalf("embedded pack trust anchor accepted: %+v, %v", snapshot, err)
 	}
 }
