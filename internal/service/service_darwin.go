@@ -3,6 +3,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -87,14 +88,23 @@ func installMacOSService(plistPath, domain, target string, options Options) erro
 	if err := validateMacOSOptions(options); err != nil {
 		return err
 	}
+	current, err := os.ReadFile(plistPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read existing LaunchAgent definition: %w", err)
+	}
+	if err == nil && bytes.Equal(current, renderMacOSPlist(options, filepath.Join(options.DataDir, "logs"))) {
+		return nil
+	}
+	// Persist the definition before interrupting a running service. A disk or
+	// permissions failure must leave the existing launchd job untouched.
+	if err := writeMacOSPlist(plistPath, options); err != nil {
+		return err
+	}
 	loaded := macOSJobLoaded(target)
 	if loaded {
 		if err := launchctl("bootout", target); err != nil {
 			return fmt.Errorf("unload existing LaunchAgent before reinstall: %w", err)
 		}
-	}
-	if err := writeMacOSPlist(plistPath, options); err != nil {
-		return err
 	}
 	if loaded {
 		if err := launchctl("bootstrap", domain, plistPath); err != nil {

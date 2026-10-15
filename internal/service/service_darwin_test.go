@@ -150,3 +150,79 @@ func TestInstallDoesNotBootstrapAnUnloadedLaunchAgent(t *testing.T) {
 		t.Fatalf("launchctl sequence=%v, want only the loaded-state query", calls)
 	}
 }
+
+// A retry must not stop a healthy service when its definition is unchanged.
+func TestInstallUnchangedLaunchAgentDoesNotReload(t *testing.T) {
+	root := t.TempDir()
+	options := macOSInstallFixture(t, root)
+	plist := filepath.Join(root, "agent.plist")
+	if err := writeMacOSPlist(plist, options); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := launchctlRun
+	t.Cleanup(func() { launchctlRun = original })
+	launchctlRun = func(args ...string) ([]byte, error) {
+		t.Errorf("unchanged install called launchctl %v", args)
+		return nil, nil
+	}
+	if err := installMacOSService(plist, "gui/501", "gui/501/"+macOSLabel, options); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("unchanged plist was replaced")
+	}
+}
+
+func TestInstallWriteFailurePreservesLoadedLaunchAgent(t *testing.T) {
+	root := t.TempDir()
+	options := macOSInstallFixture(t, root)
+	// Deterministic write failure, including when tests run with elevated permissions.
+	if err := os.WriteFile(filepath.Join(options.DataDir, "logs"), []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	plist := filepath.Join(root, "agent.plist")
+	if err := os.WriteFile(plist, []byte("previous definition"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	original := launchctlRun
+	t.Cleanup(func() { launchctlRun = original })
+	launchctlRun = func(args ...string) ([]byte, error) {
+		if args[0] != "print" {
+			t.Errorf("write failure must not mutate launchd: %v", args)
+		}
+		return nil, nil
+	}
+	if err := installMacOSService(plist, "gui/501", "gui/501/"+macOSLabel, options); err == nil {
+		t.Fatal("expected write failure")
+	}
+	got, err := os.ReadFile(plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "previous definition" {
+		t.Fatal("previous definition lost")
+	}
+}
+
+func macOSInstallFixture(t *testing.T, root string) Options {
+	t.Helper()
+	data := filepath.Join(root, "data")
+	if err := os.MkdirAll(data, 0700); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(root, "edge.env")
+	for _, p := range []string{config, filepath.Join(data, "identity.json"), filepath.Join(data, "credentials.json")} {
+		if err := os.WriteFile(p, []byte("synthetic"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return Options{Executable: "/synthetic/geocam-edge", DataDir: data, ConfigFile: config}
+}
