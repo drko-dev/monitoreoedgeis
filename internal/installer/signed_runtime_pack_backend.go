@@ -99,13 +99,16 @@ func (p *SignedRuntimePackPreparationBackend) verify(ctx context.Context) error 
 	if err := ensureDisjointRuntimePaths(packRoot, o.DataDir); err != nil {
 		return err
 	}
-	return p.verifyRoot(ctx, packRoot)
+	return p.verifyRoot(ctx, packRoot, true)
 }
 
 // verifyRoot authenticates a complete release tree against BOTH the externally
 // pinned raw manifest bytes and the independently supplied publisher signer.
 // It is reused for source media and already-installed files.
-func (p *SignedRuntimePackPreparationBackend) verifyRoot(ctx context.Context, root string) error {
+// hashArtifacts=false skips re-hashing declared artifacts here; callers must
+// then run inspectRuntimePack, which hashes and allow-lists them against the
+// same (DeepEqual-checked) manifest.
+func (p *SignedRuntimePackPreparationBackend) verifyRoot(ctx context.Context, root string, hashArtifacts bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -132,10 +135,14 @@ func (p *SignedRuntimePackPreparationBackend) verifyRoot(ctx context.Context, ro
 	}
 	// Uses an external trust anchor, not PublicKey embedded in signed bytes.
 	// Also checks expiry, platform, all declared artifact hashes, and release type.
+	packRoot := root
+	if !hashArtifacts {
+		packRoot = ""
+	}
 	return ValidateSignedManifest(p.signed, p.trust, VerifySignedManifestOptions{
 		TargetPlatform: o.TargetOS,
 		TargetArch:     o.TargetArch,
-		PackRoot:       root,
+		PackRoot:       packRoot,
 		RequireRelease: true,
 	})
 }
@@ -171,7 +178,7 @@ func (p *SignedRuntimePackPreparationBackend) VerifyInstalledRuntimePack(ctx con
 	if installedRoot != activePath {
 		return errors.New("installed runtime must be a direct, non-symlinked child of persistent state")
 	}
-	if err := p.verifyRoot(ctx, installedRoot); err != nil {
+	if err := p.verifyRoot(ctx, installedRoot, false); err != nil {
 		return err
 	}
 	// Signed manifest validation authenticates declared hashes. H6B's full

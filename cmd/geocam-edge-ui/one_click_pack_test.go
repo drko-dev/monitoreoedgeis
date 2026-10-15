@@ -47,7 +47,7 @@ func TestOneClickPreparationWithRealSignedPack(t *testing.T) {
 		keyID:           pins["releaseRuntimeKeyID"],
 		publicKeySHA256: pins["releaseRuntimePublicKeySHA256"],
 	})
-	status, err := app.GetFullEdgePreparationStatus()
+	status, err := waitPastChecking(app)
 	if err != nil || status.ErrorCode == "PREPARATION_NOT_INTEGRATED" || !status.CanStart {
 		t.Fatalf("one-click preparation not available: %+v %v", status, err)
 	}
@@ -57,14 +57,57 @@ func TestOneClickPreparationWithRealSignedPack(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 		snap, err = app.GetFullEdgePreparationStatus()
 	}
-	// Installed and verified, but never certified without the inference gate.
-	if err != nil || snap.Stage != "TRANSACTION_COMMITTED" || snap.ErrorCode != "RUNTIME_UNCERTIFIED" || snap.CertifiedReady() {
-		t.Fatalf("preparation did not commit: %+v %v", snap, err)
+	// With models and the fixture bundled next to the pack, the installed
+	// runtime must pass the H8 inference certification and report READY.
+	if err != nil || snap.State != installer.StateReady || !snap.CertifiedReady() {
+		t.Fatalf("preparation not certified READY: %+v %v", snap, err)
 	}
-	for _, c := range snap.Components {
-		if (c.Status == installer.ComponentStatusReady) == (c.Key == "authorized_models") {
-			t.Fatalf("unexpected component status: %+v", c)
-		}
+	if again, err := app.GetFullEdgePreparationStatus(); err != nil || !again.CertifiedReady() {
+		t.Fatalf("READY not retained in status: %+v %v", again, err)
 	}
 	t.Logf("final snapshot: state=%s progress=%d code=%s msg=%s", snap.State, snap.ProgressPercent, snap.ErrorCode, snap.SafeMessage)
+}
+
+// waitPastChecking waits for the background startup reconciliation.
+func waitPastChecking(app *App) (installer.FullEdgePreparationSnapshot, error) {
+	deadline := time.Now().Add(5 * time.Minute)
+	for {
+		s, err := app.GetFullEdgePreparationStatus()
+		if err != nil || s.State != installer.StateChecking || time.Now().After(deadline) {
+			return s, err
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// TestRestartKeepsCertifiedReady reopens the app on an already prepared and
+// certified data dir (H5_REAL_DATA_DIR) and expects READY without re-running
+// the preparation.
+func TestRestartKeepsCertifiedReady(t *testing.T) {
+	if os.Getenv("H5_REAL_RESTART") == "" {
+		t.Skip("H5_REAL_RESTART not set")
+	}
+	pins := map[string]string{}
+	for _, field := range strings.Fields(os.Getenv("H5_REAL_LDFLAGS")) {
+		if k, v, ok := strings.Cut(strings.TrimPrefix(field, "main."), "="); ok {
+			pins[k] = v
+		}
+	}
+	t.Setenv("GEOCAM_RUNTIME_PACK_DIR", os.Getenv("H5_REAL_PACK_DIR"))
+	t.Setenv("GEOCAM_RUNTIME_SIGNED_MANIFEST", os.Getenv("H5_REAL_SIGNED"))
+	t.Setenv("GEOCAM_RUNTIME_TRUST_ANCHOR", os.Getenv("H5_REAL_TRUST"))
+	t.Setenv("GEOCAM_DATA_DIR", os.Getenv("H5_REAL_DATA_DIR"))
+	t.Setenv("GEOCAM_CONFIG_FILE", os.Getenv("H5_REAL_CONFIG_FILE"))
+	prev := releaseOfflineProvisioning
+	releaseOfflineProvisioning = "1"
+	t.Cleanup(func() { releaseOfflineProvisioning = prev })
+	app := resolveAppWithReleaseTrust(releaseRuntimeTrust{
+		manifestSHA256:  pins["releaseRuntimeManifestSHA256"],
+		keyID:           pins["releaseRuntimeKeyID"],
+		publicKeySHA256: pins["releaseRuntimePublicKeySHA256"],
+	})
+	s, err := waitPastChecking(app)
+	if err != nil || !s.CertifiedReady() {
+		t.Fatalf("not READY after restart: %+v %v", s, err)
+	}
 }

@@ -2,6 +2,7 @@ package installer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -253,6 +254,26 @@ func (p *TransactionalRuntimePackProvisioner) Recover(ctx context.Context) (Runt
 		}
 	}
 	activePath := filepath.Join(p.options.DataDir, p.options.TargetName)
+	// preRecoverVerify (signed backends) already ran the full pinned
+	// inspection of the active tree; do not re-hash ~1 GB a second time.
+	if p.preRecoverVerify != nil {
+		data, err := loadPinnedRuntimeManifestBytes(filepath.Join(activePath, filepath.FromSlash(p.options.ManifestName)), p.options.ExpectedManifestSHA256)
+		var manifest RuntimeManifest
+		if err == nil {
+			err = json.Unmarshal(data, &manifest)
+		}
+		if err != nil {
+			result.ErrorCode = "SIGNED_MANIFEST_REJECTED"
+			return result, err
+		}
+		result.State = "COMMITTED_UNCERTIFIED"
+		result.TransactionCommitted = true
+		result.RuntimeIntegrityVerified = true
+		result.PinnedReleaseVerified = true
+		result.RuntimeVersion = manifest.RuntimeVersion
+		result.ManifestSHA256 = strings.ToLower(p.options.ExpectedManifestSHA256)
+		return result, nil
+	}
 	active, err := inspectRuntimePack(activePath, p.options.ManifestName, p.options.ExpectedManifestSHA256, p.options.TargetOS, p.options.TargetArch)
 	if err == nil {
 		result.State = "COMMITTED_UNCERTIFIED"

@@ -4,13 +4,14 @@
 # offline with one click (H5). Owner/lab builds only: the publisher key is a
 # local Ed25519 seed, the app is ad-hoc signed and not notarized.
 #
-# Usage: build-full-edge-oneclick-app.sh <runtime-pack-dir> <models-dir> <out-dir> <key-file> <version>
+# Usage: build-full-edge-oneclick-app.sh <runtime-pack-dir> <models-dir> <out-dir> <key-file> <version> <person-fixture.h264>
+# The fixture is the known clip the H8 inference certification must detect.
 set -euo pipefail
-if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 || $# -ne 5 ]]; then
-  echo "Usage on macOS arm64: $0 <runtime-pack-dir> <models-dir> <out-dir> <key-file> <version>" >&2
+if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 || $# -ne 6 ]]; then
+  echo "Usage on macOS arm64: $0 <runtime-pack-dir> <models-dir> <out-dir> <key-file> <version> <person-fixture.h264>" >&2
   exit 2
 fi
-src_pack="$1"; models="$2"; out="$3"; key="$4"; version="$5"
+src_pack="$1"; models="$2"; out="$3"; key="$4"; version="$5"; fixture="$6"
 repo="$(cd "$(dirname "$0")/../.." && pwd -P)"
 commit="$(git -C "$repo" rev-parse --short HEAD)"
 work="$out/work"
@@ -45,6 +46,8 @@ res="$app/Contents/Resources"
 mv "$work/RuntimePack" "$res/RuntimePack"
 cp "$work/release/runtime-manifest.signed.json" "$work/release/trust-anchors.json" "$res/"
 cp -cR "$models" "$res/Models"
+mkdir -p "$res/Fixtures"
+cp -c "$fixture" "$res/Fixtures/person-annexb.h264"
 
 echo "==> ad-hoc signing (outer bundle only: pack bytes are hash-pinned)"
 codesign --force --sign - "$app/Contents/MacOS/geocam-edge"
