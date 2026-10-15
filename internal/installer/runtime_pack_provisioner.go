@@ -236,6 +236,12 @@ func (p *TransactionalRuntimePackProvisioner) Recover(ctx context.Context) (Runt
 		result.ErrorCode = "RUNTIME_RECOVERY_REQUIRED"
 		return result, err
 	}
+	// A clean journal with no active runtime is a first install, not a
+	// rejected one: there are no installed bytes to authenticate yet.
+	if _, err := os.Lstat(filepath.Join(p.options.DataDir, p.options.TargetName)); errors.Is(err, os.ErrNotExist) {
+		result.State = "NOT_PREPARED"
+		return result, nil
+	}
 	verification := p.preRecoverVerify
 	if verification == nil {
 		verification = p.preCommitVerify
@@ -475,8 +481,14 @@ func rejectModelArtifacts(artifacts []artifactTarget) error {
 
 func isModelPath(path string) bool {
 	lower := strings.ToLower(filepath.ToSlash(filepath.Clean(filepath.FromSlash(path))))
-	if strings.HasPrefix(lower, "models/") || strings.Contains(lower, "/models/") {
+	// Library source trees such as torchvision/models or ultralytics/models
+	// are Python code, not weights; only the pack-level models/ dir is.
+	if strings.HasPrefix(lower, "models/") {
 		return true
+	}
+	// A .pth directly in site-packages is a site path-config file.
+	if filepath.Ext(lower) == ".pth" && filepath.Base(filepath.Dir(lower)) == "site-packages" {
+		return false
 	}
 	switch strings.ToLower(filepath.Ext(lower)) {
 	case ".pt", ".pth", ".onnx", ".engine", ".weights":

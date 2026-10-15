@@ -176,7 +176,17 @@ func mapPackResult(result RuntimePackProvisioningResult, err error) FullEdgePrep
 		s.ErrorCode = "RUNTIME_UNCERTIFIED"
 		s.Stage = "TRANSACTION_COMMITTED"
 		s.SafeMessage = "Runtime Pack transaction verified. Functional offline certification is still required; Full Edge is not ready."
+		// Every runtime artifact was hash-verified and installed; only the
+		// model authorization/inference certification stays pending.
+		for i := range s.Components {
+			if s.Components[i].Key != "authorized_models" {
+				s.Components[i].Status = ComponentStatusReady
+			}
+		}
 		return s
+	}
+	if err == nil && result.State == "NOT_PREPARED" {
+		return FullEdgePreparationSnapshot{State: StateNotPrepared, CanStart: true, Components: DefaultComponentProgress()}
 	}
 	if result.State == "RECOVERY_REQUIRED" || result.State == "ROLLED_BACK_UNCERTIFIED" {
 		s.State = StateRecoveryRequired

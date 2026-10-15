@@ -25,6 +25,10 @@ var (
 	releaseRuntimeManifestSHA256  string
 	releaseRuntimeKeyID           string
 	releaseRuntimePublicKeySHA256 string
+	// "1" makes a pinned build prepare from its bundled pack without any
+	// environment opt-in, so a Finder-launched .app works with one click.
+	// It never relaxes the trust checks below.
+	releaseOfflineProvisioning string
 )
 
 type releaseRuntimeTrust struct {
@@ -57,6 +61,9 @@ func resolveApp() *App {
 func resolveAppWithReleaseTrust(root releaseRuntimeTrust) *App {
 	off := NewApp()
 	optIn := os.Getenv("GEOCAM_OFFLINE_PROVISIONING")
+	if releaseOfflineProvisioning == "1" {
+		optIn = "1"
+	}
 	if (optIn != "1" && optIn != "true") || !root.configured() {
 		return off
 	}

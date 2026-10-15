@@ -13,6 +13,7 @@ interface FullEdgePreparationPanelProps {
 function stateLabelKey(snapshot: FullEdgePreparationSnapshot | null, ready: boolean): TranslationKey {
   if (!snapshot) return 'preparation.state.loading';
   if (snapshot.state === 'READY' && !ready) return 'preparation.state.invalidCertification';
+  if (snapshot.error_code === 'RUNTIME_UNCERTIFIED') return 'preparation.state.installedUncertified';
   return `preparation.state.${snapshot.state}` as TranslationKey;
 }
 
