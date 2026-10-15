@@ -15,6 +15,7 @@ if [ "$#" -ne 4 ]; then
   exit 2
 fi
 version=$1 commit=$2 in_dir=$3 out_dir=$4
+script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 fail() { echo "::error::$*" >&2; exit 1; }
 
@@ -23,12 +24,13 @@ mkdir -p "$out_dir"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# Licensing gate: check redistribution approval for AI model weights
-if [ "${MODEL_REDISTRIBUTION_APPROVED:-false}" = "true" ]; then
-  echo "note: MODEL_REDISTRIBUTION_APPROVED is true (bundled AI weights permitted)"
-else
-  echo "note: MODEL_REDISTRIBUTION_APPROVED is false (default; licensing gate enforced)"
-fi
+# This assembler is strictly for MODEL-FREE CORE binaries. A user-provided
+# environment variable is NOT independent proof of redistribution rights.
+# A different approved packaging workflow is required for any AI weights.
+[ "${MODEL_REDISTRIBUTION_APPROVED:-false}" = false ] ||
+  fail "core-only assembler rejects MODEL_REDISTRIBUTION_APPROVED override; no model bundling supported"
+command -v python3 >/dev/null || fail "python3 is required for read-only archive inventory"
+echo "distribution profile: CORE_ONLY (path audit, NOT commercial license/release approval)"
 
 check_package() {
   local platform=$1 pkg=$2 x="$work/$1"
@@ -78,6 +80,10 @@ for platform in windows-amd64 macos-arm64 linux-amd64 linux-arm64; do
   echo "$(field sha256)  $pkg" | sha256sum -c --quiet - || fail "$platform: $expected does not match the SHA-256 recorded at build time"
 
   check_package "$platform" "$pkg"
+  # Archive path inventory is intentionally NOT a proof that binary payloads
+  # have no embedded model bytes or that third-party dependencies are legal.
+  python3 "$script_dir/audit-core-only-installer.py" "$platform" "$pkg" ||
+    fail "$platform: core-only installer inventory rejected"
   cp "$pkg" "$out_dir/$expected"
   echo "ok  $platform  $expected"
 done
