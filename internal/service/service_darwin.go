@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const macOSLabel = "io.geocam.edge"
@@ -18,6 +19,8 @@ const macOSLabel = "io.geocam.edge"
 var launchctlRun = func(args ...string) ([]byte, error) {
 	return exec.Command("launchctl", args...).CombinedOutput()
 }
+
+var sleep = time.Sleep
 
 func runIfWindowsService(func(context.Context) error) (bool, error) { return false, nil }
 
@@ -35,7 +38,7 @@ func serviceCommand(action string, options Options) error {
 			if _, err := os.Stat(plistPath); err != nil {
 				return errors.New("LaunchAgent is not installed; configure persistent settings then run `geocam-edge service install`")
 			}
-			if err := launchctl("bootstrap", domain, plistPath); err != nil {
+			if err := bootstrapWithRetry(domain, plistPath, 5*time.Second); err != nil {
 				return err
 			}
 		}
@@ -50,8 +53,11 @@ func serviceCommand(action string, options Options) error {
 			if err := launchctl("bootout", target); err != nil {
 				return err
 			}
+			if err := waitForJobUnloaded(target, 5*time.Second); err != nil {
+				return fmt.Errorf("wait for LaunchAgent to unload before restart: %w", err)
+			}
 		}
-		if err := launchctl("bootstrap", domain, plistPath); err != nil {
+		if err := bootstrapWithRetry(domain, plistPath, 5*time.Second); err != nil {
 			return err
 		}
 		return launchctl("kickstart", target)
@@ -73,6 +79,7 @@ func serviceCommand(action string, options Options) error {
 			if err := launchctl("bootout", target); err != nil {
 				return err
 			}
+			_ = waitForJobUnloaded(target, 5*time.Second)
 		}
 		if err := os.Remove(plistPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove LaunchAgent definition: %w", err)
@@ -92,7 +99,8 @@ func installMacOSService(plistPath, domain, target string, options Options) erro
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read existing LaunchAgent definition: %w", err)
 	}
-	if err == nil && bytes.Equal(current, renderMacOSPlist(options, filepath.Join(options.DataDir, "logs"))) {
+	expected := renderMacOSPlist(options, filepath.Join(options.DataDir, "logs"))
+	if err == nil && bytes.Equal(bytes.TrimSpace(current), bytes.TrimSpace(expected)) {
 		// Identical on-disk plist does not imply loaded job. Install must
 		// not start a deliberately stopped service; only service start may.
 		if macOSJobLoaded(target) {
@@ -111,9 +119,12 @@ func installMacOSService(plistPath, domain, target string, options Options) erro
 		if err := launchctl("bootout", target); err != nil {
 			return fmt.Errorf("unload existing LaunchAgent before reinstall: %w", err)
 		}
+		if err := waitForJobUnloaded(target, 5*time.Second); err != nil {
+			return fmt.Errorf("wait for LaunchAgent to unload before reinstall: %w", err)
+		}
 	}
 	if loaded {
-		if err := launchctl("bootstrap", domain, plistPath); err != nil {
+		if err := bootstrapWithRetry(domain, plistPath, 5*time.Second); err != nil {
 			return fmt.Errorf("load updated LaunchAgent: %w", err)
 		}
 	}
@@ -168,6 +179,42 @@ func launchctl(args ...string) error {
 		return fmt.Errorf("launchctl %s failed (%s)", strings.Join(args, " "), commandOutputSummary(out))
 	}
 	return nil
+}
+
+func waitForJobUnloaded(target string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !macOSJobLoaded(target) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for LaunchAgent %s to unload", target)
+		}
+		sleep(50 * time.Millisecond)
+	}
+}
+
+func bootstrapWithRetry(domain, plistPath string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := launchctl("bootstrap", domain, plistPath)
+		if err == nil {
+			return nil
+		}
+		if !isTransientBootstrapError(err) || time.Now().After(deadline) {
+			return err
+		}
+		sleep(100 * time.Millisecond)
+	}
+}
+
+func isTransientBootstrapError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Bootstrap failed: 5") ||
+		strings.Contains(msg, "Input/output error")
 }
 
 func writeMacOSPlist(path string, options Options) error {

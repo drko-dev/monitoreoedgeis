@@ -32,9 +32,9 @@ These are **only public fingerprints**, never private signing keys. The release 
 
 ## LaunchAgent behavior
 
-The macOS service installer now writes plist bytes atomically **before** disrupting a loaded job and skips needless `bootout/bootstrap` for identical on-disk bytes. An unchanged plist still triggers a non-mutating `launchctl print` query; when the job is not loaded, it explicitly instructs the operator to use `geocam-edge service start`, rather than claiming it is running or unexpectedly starting it on install.
+The macOS service installer now writes plist bytes atomically **before** disrupting a loaded job, normalizes whitespace during plist comparison, and skips needless `bootout/bootstrap` when configuration is identical. When an existing job is loaded and an update or restart is performed, `serviceCommand` and `installMacOSService` wait for launchd to complete asynchronous job unload before re-bootstrapping, and retry `launchctl bootstrap` with backoff when encountering transient launchd error 5 (`Bootstrap failed: 5: Input/output error`). An unchanged plist still triggers a non-mutating `launchctl print` query; when the job is not loaded, it explicitly instructs the operator to use `geocam-edge service start`, rather than claiming it is running or unexpectedly starting it on install.
 
-Tests exercise unchanged loaded/unloaded paths, a modified already loaded service, an unloaded new installation and write failures preserving previous plist/daemon. **This does not assert repair of every possible launchctl bootstrap error; a real service-install smoke on a sacrificial lab machine remains separate.**
+Tests exercise unchanged loaded/unloaded paths, whitespace normalization, an already loaded service undergoing unload/reload, transient EIO bootstrap retry, unload wait timeout, and write failures preserving previous plist/daemon. **A real service-install smoke on a sacrificial lab machine remains separate.**
 
 ## Validation and readiness
 
