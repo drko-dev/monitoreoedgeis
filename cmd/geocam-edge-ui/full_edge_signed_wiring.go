@@ -34,6 +34,6 @@ func NewAppWithSignedRuntimePack(
 	_, _ = adapter.RestoreFromTransaction(recoveryCtx)
 
 	app := NewApp()
-	app.preparation = adapter
+	app.preparation = installer.NewWailsSafeFullEdgePreparationAPI(adapter)
 	return app, nil
 }

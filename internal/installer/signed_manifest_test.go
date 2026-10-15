@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -8,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -535,5 +537,65 @@ func TestSignedManifest_Scenario14_MalformedJSONAndSchemaErrors(t *testing.T) {
 	_, err = ParseSignedRuntimeManifest(badSchemaJSON)
 	if !errors.Is(err, ErrSignedManifestSchemaInvalid) {
 		t.Fatalf("expected ErrSignedManifestSchemaInvalid on missing key_id, got %v", err)
+	}
+}
+
+func TestLoadTrustStore(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor := NewEd25519TrustAnchor("test-key", pub)
+	data, err := json.Marshal([]*TrustAnchor{anchor})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := LoadTrustStore(data)
+	if err != nil {
+		t.Fatalf("LoadTrustStore failed: %v", err)
+	}
+	got, err := store.GetTrustAnchor("test-key")
+	if err != nil {
+		t.Fatalf("GetTrustAnchor failed: %v", err)
+	}
+	if !bytes.Equal(got.PublicKey, pub) {
+		t.Fatalf("public key mismatch")
+	}
+
+	// Single anchor JSON
+	singleData, err := json.Marshal(anchor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	singleStore, err := LoadTrustStore(singleData)
+	if err != nil {
+		t.Fatalf("LoadTrustStore with single anchor failed: %v", err)
+	}
+	if _, err := singleStore.GetTrustAnchor("test-key"); err != nil {
+		t.Fatalf("GetTrustAnchor on single store failed: %v", err)
+	}
+
+	// File loading
+	tmp := filepath.Join(t.TempDir(), "trust-anchors.json")
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	fileStore, err := LoadTrustStoreFromFile(tmp)
+	if err != nil {
+		t.Fatalf("LoadTrustStoreFromFile failed: %v", err)
+	}
+	if _, err := fileStore.GetTrustAnchor("test-key"); err != nil {
+		t.Fatalf("GetTrustAnchor on file store failed: %v", err)
+	}
+
+	// Missing file
+	if _, err := LoadTrustStoreFromFile(filepath.Join(t.TempDir(), "nonexistent.json")); err == nil {
+		t.Fatal("expected error on nonexistent file")
+	}
+
+	// Bad JSON
+	if _, err := LoadTrustStore([]byte("invalid json")); err == nil {
+		t.Fatal("expected error on bad json")
 	}
 }

@@ -22,7 +22,7 @@ func main() {
 		}
 	}
 
-	app := NewApp()
+	app := resolveApp()
 
 	err := wails.Run(&options.App{
 		Title:     "GEO CAM Edge Installer",
