@@ -154,6 +154,13 @@ func resolveAppWithReleaseTrust(root releaseRuntimeTrust) *App {
 		fmt.Fprintln(os.Stderr, "[GEO-CAM Edge] signed Runtime Pack rejected; preparation disabled")
 		return off
 	}
+	// Models ship next to the pack in Resources/Models, outside the signed pack.
+	modelsDir := filepath.Join(filepath.Dir(packDir), "Models")
+	app.onPrepared = func() error { return installer.ConfigureDaemonForInstalledRuntime(dataDir, modelsDir) }
+	// An already-installed runtime (previous session) is re-wired on startup.
+	if snapshot, err := app.GetFullEdgePreparationStatus(); err == nil {
+		app.runOnPrepared(snapshot, nil)
+	}
 	return app
 }
 

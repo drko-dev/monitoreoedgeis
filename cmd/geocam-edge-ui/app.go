@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/installer"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -16,6 +18,9 @@ type App struct {
 	ctx         context.Context
 	installer   *installer.Service
 	preparation installer.FullEdgePreparationAPI
+	// onPrepared runs after a committed Runtime Pack transaction, e.g. to
+	// point the daemon at the installed runtime. Nil for default builds.
+	onPrepared func() error
 }
 
 // NewApp creates a new desktop App instance backed by the Go installer facade.
@@ -74,6 +79,7 @@ func (a *App) GetFullEdgePreparationStatus() (installer.FullEdgePreparationSnaps
 // The default adapter is intentionally unavailable until H3/H4/H6 are integrated.
 func (a *App) StartFullEdgePreparation(requestID string) (installer.FullEdgePreparationSnapshot, error) {
 	snapshot, err := a.preparationAPI().Start(a.requestContext(), requestID)
+	a.runOnPrepared(snapshot, err)
 	return validatedPreparationSnapshot(snapshot, err)
 }
 
@@ -89,6 +95,15 @@ func (a *App) GetFullEdgePreparationDiagnostic(operationID string) (installer.Fu
 func (a *App) RecoverFullEdgeRuntime(operationID string) (installer.FullEdgePreparationSnapshot, error) {
 	snapshot, err := a.preparationAPI().Recover(a.requestContext(), operationID)
 	return validatedPreparationSnapshot(snapshot, err)
+}
+
+func (a *App) runOnPrepared(snapshot installer.FullEdgePreparationSnapshot, err error) {
+	if err != nil || a.onPrepared == nil || snapshot.Stage != "TRANSACTION_COMMITTED" {
+		return
+	}
+	if hookErr := a.onPrepared(); hookErr != nil {
+		fmt.Fprintln(os.Stderr, "[GEO-CAM Edge] installed runtime not wired to daemon:", hookErr)
+	}
 }
 
 func validatedPreparationSnapshot(snapshot installer.FullEdgePreparationSnapshot, err error) (installer.FullEdgePreparationSnapshot, error) {

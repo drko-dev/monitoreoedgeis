@@ -28,7 +28,16 @@ func TestOneClickPreparationWithRealSignedPack(t *testing.T) {
 	t.Setenv("GEOCAM_RUNTIME_PACK_DIR", pack)
 	t.Setenv("GEOCAM_RUNTIME_SIGNED_MANIFEST", os.Getenv("H5_REAL_SIGNED"))
 	t.Setenv("GEOCAM_RUNTIME_TRUST_ANCHOR", os.Getenv("H5_REAL_TRUST"))
-	t.Setenv("GEOCAM_DATA_DIR", t.TempDir())
+	dataDir := os.Getenv("H5_REAL_DATA_DIR") // keep the install for daemon checks
+	if dataDir == "" {
+		dataDir = t.TempDir()
+	}
+	t.Setenv("GEOCAM_DATA_DIR", dataDir)
+	if cfg := os.Getenv("H5_REAL_CONFIG_FILE"); cfg != "" {
+		t.Setenv("GEOCAM_CONFIG_FILE", cfg)
+	} else {
+		t.Setenv("GEOCAM_CONFIG_FILE", t.TempDir()+"/edge.env")
+	}
 	prev := releaseOfflineProvisioning
 	releaseOfflineProvisioning = "1"
 	t.Cleanup(func() { releaseOfflineProvisioning = prev })
