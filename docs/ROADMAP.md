@@ -9,6 +9,19 @@
 
 H7B's **laboratory** outbound-IP denial harness is merged (PR #163); release-grade airgap is not certified. H5B/H5C/H5D explicit adapter/bootstrap are merged but the normal Wails application remains fail-closed. H6C issue #155 tracks adversarial Wails bridge safety and later externally trusted release-owned wiring; the latter is **BLOCKED**, not authorized or implemented for product use, pending provenance, manifest pin, models/licensing and H7/H8 evidence. H6D source/Worker lab PR #162 stays open. Do not interpret H6C safety test work as enabling `RUNTIME_READY` or `INFERENCE_READY`.
 
+
+### Full Edge — post-merge roadmap (2026-10-14, latest)
+
+H5/H6 #165, signed-manifest TrustStore library #166, H7 Tier-1 laboratory hardening #167, H8 fail-closed macOS14 certification runner #168, and H6D verified-source FFmpeg / lab runtime candidate #162 are **MERGED into `main`** in that exact order. Final main: `f7105c8d14b8880a90e9b71547228b33275fbb89`. Older snapshot sections referring to those PRs as open are historical.
+
+Remaining acceptance criteria are **not** met:
+1. Production-owned independent signing trust anchor, verified signed release manifest, immutable artifact pack, runtime provisioner and Wails opt-in integration. `NewApp()` remains disabled/fail-closed.
+2. Physical clean macOS14 ARM64 compatibility, installation and recovery tests. H8 currently 7 PASS / 1 BLOCKED, no macOS14 physical certificate.
+3. Installed application H7 network isolation and E2E offline certification, including LAN camera allowlist vs loopback-only lab restrictions and localhost relay bypass.
+4. Distribution gates: Ultralytics AGPL model weights, FFmpeg codec/build obligations, 36 wheel notices, Publisher Developer ID code-signing/notarization and commercial approval. `MODEL_REDISTRIBUTION_APPROVED=false`.
+
+**No deploy, release, production mutation or model redistribution.** The completed PR merges integrate **code and laboratory tests**, not release readiness.
+
 ## Block status
 
 | Block | Status                |
