@@ -820,6 +820,11 @@ func (m *RuntimeManifest) ValidateArtifactsWithProgress(
 		Results:        make([]ArtifactValidationResult, 0, len(targets)),
 	}
 
+	// Intermediate directories already resolved, confined and checked in THIS
+	// pass. ~20k artifacts share a few hundred parents; re-resolving each one
+	// per file was O(files*depth^2) syscalls (~60s for a full Python pack).
+	verifiedDirs := make(map[string]string)
+
 	for i, target := range targets {
 		if progress != nil {
 			progress(i+1, len(targets), target.RelativePath)
@@ -862,6 +867,10 @@ func (m *RuntimeManifest) ValidateArtifactsWithProgress(
 		for partIdx, part := range parts {
 			isLeaf := (partIdx == len(parts)-1)
 			candidate := filepath.Join(currentPhysical, part)
+			if resolved, ok := verifiedDirs[candidate]; ok && !isLeaf {
+				currentPhysical = resolved
+				continue
+			}
 
 			// Check existence before following symlink
 			_, err := os.Lstat(candidate)
@@ -928,6 +937,9 @@ func (m *RuntimeManifest) ValidateArtifactsWithProgress(
 				}
 			}
 
+			if !isLeaf {
+				verifiedDirs[candidate] = resolvedPart
+			}
 			currentPhysical = resolvedPart
 		}
 

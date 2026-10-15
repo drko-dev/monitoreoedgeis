@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/installer"
 )
@@ -154,13 +156,24 @@ func resolveAppWithReleaseTrust(root releaseRuntimeTrust) *App {
 		fmt.Fprintln(os.Stderr, "[GEO-CAM Edge] signed Runtime Pack rejected; preparation disabled")
 		return off
 	}
-	// Models ship next to the pack in Resources/Models, outside the signed pack.
-	modelsDir := filepath.Join(filepath.Dir(packDir), "Models")
+	// Models and the certification fixture ship next to the pack in
+	// Resources, outside the signed pack.
+	resources := filepath.Dir(packDir)
+	modelsDir := filepath.Join(resources, "Models")
+	fixture := filepath.Join(resources, "Fixtures", "person-annexb.h264")
+	pin := strings.TrimSpace(root.manifestSHA256)
 	app.onPrepared = func() error { return installer.ConfigureDaemonForInstalledRuntime(dataDir, modelsDir) }
-	// An already-installed runtime (previous session) is re-wired on startup.
-	if snapshot, err := app.GetFullEdgePreparationStatus(); err == nil {
-		app.runOnPrepared(snapshot, nil)
+	app.certify = func() (*installer.RuntimeCertification, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		cert, err := installer.CertifyInstalledRuntime(ctx, dataDir, fixture, signed.Manifest.RuntimeVersion, pin)
+		if err != nil {
+			return nil, err
+		}
+		return cert, installer.SaveRuntimeCertification(dataDir, cert)
 	}
+	app.certification = installer.LoadRuntimeCertification(dataDir, pin)
+	app.restoreInBackground()
 	return app
 }
 

@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/drko-dev/monitoreoedgeis/internal/installer"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -21,6 +24,15 @@ type App struct {
 	// onPrepared runs after a committed Runtime Pack transaction, e.g. to
 	// point the daemon at the installed runtime. Nil for default builds.
 	onPrepared func() error
+	// certify runs the installed-runtime inference smoke test after
+	// onPrepared; a valid result is reported as READY. Nil for default builds.
+	certify func() (*installer.RuntimeCertification, error)
+	// restore reconciles the transaction journal and re-verifies the
+	// installed pack on startup; see restoreInBackground.
+	restore       func(context.Context) (installer.FullEdgePreparationSnapshot, error)
+	restoring     atomic.Bool
+	certMu        sync.Mutex
+	certification *installer.RuntimeCertification
 }
 
 // NewApp creates a new desktop App instance backed by the Go installer facade.
@@ -71,16 +83,22 @@ func (a *App) GetVisionRuntimeStatus() (*installer.VisionRuntimeStatus, error) {
 // GetFullEdgePreparationStatus reads the opt-in offline Runtime Pack flow.
 // Unlike GetVisionRuntimeStatus, this never probes host Python or FFmpeg.
 func (a *App) GetFullEdgePreparationStatus() (installer.FullEdgePreparationSnapshot, error) {
+	if a.restoring.Load() {
+		return checkingSnapshot(), nil
+	}
 	snapshot, err := a.preparationAPI().Status(a.requestContext())
-	return validatedPreparationSnapshot(snapshot, err)
+	return validatedPreparationSnapshot(a.withCertification(snapshot, err), err)
 }
 
 // StartFullEdgePreparation starts the offline flow using an idempotency key.
 // The default adapter is intentionally unavailable until H3/H4/H6 are integrated.
 func (a *App) StartFullEdgePreparation(requestID string) (installer.FullEdgePreparationSnapshot, error) {
+	if a.restoring.Load() {
+		return checkingSnapshot(), structuredError(installer.ErrPreparationInProgress)
+	}
 	snapshot, err := a.preparationAPI().Start(a.requestContext(), requestID)
 	a.runOnPrepared(snapshot, err)
-	return validatedPreparationSnapshot(snapshot, err)
+	return validatedPreparationSnapshot(a.withCertification(snapshot, err), err)
 }
 
 func (a *App) CancelFullEdgePreparation(operationID string) (installer.FullEdgePreparationSnapshot, error) {
@@ -103,7 +121,62 @@ func (a *App) runOnPrepared(snapshot installer.FullEdgePreparationSnapshot, err 
 	}
 	if hookErr := a.onPrepared(); hookErr != nil {
 		fmt.Fprintln(os.Stderr, "[GEO-CAM Edge] installed runtime not wired to daemon:", hookErr)
+		return
 	}
+	if a.certify == nil || a.currentCertification() != nil {
+		return
+	}
+	cert, certErr := a.certify()
+	if certErr != nil {
+		fmt.Fprintln(os.Stderr, "[GEO-CAM Edge] installed runtime certification failed:", certErr)
+		return
+	}
+	a.certMu.Lock()
+	a.certification = cert
+	a.certMu.Unlock()
+}
+
+// restoreInBackground runs the startup reconciliation without blocking the
+// window, then re-wires the daemon (and certifies if needed) for an already
+// installed runtime.
+func (a *App) restoreInBackground() {
+	if a.restore == nil {
+		return
+	}
+	a.restoring.Store(true)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		snapshot, err := a.restore(ctx)
+		a.restoring.Store(false)
+		a.runOnPrepared(snapshot, err)
+	}()
+}
+
+// checkingSnapshot is reported while the startup reconciliation runs.
+func checkingSnapshot() installer.FullEdgePreparationSnapshot {
+	return installer.FullEdgePreparationSnapshot{
+		State: installer.StateChecking, ProgressPercent: 1,
+		Components: installer.DefaultComponentProgress(),
+	}
+}
+
+func (a *App) currentCertification() *installer.RuntimeCertification {
+	a.certMu.Lock()
+	defer a.certMu.Unlock()
+	return a.certification
+}
+
+// withCertification reports READY only for a committed, verified transaction
+// that also passed the installed-runtime inference certification.
+func (a *App) withCertification(snapshot installer.FullEdgePreparationSnapshot, err error) installer.FullEdgePreparationSnapshot {
+	cert := a.currentCertification()
+	if err != nil || cert == nil || !cert.Valid() || snapshot.Stage != "TRANSACTION_COMMITTED" {
+		return snapshot
+	}
+	ready := installer.CertifiedSnapshot(cert)
+	ready.OperationID = snapshot.OperationID
+	return ready
 }
 
 func validatedPreparationSnapshot(snapshot installer.FullEdgePreparationSnapshot, err error) (installer.FullEdgePreparationSnapshot, error) {

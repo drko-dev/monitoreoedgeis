@@ -43,10 +43,13 @@ func ConfigureDaemonForInstalledRuntime(dataDir, bundledModelsDir string) error 
 		return err
 	}
 	return config.WritePersistentValues(map[string]string{
-		"GEOCAM_EDGE_YOLO_WORKER_CMD":  python,
-		"GEOCAM_EDGE_YOLO_WORKER_ARGS": worker,
+		"GEOCAM_EDGE_YOLO_WORKER_CMD": python,
+		// -B: never write __pycache__ into the hash-verified installed tree,
+		// or the next startup verification rejects it as an unlisted file.
+		"GEOCAM_EDGE_YOLO_WORKER_ARGS": `-B "` + worker + `"`,
 		"GEOCAM_EDGE_YOLO_MODELS_DIR":  models,
 		"GEOCAM_VIDEO_FFMPEG_PATH":     ffmpeg,
+		"GEOCAM_EDGE_YOLO_DEVICE":      installedWorkerDevice(),
 	})
 }
 

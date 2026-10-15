@@ -37,7 +37,7 @@ func TestConfigureDaemonForInstalledRuntime(t *testing.T) {
 	}
 	want := map[string]string{
 		"GEOCAM_EDGE_YOLO_WORKER_CMD":  filepath.Join(root, "python", "bin", "python3.11"),
-		"GEOCAM_EDGE_YOLO_WORKER_ARGS": filepath.Join(root, "worker", "worker.py"),
+		"GEOCAM_EDGE_YOLO_WORKER_ARGS": `-B "` + filepath.Join(root, "worker", "worker.py") + `"`,
 		"GEOCAM_EDGE_YOLO_MODELS_DIR":  filepath.Join(dataDir, "models"),
 		"GEOCAM_VIDEO_FFMPEG_PATH":     filepath.Join(root, "ffmpeg", "ffmpeg"),
 	}

@@ -1,9 +1,6 @@
 package main
 
 import (
-	"context"
-	"time"
-
 	"github.com/drko-dev/monitoreoedgeis/internal/installer"
 )
 
@@ -27,13 +24,12 @@ func NewAppWithSignedRuntimePack(
 	if err != nil {
 		return nil, err
 	}
-	// The startup reconciliation is likewise cryptographically gated.
-	// Cooperative 15s cancellation is NOT a hard timeout for filesystem work.
-	recoveryCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	_, _ = adapter.RestoreFromTransaction(recoveryCtx)
-
+	// The startup reconciliation is likewise cryptographically gated. It
+	// re-hashes the whole installed pack (~20s for 1.1 GB), so it runs in the
+	// background via restoreInBackground once the caller has set its hooks;
+	// meanwhile Status reports CHECKING, never READY.
 	app := NewApp()
 	app.preparation = installer.NewWailsSafeFullEdgePreparationAPI(adapter)
+	app.restore = adapter.RestoreFromTransaction
 	return app, nil
 }
