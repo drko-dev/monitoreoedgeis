@@ -15,10 +15,11 @@ import (
 // for the real-client end-to-end check).
 func dialRaw(t *testing.T, addr string) net.Conn {
 	t.Helper()
-	conn, err := net.Dial("tcp", addr)
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn
 }

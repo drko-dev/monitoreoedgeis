@@ -688,3 +688,32 @@ func (s *SignedRuntimeManifest) SaveToFile(path string) error {
 
 	return os.Rename(tmpFile, cleanPath)
 }
+
+// LoadTrustStore parses a JSON array or single TrustAnchor from data and returns a MemoryTrustStore.
+func LoadTrustStore(data []byte) (*MemoryTrustStore, error) {
+	store := NewMemoryTrustStore()
+	var anchors []TrustAnchor
+	if err := json.Unmarshal(data, &anchors); err != nil {
+		var single TrustAnchor
+		if singleErr := json.Unmarshal(data, &single); singleErr != nil {
+			return nil, fmt.Errorf("parse trust anchors: %w", err)
+		}
+		anchors = []TrustAnchor{single}
+	}
+	for i := range anchors {
+		if err := store.AddAnchor(&anchors[i]); err != nil {
+			return nil, err
+		}
+	}
+	return store, nil
+}
+
+// LoadTrustStoreFromFile reads the file at path and returns a populated MemoryTrustStore.
+func LoadTrustStoreFromFile(path string) (*MemoryTrustStore, error) {
+	cleanPath := filepath.Clean(path)
+	data, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return nil, fmt.Errorf("read trust store file: %w", err)
+	}
+	return LoadTrustStore(data)
+}

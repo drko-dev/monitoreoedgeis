@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLaunchAgentPlistIsValidPersistentAndSecretFree(t *testing.T) {
@@ -99,16 +100,36 @@ func TestInstallReloadsAnAlreadyLoadedLaunchAgent(t *testing.T) {
 
 	originalRunner := launchctlRun
 	t.Cleanup(func() { launchctlRun = originalRunner })
+	originalSleep := sleep
+	sleep = func(time.Duration) {}
+	t.Cleanup(func() { sleep = originalSleep })
+
 	var calls []string
+	bootedOut := false
 	launchctlRun = func(args ...string) ([]byte, error) {
 		calls = append(calls, strings.Join(args, " "))
-		return nil, nil // launchctl print reports that the job is already loaded.
+		if args[0] == "bootout" {
+			bootedOut = true
+			return nil, nil
+		}
+		if args[0] == "print" {
+			if bootedOut {
+				return nil, errors.New("service not loaded")
+			}
+			return nil, nil // initial check reports that the job is already loaded.
+		}
+		return nil, nil
 	}
 
 	if err := installMacOSService(plistPath, "gui/501", "gui/501/"+macOSLabel, options); err != nil {
 		t.Fatalf("installMacOSService: %v", err)
 	}
-	if want := []string{"print gui/501/" + macOSLabel, "bootout gui/501/" + macOSLabel, "bootstrap gui/501 " + plistPath}; strings.Join(calls, "\n") != strings.Join(want, "\n") {
+	if want := []string{
+		"print gui/501/" + macOSLabel,
+		"bootout gui/501/" + macOSLabel,
+		"print gui/501/" + macOSLabel,
+		"bootstrap gui/501 " + plistPath,
+	}; strings.Join(calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("launchctl sequence=%v, want %v", calls, want)
 	}
 	updated, err := os.ReadFile(plistPath)
@@ -148,5 +169,257 @@ func TestInstallDoesNotBootstrapAnUnloadedLaunchAgent(t *testing.T) {
 	}
 	if len(calls) != 1 || calls[0] != "print gui/501/"+macOSLabel {
 		t.Fatalf("launchctl sequence=%v, want only the loaded-state query", calls)
+	}
+}
+
+// A retry must not stop a healthy service when its definition is unchanged.
+func TestInstallUnchangedLaunchAgentDoesNotReload(t *testing.T) {
+	root := t.TempDir()
+	options := macOSInstallFixture(t, root)
+	plist := filepath.Join(root, "agent.plist")
+	if err := writeMacOSPlist(plist, options); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := launchctlRun
+	t.Cleanup(func() { launchctlRun = original })
+	var calls []string
+	launchctlRun = func(args ...string) ([]byte, error) {
+		calls = append(calls, strings.Join(args, " "))
+		return nil, nil
+	}
+	if err := installMacOSService(plist, "gui/501", "gui/501/"+macOSLabel, options); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("unchanged plist was replaced")
+	}
+	if got, want := strings.Join(calls, ","), "print gui/501/"+macOSLabel; got != want {
+		t.Fatalf("expected only loaded-state query: got %q want %q", got, want)
+	}
+}
+
+func TestInstallUnchangedButUnloadedLaunchAgentDoesNotPretendRunning(t *testing.T) {
+	root := t.TempDir()
+	options := macOSInstallFixture(t, root)
+	plist := filepath.Join(root, "agent.plist")
+	if err := writeMacOSPlist(plist, options); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := launchctlRun
+	t.Cleanup(func() { launchctlRun = original })
+	var calls []string
+	launchctlRun = func(args ...string) ([]byte, error) {
+		calls = append(calls, strings.Join(args, " "))
+		return nil, errors.New("job not loaded")
+	}
+	if err := installMacOSService(plist, "gui/501", "gui/501/"+macOSLabel, options); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("unloaded unchanged plist rewritten")
+	}
+	if got, want := strings.Join(calls, ","), "print gui/501/"+macOSLabel; got != want {
+		t.Fatalf("install unexpectedly bootstrapped or unloaded job: %q", got)
+	}
+}
+
+func TestInstallWriteFailurePreservesLoadedLaunchAgent(t *testing.T) {
+	root := t.TempDir()
+	options := macOSInstallFixture(t, root)
+	// Deterministic write failure, including when tests run with elevated permissions.
+	if err := os.WriteFile(filepath.Join(options.DataDir, "logs"), []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	plist := filepath.Join(root, "agent.plist")
+	if err := os.WriteFile(plist, []byte("previous definition"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	original := launchctlRun
+	t.Cleanup(func() { launchctlRun = original })
+	launchctlRun = func(args ...string) ([]byte, error) {
+		if args[0] != "print" {
+			t.Errorf("write failure must not mutate launchd: %v", args)
+		}
+		return nil, nil
+	}
+	if err := installMacOSService(plist, "gui/501", "gui/501/"+macOSLabel, options); err == nil {
+		t.Fatal("expected write failure")
+	}
+	got, err := os.ReadFile(plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "previous definition" {
+		t.Fatal("previous definition lost")
+	}
+}
+
+func macOSInstallFixture(t *testing.T, root string) Options {
+	t.Helper()
+	data := filepath.Join(root, "data")
+	if err := os.MkdirAll(data, 0700); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(root, "edge.env")
+	for _, p := range []string{config, filepath.Join(data, "identity.json"), filepath.Join(data, "credentials.json")} {
+		if err := os.WriteFile(p, []byte("synthetic"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return Options{Executable: "/synthetic/geocam-edge", DataDir: data, ConfigFile: config}
+}
+
+func TestBootstrapWithRetrySucceedsAfterTransientEIO(t *testing.T) {
+	originalRunner := launchctlRun
+	t.Cleanup(func() { launchctlRun = originalRunner })
+	originalSleep := sleep
+	sleepCalls := 0
+	sleep = func(time.Duration) { sleepCalls++ }
+	t.Cleanup(func() { sleep = originalSleep })
+
+	attempts := 0
+	launchctlRun = func(args ...string) ([]byte, error) {
+		attempts++
+		if attempts == 1 {
+			return []byte("Bootstrap failed: 5: Input/output error"), errors.New("exit status 5")
+		}
+		return nil, nil
+	}
+
+	err := bootstrapWithRetry("gui/501", "/path/to/plist", 1*time.Second)
+	if err != nil {
+		t.Fatalf("bootstrapWithRetry failed: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+	if sleepCalls != 1 {
+		t.Fatalf("expected 1 sleep call, got %d", sleepCalls)
+	}
+}
+
+func TestBootstrapWithRetryFailsFastOnNonTransientError(t *testing.T) {
+	originalRunner := launchctlRun
+	t.Cleanup(func() { launchctlRun = originalRunner })
+	originalSleep := sleep
+	sleepCalls := 0
+	sleep = func(time.Duration) { sleepCalls++ }
+	t.Cleanup(func() { sleep = originalSleep })
+
+	attempts := 0
+	launchctlRun = func(args ...string) ([]byte, error) {
+		attempts++
+		return []byte("Bootstrap failed: 17: File exists"), errors.New("exit status 17")
+	}
+
+	err := bootstrapWithRetry("gui/501", "/path/to/plist", 1*time.Second)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "17: File exists") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected 1 attempt (fail fast), got %d", attempts)
+	}
+	if sleepCalls != 0 {
+		t.Fatalf("expected 0 sleep calls, got %d", sleepCalls)
+	}
+}
+
+func TestBootstrapWithRetryTimeout(t *testing.T) {
+	originalRunner := launchctlRun
+	t.Cleanup(func() { launchctlRun = originalRunner })
+	originalSleep := sleep
+	sleep = func(time.Duration) {
+		// Mock time passing to trigger deadline quickly
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Cleanup(func() { sleep = originalSleep })
+
+	launchctlRun = func(args ...string) ([]byte, error) {
+		return []byte("Bootstrap failed: 5: Input/output error"), errors.New("exit status 5")
+	}
+
+	err := bootstrapWithRetry("gui/501", "/path/to/plist", 25*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "Input/output error") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWaitForJobUnloadedTimeout(t *testing.T) {
+	originalRunner := launchctlRun
+	t.Cleanup(func() { launchctlRun = originalRunner })
+	originalSleep := sleep
+	sleep = func(time.Duration) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Cleanup(func() { sleep = originalSleep })
+
+	launchctlRun = func(args ...string) ([]byte, error) {
+		// Job never unloads
+		return nil, nil
+	}
+
+	err := waitForJobUnloaded("gui/501/"+macOSLabel, 25*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "timed out waiting for LaunchAgent") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestInstallUnchangedLaunchAgentWithWhitespaceMatches(t *testing.T) {
+	root := t.TempDir()
+	options := macOSInstallFixture(t, root)
+	plist := filepath.Join(root, "agent.plist")
+	if err := writeMacOSPlist(plist, options); err != nil {
+		t.Fatal(err)
+	}
+
+	// Append trailing whitespace/tabs to on-disk plist
+	content, err := os.ReadFile(plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plist, append(content, []byte("\n\t  \n")...), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	originalRunner := launchctlRun
+	t.Cleanup(func() { launchctlRun = originalRunner })
+	var calls []string
+	launchctlRun = func(args ...string) ([]byte, error) {
+		calls = append(calls, strings.Join(args, " "))
+		return nil, nil // Job is already loaded
+	}
+
+	if err := installMacOSService(plist, "gui/501", "gui/501/"+macOSLabel, options); err != nil {
+		t.Fatal(err)
+	}
+
+	// Should only do print query; must not rewrite or restart/reload
+	if got, want := strings.Join(calls, ","), "print gui/501/"+macOSLabel; got != want {
+		t.Fatalf("expected only loaded-state query: got %q want %q", got, want)
 	}
 }

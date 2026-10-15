@@ -3,6 +3,7 @@ package rtsptest
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -129,21 +130,27 @@ func (s *Simulator) CutStream() {
 
 // SendPacket pushes one RTP/AVP/TCP interleaved packet (channel 0) with the
 // given payload to the most recently accepted, currently playing
-// connection. It is a no-op if there is no playing connection.
+// connection.
 func (s *Simulator) SendPacket(payload []byte) error {
-	s.mu.Lock()
-	var target *simConn
-	for i := len(s.conns) - 1; i >= 0; i-- {
-		if s.conns[i].playing.Load() {
-			target = s.conns[i]
-			break
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		s.mu.Lock()
+		var target *simConn
+		for i := len(s.conns) - 1; i >= 0; i-- {
+			if s.conns[i].playing.Load() {
+				target = s.conns[i]
+				break
+			}
 		}
+		s.mu.Unlock()
+		if target != nil {
+			return writeInterleavedFrame(target, 0, payload)
+		}
+		if time.Now().After(deadline) {
+			return errors.New("no active playing connection found")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	s.mu.Unlock()
-	if target == nil {
-		return nil
-	}
-	return writeInterleavedFrame(target, 0, payload)
 }
 
 func writeInterleavedFrame(conn net.Conn, channel byte, payload []byte) error {
@@ -231,10 +238,10 @@ func (s *Simulator) handleConn(conn *simConn) {
 			_, _ = conn.Write([]byte(resp))
 
 		case "PLAY":
+			conn.playing.Store(true)
 			resp := fmt.Sprintf("RTSP/1.0 200 OK\r\nCSeq: %s\r\nSession: %s\r\nRange: npt=0.000-\r\n\r\n",
 				cseq, conn.sessionID)
 			_, _ = conn.Write([]byte(resp))
-			conn.playing.Store(true)
 
 			if s.autoPacketCount > 0 {
 				go s.sendAutoPackets(conn)
