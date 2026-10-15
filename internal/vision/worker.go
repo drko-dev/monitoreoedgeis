@@ -29,6 +29,12 @@ const (
 	StateError         = "error"
 )
 
+// ErrHermeticPackTrustRejected marks a failed *independent signed-pack*
+// verification. Unlike a transient worker crash, a rejected release must
+// stop its supervisor: restarting automatically after a later filesystem
+// mutation could change a trusted terminal denial into an implicit launch.
+var ErrHermeticPackTrustRejected = errors.New("hermetic installed runtime trust check rejected")
+
 // WorkerStatus is Worker's point-in-time /status snapshot (K4). Never
 // includes an RTSP URI, credential, or frame bytes — only counters and
 // state, matching every other Sink/pipeline status block in this repo.
@@ -100,9 +106,13 @@ type Config struct {
 	// Hermetic enables the Runtime Pack-only process contract. When true, the
 	// command, worker entrypoint, and media tools must resolve inside RuntimePackRoot;
 	// ProcessEnv replaces, rather than extends, the parent environment.
-	Hermetic            bool
-	RuntimePackRoot     string
-	ProcessEnv          []string
+	Hermetic        bool
+	RuntimePackRoot string
+	ProcessEnv      []string
+	// Optional independently authenticated installed-pack recheck called
+	// immediately before EVERY Worker subprocess spawn/restart. Lab fixtures
+	// may omit it; only release-owned signed contracts supply this callback.
+	PreSpawnVerify      func(context.Context) error
 	ModelPackAuthorized bool
 	ModelsDir           string
 	PersonModel         string
@@ -293,6 +303,15 @@ func (w *Worker) supervise(ctx context.Context) {
 		if err := w.spawnAndHandshake(ctx); err != nil {
 			w.setError(err)
 			w.setState(StateError)
+			if errors.Is(err, ErrHermeticPackTrustRejected) {
+				w.logger.Error("edge vision worker signed runtime trust rejected; supervisor stopped",
+					slog.Any("error", err))
+				// Signature/installed-byte mismatch requires a new explicit
+				// owner-owned start, not automatic retries after backoff.
+				// Leave StateError and LastError visible to health/reporting.
+				w.shutdownProcess()
+				return
+			}
 			w.logger.Warn("edge vision worker failed to start, backing off",
 				slog.Any("error", err), slog.Duration("backoff", backoff))
 			w.restarts.Add(1)
@@ -356,6 +375,16 @@ func (w *Worker) sleep(ctx context.Context, d time.Duration) bool {
 }
 
 func (w *Worker) spawnAndHandshake(ctx context.Context) error {
+	if w.cfg.Hermetic {
+		// Do not reuse the pack integrity decision made when Config was
+		// constructed or when Start was first called. This runs on every
+		// auto-restart too, and precedes even the socket directory mutation.
+		if w.cfg.PreSpawnVerify != nil {
+			if err := w.cfg.PreSpawnVerify(ctx); err != nil {
+				return fmt.Errorf("%w: %w", ErrHermeticPackTrustRejected, err)
+			}
+		}
+	}
 	if err := ensureSocketDir(w.cfg.SocketPath); err != nil {
 		return err
 	}
