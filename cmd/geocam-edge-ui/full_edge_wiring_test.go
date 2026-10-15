@@ -31,7 +31,8 @@ func TestWailsH6BExplicitWiringRemainsFailClosed(t *testing.T) {
 	}
 	app.startup(context.Background())
 	before, err := app.GetFullEdgePreparationStatus()
-	if err != nil || before.State != installer.StateFailed || before.CanStart || before.CertifiedReady() || before.ErrorCode != "ACTIVE_RUNTIME_NOT_VERIFIED" {
+	// A clean data dir is a first install: startable, never ready.
+	if err != nil || before.State != installer.StateNotPrepared || !before.CanStart || before.CertifiedReady() {
 		t.Fatalf("opt-in snapshot: %+v %v", before, err)
 	}
 	after, err := app.StartFullEdgePreparation("test-request")

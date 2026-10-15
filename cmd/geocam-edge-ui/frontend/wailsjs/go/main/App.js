@@ -14,12 +14,24 @@ export function CancelCameraOnboarding(arg1) {
   return window['go']['main']['App']['CancelCameraOnboarding'](arg1);
 }
 
+export function CancelFullEdgePreparation(arg1) {
+  return window['go']['main']['App']['CancelFullEdgePreparation'](arg1);
+}
+
 export function ClaimDevice(arg1) {
   return window['go']['main']['App']['ClaimDevice'](arg1);
 }
 
+export function CommissionDaemon() {
+  return window['go']['main']['App']['CommissionDaemon']();
+}
+
 export function DiscoverCameras() {
   return window['go']['main']['App']['DiscoverCameras']();
+}
+
+export function GetCommissioningStatus() {
+  return window['go']['main']['App']['GetCommissioningStatus']();
 }
 
 export function GetCurrentProcessingMode() {
@@ -28,6 +40,18 @@ export function GetCurrentProcessingMode() {
 
 export function GetDiscoveredCamera(arg1) {
   return window['go']['main']['App']['GetDiscoveredCamera'](arg1);
+}
+
+export function GetFFmpegStatus() {
+  return window['go']['main']['App']['GetFFmpegStatus']();
+}
+
+export function GetFullEdgePreparationDiagnostic(arg1) {
+  return window['go']['main']['App']['GetFullEdgePreparationDiagnostic'](arg1);
+}
+
+export function GetFullEdgePreparationStatus() {
+  return window['go']['main']['App']['GetFullEdgePreparationStatus']();
 }
 
 export function GetInstallerState() {
@@ -42,56 +66,20 @@ export function GetSaaSURL() {
   return window['go']['main']['App']['GetSaaSURL']();
 }
 
-export function GetFFmpegStatus() {
-  return window['go']['main']['App']['GetFFmpegStatus']();
-}
-
-export function GetFullEdgePreparationStatus() {
-  return window['go']['main']['App']['GetFullEdgePreparationStatus']();
-}
-
-export function StartFullEdgePreparation(arg1) {
-  return window['go']['main']['App']['StartFullEdgePreparation'](arg1);
-}
-
-export function CancelFullEdgePreparation(arg1) {
-  return window['go']['main']['App']['CancelFullEdgePreparation'](arg1);
-}
-
-export function GetFullEdgePreparationDiagnostic(arg1) {
-  return window['go']['main']['App']['GetFullEdgePreparationDiagnostic'](arg1);
-}
-
-export function RecoverFullEdgeRuntime(arg1) {
-  return window['go']['main']['App']['RecoverFullEdgeRuntime'](arg1);
-}
-
-export function InstallFFmpeg() {
-  return window['go']['main']['App']['InstallFFmpeg']();
+export function GetSystemReport() {
+  return window['go']['main']['App']['GetSystemReport']();
 }
 
 export function GetVisionRuntimeStatus() {
   return window['go']['main']['App']['GetVisionRuntimeStatus']();
 }
 
-export function PrepareVisionRuntime() {
-  return window['go']['main']['App']['PrepareVisionRuntime']();
-}
-
 export function ImportModel(arg1, arg2) {
   return window['go']['main']['App']['ImportModel'](arg1, arg2);
 }
 
-export function SelectAndImportModel(arg1) {
-  return window['go']['main']['App']['SelectAndImportModel'](arg1);
-}
-
-export function TestSaaSConnection(arg1) {
-  return window['go']['main']['App']['TestSaaSConnection'](arg1);
-}
-
-export function GetSystemReport() {
-  return window['go']['main']['App']['GetSystemReport']();
+export function InstallFFmpeg() {
+  return window['go']['main']['App']['InstallFFmpeg']();
 }
 
 export function PlanCameraOnboarding(arg1) {
@@ -102,19 +90,30 @@ export function PlanProcessingMode(arg1) {
   return window['go']['main']['App']['PlanProcessingMode'](arg1);
 }
 
+export function PrepareVisionRuntime() {
+  return window['go']['main']['App']['PrepareVisionRuntime']();
+}
+
+export function RecoverFullEdgeRuntime(arg1) {
+  return window['go']['main']['App']['RecoverFullEdgeRuntime'](arg1);
+}
+
+export function SelectAndImportModel(arg1) {
+  return window['go']['main']['App']['SelectAndImportModel'](arg1);
+}
+
+export function StartFullEdgePreparation(arg1) {
+  return window['go']['main']['App']['StartFullEdgePreparation'](arg1);
+}
+
 export function TestCameraCredentials(arg1) {
   return window['go']['main']['App']['TestCameraCredentials'](arg1);
+}
+
+export function TestSaaSConnection(arg1) {
+  return window['go']['main']['App']['TestSaaSConnection'](arg1);
 }
 
 export function ValidateProcessingMode(arg1) {
   return window['go']['main']['App']['ValidateProcessingMode'](arg1);
 }
-
-export function GetCommissioningStatus() {
-  return window['go']['main']['App']['GetCommissioningStatus']();
-}
-
-export function CommissionDaemon() {
-  return window['go']['main']['App']['CommissionDaemon']();
-}
-

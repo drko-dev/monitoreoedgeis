@@ -90,6 +90,15 @@ type DependencySpec struct {
 	SizeBytes    int64  `json:"size_bytes"`
 }
 
+// FileSpec declares any other regular file of the pack (e.g. the Python
+// standard library and installed site-packages) so it is hash-pinned and
+// allow-listed like every other artifact.
+type FileSpec struct {
+	RelativePath string `json:"relative_path"`
+	SHA256       string `json:"sha256"`
+	SizeBytes    int64  `json:"size_bytes"`
+}
+
 // CompatibilitySpec specifies version compatibility constraints.
 type CompatibilitySpec struct {
 	EdgeMinVersion       string `json:"edge_min_version"`
@@ -119,6 +128,7 @@ type RuntimeManifest struct {
 	Worker         WorkerSpec        `json:"worker"`
 	Binaries       []BinarySpec      `json:"binaries"`
 	Dependencies   []DependencySpec  `json:"dependencies"`
+	Files          []FileSpec        `json:"files,omitempty"`
 	Compatibility  CompatibilitySpec `json:"compatibility"`
 }
 
@@ -597,6 +607,34 @@ func (m *RuntimeManifest) ValidateSchema() error {
 		}
 	}
 
+	for i, f := range m.Files {
+		field := fmt.Sprintf("files[%d]", i)
+		if err := validateRelativePath(f.RelativePath, field+".relative_path"); err != nil {
+			return err
+		}
+		canon := canonicalizeManifestPath(f.RelativePath)
+		if prev, exists := seenAllArtifactPaths[canon]; exists {
+			return &SafeError{
+				Code:        "DUPLICATE_ARTIFACT_PATH",
+				SafeMessage: fmt.Sprintf("%v: %s (%q) colisiona con %s", ErrManifestSchemaInvalid, field, f.RelativePath, prev),
+				Recoverable: false,
+				Err:         ErrManifestSchemaInvalid,
+			}
+		}
+		seenAllArtifactPaths[canon] = field
+		if err := validateSHA256(f.SHA256, field+".sha256"); err != nil {
+			return err
+		}
+		if f.SizeBytes < 0 {
+			return &SafeError{
+				Code:        "INVALID_SIZE",
+				SafeMessage: fmt.Sprintf("%v: %s.size_bytes no puede ser negativo", ErrManifestSchemaInvalid, field),
+				Recoverable: false,
+				Err:         ErrManifestSchemaInvalid,
+			}
+		}
+	}
+
 	// Compatibility spec
 	if strings.TrimSpace(m.Compatibility.EdgeMinVersion) == "" {
 		return &SafeError{
@@ -689,6 +727,14 @@ func (m *RuntimeManifest) allArtifacts() []artifactTarget {
 			RelativePath: d.RelativePath,
 			ExpectedHash: d.SHA256,
 			ExpectedSize: d.SizeBytes,
+		})
+	}
+
+	for _, f := range m.Files {
+		targets = append(targets, artifactTarget{
+			RelativePath: f.RelativePath,
+			ExpectedHash: f.SHA256,
+			ExpectedSize: f.SizeBytes,
 		})
 	}
 

@@ -30,6 +30,10 @@ For an independently approved release owner only, the build configuration format
 
 These are **only public fingerprints**, never private signing keys. The release operator must supply a real signed manifest and a matching public key from a trusted external source.
 
+## One-click owner/lab build (H5)
+
+`deploy/installer/build-full-edge-oneclick-app.sh <pack> <models> <out> <key> <version>` signs the pack with `cmd/runtime-pack-sign` (Ed25519 seed kept outside the repo), embeds the three public pins plus `-X main.releaseOfflineProvisioning=1`, and places `RuntimePack/`, `runtime-manifest.signed.json`, `trust-anchors.json` and `Models/` in `Contents/Resources`. The build-time flag only replaces the environment opt-in; every trust check above still applies. Only the outer bundle and `MacOS/geocam-edge` are ad-hoc signed, because `codesign --deep` would rewrite hash-pinned Mach-O files inside the pack.
+
 ## LaunchAgent behavior
 
 The macOS service installer now writes plist bytes atomically **before** disrupting a loaded job, normalizes whitespace during plist comparison, and skips needless `bootout/bootstrap` when configuration is identical. When an existing job is loaded and an update or restart is performed, `serviceCommand` and `installMacOSService` wait for launchd to complete asynchronous job unload before re-bootstrapping, and retry `launchctl bootstrap` with backoff when encountering transient launchd error 5 (`Bootstrap failed: 5: Input/output error`). An unchanged plist still triggers a non-mutating `launchctl print` query; when the job is not loaded, it explicitly instructs the operator to use `geocam-edge service start`, rather than claiming it is running or unexpectedly starting it on install.

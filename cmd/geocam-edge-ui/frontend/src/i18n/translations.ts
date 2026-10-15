@@ -201,7 +201,7 @@ export const es = {
 
   // Offline Full Edge preparation (H5A contract; executor not integrated yet)
   'preparation.title': 'Preparar Full Edge sin conexión',
-  'preparation.description': 'Verificá y prepará el Runtime Pack incluido. Esta versión todavía no integra el preparador hermético.',
+  'preparation.description': 'Verificá e instalá el Runtime Pack incluido, sin conexión a internet.',
   'preparation.checking': 'Consultando el estado de preparación…',
   'preparation.certified': 'Runtime certificado por el backend',
   'preparation.currentStage': 'Etapa actual: {{stage}}',
@@ -223,6 +223,7 @@ export const es = {
   'preparation.errorLicense': 'La autorización de distribución del modelo está pendiente.',
   'preparation.errorModelUnauthorized': 'El modelo incluido no está autorizado.',
   'preparation.errorGeneric': 'No se pudo completar la preparación. Consultá el diagnóstico técnico.',
+  'preparation.runtimeInstalledUncertified': 'Runtime instalado y verificado sin conexión. Falta la certificación de inferencia (modelo autorizado y prueba funcional).',
   'preparation.recoveryPending': 'Hay una recuperación pendiente del runtime anterior.',
   'preparation.cancelled': 'Preparación cancelada. El runtime anterior se conserva.',
   'preparation.state.loading': 'Consultando estado',
@@ -249,6 +250,7 @@ export const es = {
   'preparation.state.READY': 'Listo',
   'preparation.state.RECOVERY_REQUIRED': 'Recuperación requerida',
   'preparation.state.FAILED': 'Fallo',
+  'preparation.state.installedUncertified': 'Instalado (sin certificar)',
   'preparation.state.CANCELLED': 'Cancelada',
   'preparation.componentsTitle': 'Componentes del Runtime Pack',
   'preparation.component.python': 'Python 3.11 Standalone',
@@ -522,7 +524,7 @@ export const en = {
 
   // Offline Full Edge preparation (H5A contract; executor not integrated yet)
   'preparation.title': 'Prepare Full Edge offline',
-  'preparation.description': 'Verify and prepare the included Runtime Pack. The hermetic preparation executor is not integrated in this build yet.',
+  'preparation.description': 'Verify and install the included Runtime Pack, with no internet connection.',
   'preparation.checking': 'Checking preparation status…',
   'preparation.certified': 'Runtime certified by backend',
   'preparation.currentStage': 'Current stage: {{stage}}',
@@ -544,6 +546,7 @@ export const en = {
   'preparation.errorLicense': 'Model redistribution authorization is pending.',
   'preparation.errorModelUnauthorized': 'The included model is not authorized.',
   'preparation.errorGeneric': 'Preparation could not complete. Check the technical diagnostics.',
+  'preparation.runtimeInstalledUncertified': 'Runtime installed and verified offline. Inference certification (authorized model and functional test) is still pending.',
   'preparation.recoveryPending': 'Recovery of the previous runtime is pending.',
   'preparation.cancelled': 'Preparation cancelled. The previous runtime is preserved.',
   'preparation.state.loading': 'Checking status',
@@ -570,6 +573,7 @@ export const en = {
   'preparation.state.READY': 'Ready',
   'preparation.state.RECOVERY_REQUIRED': 'Recovery required',
   'preparation.state.FAILED': 'Failed',
+  'preparation.state.installedUncertified': 'Installed (uncertified)',
   'preparation.state.CANCELLED': 'Cancelled',
   'preparation.componentsTitle': 'Runtime Pack Components',
   'preparation.component.python': 'Python 3.11 Standalone',

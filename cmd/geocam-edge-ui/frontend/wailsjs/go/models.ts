@@ -182,6 +182,101 @@ export namespace installer {
 	        this.edge_id = source["edge_id"];
 	    }
 	}
+	export class CommissioningStatus {
+	    daemon_installed: boolean;
+	    service_registered: boolean;
+	    daemon_running: boolean;
+	    healthz_ok: boolean;
+	    readyz_ok: boolean;
+	    operational_state: string;
+	    operational_ok: boolean;
+	    saas_sync_ok: boolean;
+	    heartbeat_state: string;
+	    processing_mode: string;
+	    effective_profile: string;
+	    vision_worker_ready: boolean;
+	    camera_count: number;
+	    overall_ready: boolean;
+	    safe_message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CommissioningStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.daemon_installed = source["daemon_installed"];
+	        this.service_registered = source["service_registered"];
+	        this.daemon_running = source["daemon_running"];
+	        this.healthz_ok = source["healthz_ok"];
+	        this.readyz_ok = source["readyz_ok"];
+	        this.operational_state = source["operational_state"];
+	        this.operational_ok = source["operational_ok"];
+	        this.saas_sync_ok = source["saas_sync_ok"];
+	        this.heartbeat_state = source["heartbeat_state"];
+	        this.processing_mode = source["processing_mode"];
+	        this.effective_profile = source["effective_profile"];
+	        this.vision_worker_ready = source["vision_worker_ready"];
+	        this.camera_count = source["camera_count"];
+	        this.overall_ready = source["overall_ready"];
+	        this.safe_message = source["safe_message"];
+	    }
+	}
+	export class CommissionResult {
+	    outcome: string;
+	    status?: CommissioningStatus;
+	    safe_message: string;
+	    details?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new CommissionResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.outcome = source["outcome"];
+	        this.status = this.convertValues(source["status"], CommissioningStatus);
+	        this.safe_message = source["safe_message"];
+	        this.details = source["details"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class ComponentProgressItem {
+	    key: string;
+	    name: string;
+	    status: string;
+	    detail?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ComponentProgressItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.key = source["key"];
+	        this.name = source["name"];
+	        this.status = source["status"];
+	        this.detail = source["detail"];
+	    }
+	}
 	export class CurrentProcessingMode {
 	    mode: string;
 	    pipeline_enabled: boolean;
@@ -200,6 +295,36 @@ export namespace installer {
 	        this.source = source["source"];
 	    }
 	}
+	export class DependencyStatus {
+	    ffmpeg_found: boolean;
+	    ffmpeg_path: string;
+	    ffmpeg_version: string;
+	    ffprobe_found: boolean;
+	    ffprobe_path: string;
+	    ready: boolean;
+	    source: string;
+	    install_supported: boolean;
+	    install_method: string;
+	    message?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DependencyStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ffmpeg_found = source["ffmpeg_found"];
+	        this.ffmpeg_path = source["ffmpeg_path"];
+	        this.ffmpeg_version = source["ffmpeg_version"];
+	        this.ffprobe_found = source["ffprobe_found"];
+	        this.ffprobe_path = source["ffprobe_path"];
+	        this.ready = source["ready"];
+	        this.source = source["source"];
+	        this.install_supported = source["install_supported"];
+	        this.install_method = source["install_method"];
+	        this.message = source["message"];
+	    }
+	}
 	export class OnboardingCandidate {
 	    candidate_key: string;
 	    host: string;
@@ -211,6 +336,8 @@ export namespace installer {
 	    channel_label?: string;
 	    channel_index?: number;
 	    channel_count?: number;
+	    channel_number?: number;
+	    channel_availability?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new OnboardingCandidate(source);
@@ -228,6 +355,8 @@ export namespace installer {
 	        this.channel_label = source["channel_label"];
 	        this.channel_index = source["channel_index"];
 	        this.channel_count = source["channel_count"];
+	        this.channel_number = source["channel_number"];
+	        this.channel_availability = source["channel_availability"];
 	    }
 	}
 	export class DiscoverCamerasResult {
@@ -242,6 +371,171 @@ export namespace installer {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.candidates = this.convertValues(source["candidates"], OnboardingCandidate);
 	        this.duration_ms = source["duration_ms"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class PreparationCheckResult {
+	    name: string;
+	    status: string;
+	    detail?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PreparationCheckResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.status = source["status"];
+	        this.detail = source["detail"];
+	    }
+	}
+	export class FullEdgePreparationDiagnostic {
+	    code: string;
+	    summary: string;
+	    checks?: PreparationCheckResult[];
+	
+	    static createFrom(source: any = {}) {
+	        return new FullEdgePreparationDiagnostic(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.code = source["code"];
+	        this.summary = source["summary"];
+	        this.checks = this.convertValues(source["checks"], PreparationCheckResult);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class RuntimeCertification {
+	    certification_id: string;
+	    runtime_pack_version: string;
+	    runtime_manifest_sha256: string;
+	    platform: string;
+	    evidence_level: string;
+	    runtime_pack_verified: boolean;
+	    dependencies_verified: boolean;
+	    vision_worker_ready: boolean;
+	    ffmpeg_verified: boolean;
+	    ffprobe_verified: boolean;
+	    model_pack_version: string;
+	    model_manifest_sha256: string;
+	    model_authorized: boolean;
+	    model_integrity_verified: boolean;
+	    inference_smoke_test_passed: boolean;
+	    // Go type: time
+	    certified_at: any;
+	
+	    static createFrom(source: any = {}) {
+	        return new RuntimeCertification(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.certification_id = source["certification_id"];
+	        this.runtime_pack_version = source["runtime_pack_version"];
+	        this.runtime_manifest_sha256 = source["runtime_manifest_sha256"];
+	        this.platform = source["platform"];
+	        this.evidence_level = source["evidence_level"];
+	        this.runtime_pack_verified = source["runtime_pack_verified"];
+	        this.dependencies_verified = source["dependencies_verified"];
+	        this.vision_worker_ready = source["vision_worker_ready"];
+	        this.ffmpeg_verified = source["ffmpeg_verified"];
+	        this.ffprobe_verified = source["ffprobe_verified"];
+	        this.model_pack_version = source["model_pack_version"];
+	        this.model_manifest_sha256 = source["model_manifest_sha256"];
+	        this.model_authorized = source["model_authorized"];
+	        this.model_integrity_verified = source["model_integrity_verified"];
+	        this.inference_smoke_test_passed = source["inference_smoke_test_passed"];
+	        this.certified_at = this.convertValues(source["certified_at"], null);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class FullEdgePreparationSnapshot {
+	    state: string;
+	    stage?: string;
+	    progress_percent: number;
+	    operation_id?: string;
+	    can_start: boolean;
+	    retryable: boolean;
+	    cancellation_allowed: boolean;
+	    recovery_available: boolean;
+	    error_code?: string;
+	    safe_message?: string;
+	    diagnostics_available: boolean;
+	    components?: ComponentProgressItem[];
+	    certification?: RuntimeCertification;
+	
+	    static createFrom(source: any = {}) {
+	        return new FullEdgePreparationSnapshot(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.state = source["state"];
+	        this.stage = source["stage"];
+	        this.progress_percent = source["progress_percent"];
+	        this.operation_id = source["operation_id"];
+	        this.can_start = source["can_start"];
+	        this.retryable = source["retryable"];
+	        this.cancellation_allowed = source["cancellation_allowed"];
+	        this.recovery_available = source["recovery_available"];
+	        this.error_code = source["error_code"];
+	        this.safe_message = source["safe_message"];
+	        this.diagnostics_available = source["diagnostics_available"];
+	        this.components = this.convertValues(source["components"], ComponentProgressItem);
+	        this.certification = this.convertValues(source["certification"], RuntimeCertification);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -284,6 +578,7 @@ export namespace installer {
 	        this.device_id = source["device_id"];
 	    }
 	}
+	
 	
 	export class ProcessingModeApplyResult {
 	    requested_product_mode: string;
@@ -390,6 +685,25 @@ export namespace installer {
 	    }
 	}
 	
+	export class ServerCheckResult {
+	    accessible: boolean;
+	    status: string;
+	    message: string;
+	    http_status?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ServerCheckResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.accessible = source["accessible"];
+	        this.status = source["status"];
+	        this.message = source["message"];
+	        this.http_status = source["http_status"];
+	    }
+	}
+	
 	export class SystemReport {
 	    os: string;
 	    arch: string;
@@ -412,6 +726,9 @@ export namespace installer {
 	    free_disk_gb: number;
 	    ffmpeg_present: boolean;
 	    ffprobe_path?: string;
+	    ffmpeg_path?: string;
+	    ffmpeg_version?: string;
+	    ffmpeg_source?: string;
 	    has_gpu_support: boolean;
 	    gpu_info?: string;
 	
@@ -442,6 +759,9 @@ export namespace installer {
 	        this.free_disk_gb = source["free_disk_gb"];
 	        this.ffmpeg_present = source["ffmpeg_present"];
 	        this.ffprobe_path = source["ffprobe_path"];
+	        this.ffmpeg_path = source["ffmpeg_path"];
+	        this.ffmpeg_version = source["ffmpeg_version"];
+	        this.ffmpeg_source = source["ffmpeg_source"];
 	        this.has_gpu_support = source["has_gpu_support"];
 	        this.gpu_info = source["gpu_info"];
 	    }
@@ -481,14 +801,17 @@ export namespace installer {
 	    person_model_found: boolean;
 	    vehicle_model_found: boolean;
 	    missing_models?: string[];
+	    corrupted_models?: string[];
+	    model_states?: Record<string, string>;
 	    ready: boolean;
 	    can_provision: boolean;
+	    stage?: string;
 	    message?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new VisionRuntimeStatus(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.python_found = source["python_found"];
@@ -509,168 +832,12 @@ export namespace installer {
 	        this.person_model_found = source["person_model_found"];
 	        this.vehicle_model_found = source["vehicle_model_found"];
 	        this.missing_models = source["missing_models"];
+	        this.corrupted_models = source["corrupted_models"];
+	        this.model_states = source["model_states"];
 	        this.ready = source["ready"];
 	        this.can_provision = source["can_provision"];
-	        this.message = source["message"];
-	    }
-	}
-
-	export class RuntimeCertification {
-	    certification_id: string;
-	    runtime_pack_version: string;
-	    runtime_manifest_sha256: string;
-	    platform: string;
-	    evidence_level: string;
-	    runtime_pack_verified: boolean;
-	    dependencies_verified: boolean;
-	    vision_worker_ready: boolean;
-	    ffmpeg_verified: boolean;
-	    ffprobe_verified: boolean;
-	    model_pack_version: string;
-	    model_manifest_sha256: string;
-	    model_authorized: boolean;
-	    model_integrity_verified: boolean;
-	    inference_smoke_test_passed: boolean;
-	    certified_at: string;
-
-	    static createFrom(source: any = {}) {
-	        return new RuntimeCertification(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.certification_id = source["certification_id"];
-	        this.runtime_pack_version = source["runtime_pack_version"];
-	        this.runtime_manifest_sha256 = source["runtime_manifest_sha256"];
-	        this.platform = source["platform"];
-	        this.evidence_level = source["evidence_level"];
-	        this.runtime_pack_verified = source["runtime_pack_verified"];
-	        this.dependencies_verified = source["dependencies_verified"];
-	        this.vision_worker_ready = source["vision_worker_ready"];
-	        this.ffmpeg_verified = source["ffmpeg_verified"];
-	        this.ffprobe_verified = source["ffprobe_verified"];
-	        this.model_pack_version = source["model_pack_version"];
-	        this.model_manifest_sha256 = source["model_manifest_sha256"];
-	        this.model_authorized = source["model_authorized"];
-	        this.model_integrity_verified = source["model_integrity_verified"];
-	        this.inference_smoke_test_passed = source["inference_smoke_test_passed"];
-	        this.certified_at = source["certified_at"];
-	    }
-	}
-
-	export class ComponentProgressItem {
-	    key: string;
-	    name: string;
-	    status: string;
-	    detail?: string;
-
-	    static createFrom(source: any = {}) {
-	        return new ComponentProgressItem(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.key = source["key"];
-	        this.name = source["name"];
-	        this.status = source["status"];
-	        this.detail = source["detail"];
-	    }
-	}
-
-	export class FullEdgePreparationSnapshot {
-	    state: string;
-	    stage: string;
-	    progress_percent: number;
-	    operation_id: string;
-	    can_start: boolean;
-	    retryable: boolean;
-	    cancellation_allowed: boolean;
-	    recovery_available: boolean;
-	    error_code: string;
-	    safe_message: string;
-	    diagnostics_available: boolean;
-	    components?: ComponentProgressItem[];
-	    certification?: RuntimeCertification;
-
-	    static createFrom(source: any = {}) {
-	        return new FullEdgePreparationSnapshot(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.state = source["state"];
 	        this.stage = source["stage"];
-	        this.progress_percent = source["progress_percent"];
-	        this.operation_id = source["operation_id"];
-	        this.can_start = source["can_start"];
-	        this.retryable = source["retryable"];
-	        this.cancellation_allowed = source["cancellation_allowed"];
-	        this.recovery_available = source["recovery_available"];
-	        this.error_code = source["error_code"];
-	        this.safe_message = source["safe_message"];
-	        this.diagnostics_available = source["diagnostics_available"];
-	        this.components = this.convertValues(source["components"], ComponentProgressItem);
-	        this.certification = this.convertValues(source["certification"], RuntimeCertification);
-	    }
-
-	    private convertValues(a: any, classs: any, asMap: boolean = false): any {
-	        if (!a) return a;
-	        if (a.slice) return (a as any[]).map(elem => this.convertValues(elem, classs));
-	        if ("object" === typeof a) {
-	            if (asMap) {
-	                for (const key of Object.keys(a)) a[key] = new classs(a[key]);
-	                return a;
-	            }
-	            return new classs(a);
-	        }
-	        return a;
-	    }
-	}
-
-	export class PreparationCheckResult {
-	    name: string;
-	    status: string;
-	    detail: string;
-
-	    static createFrom(source: any = {}) {
-	        return new PreparationCheckResult(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.name = source["name"];
-	        this.status = source["status"];
-	        this.detail = source["detail"];
-	    }
-	}
-
-	export class FullEdgePreparationDiagnostic {
-	    code: string;
-	    summary: string;
-	    checks?: PreparationCheckResult[];
-
-	    static createFrom(source: any = {}) {
-	        return new FullEdgePreparationDiagnostic(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.code = source["code"];
-	        this.summary = source["summary"];
-	        this.checks = this.convertValues(source["checks"], PreparationCheckResult);
-	    }
-
-	    private convertValues(a: any, classs: any, asMap: boolean = false): any {
-	        if (!a) return a;
-	        if (a.slice) return (a as any[]).map(elem => this.convertValues(elem, classs));
-	        if ("object" === typeof a) {
-	            if (asMap) {
-	                for (const key of Object.keys(a)) a[key] = new classs(a[key]);
-	                return a;
-	            }
-	            return new classs(a);
-	        }
-	        return a;
+	        this.message = source["message"];
 	    }
 	}
 

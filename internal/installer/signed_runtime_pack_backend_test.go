@@ -295,7 +295,7 @@ func TestSignedPackGateExpiredSignatureFailsClosed(t *testing.T) {
 
 func TestSignedPackGateRejectsOversizedManifest(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "runtime-manifest.json")
-	if err := os.WriteFile(path, []byte(strings.Repeat("a", (4<<20)+1)), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(strings.Repeat("a", (32<<20)+1)), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readLimitedSignedManifest(path); err == nil {

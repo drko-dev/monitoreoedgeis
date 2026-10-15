@@ -8,13 +8,25 @@ export function ApplyProcessingMode(arg1:installer.ProcessingModeRequest):Promis
 
 export function CancelCameraOnboarding(arg1:number):Promise<void>;
 
+export function CancelFullEdgePreparation(arg1:string):Promise<installer.FullEdgePreparationSnapshot>;
+
 export function ClaimDevice(arg1:installer.ClaimRequest):Promise<installer.ClaimResult>;
 
+export function CommissionDaemon():Promise<installer.CommissionResult>;
+
 export function DiscoverCameras():Promise<installer.DiscoverCamerasResult>;
+
+export function GetCommissioningStatus():Promise<installer.CommissioningStatus>;
 
 export function GetCurrentProcessingMode():Promise<installer.CurrentProcessingMode>;
 
 export function GetDiscoveredCamera(arg1:string):Promise<installer.OnboardingCandidate>;
+
+export function GetFFmpegStatus():Promise<installer.DependencyStatus>;
+
+export function GetFullEdgePreparationDiagnostic(arg1:string):Promise<installer.FullEdgePreparationDiagnostic>;
+
+export function GetFullEdgePreparationStatus():Promise<installer.FullEdgePreparationSnapshot>;
 
 export function GetInstallerState():Promise<installer.InstallerState>;
 
@@ -22,40 +34,28 @@ export function GetProcessingModeOptions():Promise<Array<installer.ProcessingMod
 
 export function GetSaaSURL():Promise<string>;
 
-export function GetFFmpegStatus():Promise<installer.DependencyStatus>;
-
-export function GetFullEdgePreparationStatus():Promise<installer.FullEdgePreparationSnapshot>;
-
-export function StartFullEdgePreparation(arg1:string):Promise<installer.FullEdgePreparationSnapshot>;
-
-export function CancelFullEdgePreparation(arg1:string):Promise<installer.FullEdgePreparationSnapshot>;
-
-export function GetFullEdgePreparationDiagnostic(arg1:string):Promise<installer.FullEdgePreparationDiagnostic>;
-
-export function RecoverFullEdgeRuntime(arg1:string):Promise<installer.FullEdgePreparationSnapshot>;
-
-export function InstallFFmpeg():Promise<installer.DependencyStatus>;
+export function GetSystemReport():Promise<installer.SystemReport>;
 
 export function GetVisionRuntimeStatus():Promise<installer.VisionRuntimeStatus>;
 
-export function PrepareVisionRuntime():Promise<installer.VisionRuntimeStatus>;
+export function ImportModel(arg1:string,arg2:string):Promise<installer.VisionRuntimeStatus>;
 
-export function ImportModel(arg1:string, arg2:string):Promise<installer.VisionRuntimeStatus>;
-
-export function SelectAndImportModel(arg1:string):Promise<installer.VisionRuntimeStatus>;
-
-export function TestSaaSConnection(arg1:string):Promise<installer.ServerCheckResult>;
-
-export function GetSystemReport():Promise<installer.SystemReport>;
+export function InstallFFmpeg():Promise<installer.DependencyStatus>;
 
 export function PlanCameraOnboarding(arg1:installer.CameraOnboardingRequest):Promise<installer.CameraOnboardingPlan>;
 
 export function PlanProcessingMode(arg1:installer.ProcessingModeRequest):Promise<installer.ProcessingModePlan>;
 
+export function PrepareVisionRuntime():Promise<installer.VisionRuntimeStatus>;
+
+export function RecoverFullEdgeRuntime(arg1:string):Promise<installer.FullEdgePreparationSnapshot>;
+
+export function SelectAndImportModel(arg1:string):Promise<installer.VisionRuntimeStatus>;
+
+export function StartFullEdgePreparation(arg1:string):Promise<installer.FullEdgePreparationSnapshot>;
+
 export function TestCameraCredentials(arg1:installer.TestCameraCredentialsRequest):Promise<installer.CameraValidationResult>;
 
+export function TestSaaSConnection(arg1:string):Promise<installer.ServerCheckResult>;
+
 export function ValidateProcessingMode(arg1:installer.ProcessingModeRequest):Promise<installer.ProcessingModeOption>;
-
-export function GetCommissioningStatus():Promise<installer.CommissioningStatus>;
-
-export function CommissionDaemon():Promise<installer.CommissionResult>;

@@ -198,7 +198,8 @@ func loadPinnedRuntimeManifestBytes(path, expectedDigest string) ([]byte, error)
 
 // readLimitedSignedManifest provides a bounded, non-symlink input read.
 func readLimitedSignedManifest(path string) ([]byte, error) {
-	const maxBytes = 4 << 20
+	// A full Python/Torch pack declares ~20k files (~8 MiB of JSON).
+	const maxBytes = 32 << 20
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err

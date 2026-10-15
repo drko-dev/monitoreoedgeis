@@ -106,6 +106,7 @@ export function preparationErrorKey(errorCode?: string): TranslationKey {
     case 'LICENSE_NOT_APPROVED': return 'preparation.errorLicense';
     case 'MODEL_UNAUTHORIZED': return 'preparation.errorModelUnauthorized';
     case 'PREPARATION_NOT_INTEGRATED': return 'preparation.notIntegrated';
+    case 'RUNTIME_UNCERTIFIED': return 'preparation.runtimeInstalledUncertified';
     case 'RECOVERY_PENDING': return 'preparation.recoveryPending';
     case 'CANCELLED': return 'preparation.cancelled';
     default: return 'preparation.errorGeneric';
